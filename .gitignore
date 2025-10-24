@@ -205,3 +205,26 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# ORCA stuff 
+*gbw 
+*.tmp*
+*.chk
+*.out
+*.trj
+*.inp
+*.log
+*logs
+*.bas*
+*.xyz
+*.hostnames
+*.carthess
+*.opt
+*ipynb_checkpoints
+*.bibtex
+*.info
+*.ges
+*.property.*
+*.engrad
+*.densities*

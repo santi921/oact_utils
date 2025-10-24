@@ -2,20 +2,73 @@ from spyrmsd.rmsd import rmsd
 import matplotlib.pyplot as plt
 import os
 from typing import Any, List, Dict, Tuple
-from .an66 import dict_to_numpy, elements_to_atomic_numbers
-from .create import read_xyz_single_file
+from oact_utils.utils.an66 import dict_to_numpy
+from oact_utils.utils.create import read_xyz_single_file, elements_to_atomic_numbers, read_geom_from_inp_file
+from oact_utils.utils.status import check_file_termination, check_job_termination
 
 
-# TODO: get number of cores and job run time from orca output files
+def find_timings_and_cores(log_file: str) -> Tuple[int, float]: 
+    # get dir of log_file
+
+    termination_status = check_file_termination(log_file)
+    
+    if termination_status != 1:
+        print(f"Job in {log_file} did not complete successfully. Cannot extract timings and cores.")
+        return None, None
+    
+
+    # iterate through files_out until you hit line with "nprocs" line 
+    with open(log_file, "r") as f:
+        # don't read whole file into memory
+        for line in f:
+            if "nprocs" in line:
+                nprocs = int(line.strip().split()[-1])
+                # break after finding first occurrence
+                break
+        # get last line 
+        last_line = f.readlines()[-1]
+        print(last_line)
+        # format is TOTAL RUN TIME: 0 days 0 hours 3 minutes 16 seconds 840 msec
+        if "TOTAL RUN TIME" in last_line:   
+            parts = last_line.strip().split()
+            days = int(parts[3])
+            hours = int(parts[5])
+            minutes = int(parts[7])
+            seconds = int(parts[9])
+            msec = int(parts[11])
+            total_time_seconds = days * 86400 + hours * 3600 + minutes * 60 + seconds + msec / 1000
+        else:
+            print(f"Could not find TOTAL RUN TIME in last line of {log_file}.")
+            return nprocs, None
+    return nprocs, total_time_seconds
 
 
-def get_rmsd_start_final(name: str, dict_geoms: Dict[str, Any], root_dir: str) -> Tuple[float, List[float]]:
-    initial_geom = dict_geoms[name]
+def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
+    
+    #initial_geom = dict_geoms[name]
+    # find xyz folder, traj file, and .inp file
+    
+    #folder_results = f"{root_dir}/{name}_done"
+    #xyz_output = f"{folder_results}/{name}_orca.xyz"
+    #traj_output = f"{folder_results}/{name}_orca_trj.xyz"
+    folder_results = root_dir
+    files_in = os.listdir(folder_results)
+    # find file with ".density" in name
+    file_density = [f for f in files_in if f.endswith(".densities")]
+    # get the shortest name
+    root_name = min(file_density, key=len).split(".densities")[0]
+    #print(file_density)
+    #root_name = file_density[0].split(".density")[0]
+    
+    xyz_output = os.path.join(folder_results, f"{root_name}.xyz")
+    traj_output = os.path.join(folder_results, f"{root_name}_trj.xyz")
+    inp_file = os.path.join(folder_results, f"{root_name}.inp")
 
-    folder_results = f"{root_dir}/{name}_done"
-    xyz_output = f"{folder_results}/{name}_orca.xyz"
-    traj_output = f"{folder_results}/{name}_orca_trj.xyz"
+    if xyz_output is None or traj_output is None or inp_file is None:
+        return {"rmsd": None, "energies_frames": None, "elements": None, "coords": None}
+    
 
+    initial_geom = read_geom_from_inp_file(inp_file)
     #read lines from traj_output that starts with Coordinates
     with open(traj_output, "r") as f:
         lines = f.readlines()
@@ -29,29 +82,26 @@ def get_rmsd_start_final(name: str, dict_geoms: Dict[str, Any], root_dir: str) -
 
     atomic_numbers = elements_to_atomic_numbers(elements)
     atomic_numbers_ref = elements_to_atomic_numbers(elements_ref)
-
-
-    return rmsd(
-        coords, 
-        coords_ref,
-        atomic_numbers,
-        atomic_numbers_ref
-    ), energies
-
-def get_geo_forces(name: str, root_dir: str) -> List[Dict[str, float]]:
-    list_info = []
-
-    folder_results = f"{root_dir}/{name}_done"
-
-    # iterate through files in folder_results, find one ending in .out or log 
-    for file in os.listdir(folder_results):
-        if file.endswith("logs"):
-            output_file = os.path.join(folder_results, file)
-            break
-
-    # read output_file, find lines between
     
-    with open(output_file, "r") as f:
+    dict_return = {
+        "rmsd": rmsd(
+            coords,
+            coords_ref,
+            atomic_numbers,
+            atomic_numbers_ref
+        ),
+        "energies_frames": energies,
+        "elements": elements,
+        "coords": coords
+    }
+    return dict_return
+
+
+def get_geo_forces(log_file) -> List[Dict[str, float]]:
+    list_info = []
+    
+    # read output_file, find lines between
+    with open(log_file, "r") as f:
         lines = f.readlines()
     
     trigger = "Geometry convergence"    
@@ -75,3 +125,105 @@ def get_geo_forces(name: str, root_dir: str) -> List[Dict[str, float]]:
             list_info.append(info_dict)
     
     return list_info
+
+
+
+def find_timings_and_cores(log_file: str) -> Tuple[int, float]: 
+
+    # get dir of log_file
+
+    termination_status = check_file_termination(log_file)
+    
+    if termination_status != 1:
+        print(f"Job in {log_file} did not complete successfully. Cannot extract timings and cores.")
+        return None, None
+    
+
+    # iterate through files_out until you hit line with "nprocs" line 
+    with open(log_file, "r") as f:
+        # don't read whole file into memory
+        for line in f:
+            if "nprocs" in line:
+                nprocs = int(line.strip().split()[-1])
+                # break after finding first occurrence
+                break
+        # get last line 
+        last_lines = f.readlines()[-10:-3]
+        
+        # format is TOTAL RUN TIME: 0 days 0 hours 3 minutes 16 seconds 840 msec
+        time_dict = {}
+        for line in last_lines:
+            if "Sum of individual times" in line:   
+                time_dict["Total"] = float(line.split()[5])
+            if "Startup" in line:
+                time_dict["Startup"] = float(line.split()[3])
+            if "SCF iterations " in line:
+                time_dict["SCF_iterations"] = float(line.split()[3])
+            if "Property" in line:
+                time_dict["Property"] = float(line.split()[3])
+            if "Gradient" in line:
+                time_dict["Gradient"] = float(line.split()[4])
+            if "Geometry" in line:
+                time_dict["Geometry"] = float(line.split()[3])
+
+    return nprocs, time_dict
+
+
+
+def get_full_info_all_jobs(root_dir: str, flux_tf: bool) -> List[Tuple[str, int, float]]:
+    perf_info = {}
+    # iterate through every subfolder in root_dir
+    for folder in os.listdir(root_dir):
+        
+        name = folder.split("_")[0]
+
+        folder_to_use = os.path.join(root_dir, folder)
+
+        if os.path.isdir(folder_to_use):
+            status = check_job_termination(folder_to_use, flux_tf)
+            
+            if status != 1:
+                #print(f"Job in {folder_to_use} did not complete successfully. Skipping.")
+                continue
+            
+            # find log file in folder_to_use
+            if flux_tf:
+                # check for "flux-"
+                # get all files that contains  flux-
+                files_flux = [f for f in os.listdir(folder_to_use) if "flux-" in f]
+                files_flux.sort(key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)), reverse=True)
+                log_file = os.path.join(folder_to_use, files_flux[0])
+                
+            else:
+                log_file = [f for f in os.listdir(folder_to_use) if f.endswith("logs")]
+                if len(log_file) == 0:
+                    log_file = [f for f in os.listdir(folder_to_use) if f.endswith(".out")]
+
+            if len(log_file) == 0:
+                #print(f"No log file found in {folder_to_use}. Skipping.")
+                continue
+            if len(log_file) > 1:
+                #print(f"Multiple log files found in {folder_to_use}. Using the most recent one.")
+                log_file.sort(key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)), reverse=True)
+            
+            log_file = os.path.join(folder_to_use, log_file[0])
+            print(f"Using log file: {log_file}")
+            # info block 
+            nprocs, total_time_seconds = find_timings_and_cores(log_file)
+            geo_forces = get_geo_forces(log_file=log_file)
+            geom_info = get_rmsd_start_final(folder_to_use)
+
+            if nprocs is not None and total_time_seconds is not None:
+                perf_info[name] = {"nprocs": nprocs, 
+                                   "total_time_seconds": total_time_seconds, 
+                                   "geo_forces": geo_forces, 
+                                   "rmsd_start_final": geom_info["rmsd"],
+                                    "energies_opt": geom_info["energies_frames"], 
+                                    "elements": geom_info["elements"],
+                                    "coords_final": geom_info["coords"]
+
+                                   }
+            else: 
+                perf_info[name] = {"nprocs": None, "total_time_seconds": None, "geo_forces": None}
+
+    return perf_info

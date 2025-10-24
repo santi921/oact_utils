@@ -1,12 +1,29 @@
 import os 
 from typing import List, Optional
 
-def check_job_termination(dir: str, check_many: bool = False) -> int | bool:
+def check_file_termination(file_path: str) -> int:
+    # read last line of file_path
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+    # if last line contains "ORCA TERMINATED NORMALLY", then return 1
+    for line in lines[-5:]:      
+        if "ORCA TERMINATED NORMALLY" in line:
+            return 1
+        if "aborting the run" in line:
+            return -1
+    return 0
+
+def check_job_termination(dir: str, check_many: bool = False, flux_tf: bool = False) -> int | bool:
     # sweep folder file for flux*out files 
     files = os.listdir(dir)
     #print("files: ", files)
-    files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
-    
+    if flux_tf:
+        files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
+    else:
+        files_out = [f for f in files if f.endswith("out")]
+        if not files_out:
+            files_out = [f for f in files if f.endswith("logs")]
+
     if len(files_out) > 1:
         files_out.sort(key=lambda x: os.path.getmtime(os.path.join(dir, x)), reverse=True)
         if not check_many:
@@ -15,22 +32,14 @@ def check_job_termination(dir: str, check_many: bool = False) -> int | bool:
 
     if len(files_out) == 0:
         return False
+    
     if check_many and len(files_out) > 1:
         status_list = []
         for file_out in files_out:
             output_file = dir + "/" + file_out
-
             # read last line of output_file
-            with open(output_file, "r") as f:
-                lines = f.readlines()
-            # if last line contains "ORCA TERMINATED NORMALLY", then get geometry forces
-            #ORCA TERMINATED NORMALLY
-            file_status = 0
-            for line in lines[-5:]:      
-                if "ORCA TERMINATED NORMALLY" in line:
-                    file_status = 1
-                if "aborting the run" in line:
-                    file_status = -1
+            file_status = check_file_termination(output_file)
+            
             status_list.append(file_status)
         if all(status == 1 for status in status_list):
             return 1
@@ -55,7 +64,7 @@ def check_job_termination(dir: str, check_many: bool = False) -> int | bool:
         return 0
 
 def check_sucessful_jobs(
-    root_dir: str, check_many: bool = False
+    root_dir: str, check_many: bool = False, flux_tf: bool = False
 ) -> None:
     count_folder = 0
     count_success = 0
@@ -65,11 +74,11 @@ def check_sucessful_jobs(
         folder_to_use = os.path.join(root_dir, folder)
         if os.path.isdir(folder_to_use):
             count_folder += 1
-            # check if folder has successful flux job 
-            if check_job_termination(folder_to_use, check_many=check_many) == 1:
+            # check if folder has successful flux job
+            if check_job_termination(folder_to_use, check_many=check_many, flux_tf=flux_tf) == 1:
                 print(f"Job in {folder_to_use} completed successfully.")
                 count_success += 1
-            elif check_job_termination(folder_to_use, check_many=check_many) == 0:
+            elif check_job_termination(folder_to_use, check_many=check_many, flux_tf=flux_tf) == 0:
                 count_still_running += 1
                 print(f"Job in {folder_to_use} is still running or incomplete.")
             else:
@@ -78,7 +87,6 @@ def check_sucessful_jobs(
     
     print(f"Total successful jobs: {count_success} / {count_folder}")
     print(f"Total still running jobs: {count_still_running} / {count_folder}")
-
 
 def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:
     

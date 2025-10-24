@@ -1,8 +1,7 @@
 import os 
 from periodictable import elements as ptelements
 
-from .create import write_orca_input
-from .an66 import process_geometry_file, process_multiplicity_file, dict_to_numpy
+from .an66 import process_geometry_file, process_multiplicity_file
 
 def fetch_actinides(): 
     return ["Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr"]
@@ -10,6 +9,32 @@ def fetch_actinides():
 def elements_to_atomic_numbers(elements: list[str]) -> list[int]:
     atomic_numbers = [ptelements.symbol(e).number for e in elements]
     return atomic_numbers
+
+def read_geom_from_inp_file(inp_file: str) -> list[dict[str, float | str]]:
+    with open(inp_file, "r") as f:
+        lines = f.readlines()
+    
+    geom_start = False
+    atoms = []
+    for line in lines:
+        if line.strip().startswith("* xyz"):
+            geom_start = True
+            continue
+        if geom_start:
+            if line.strip().startswith("*"):
+                break
+            parts = line.split()
+            element = parts[0]
+            x = float(parts[1])
+            y = float(parts[2])
+            z = float(parts[3])
+            atoms.append({
+                "element": element,
+                "x": x,
+                "y": y,
+                "z": z
+            })
+    return atoms
 
 def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], str]:
     with open(xyz_file, "r") as f:
