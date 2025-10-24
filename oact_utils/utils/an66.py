@@ -1,6 +1,7 @@
 from typing import Any, List, Dict, Optional, Tuple, Union
-import pandas as pd 
+import pandas as pd
 import os
+
 
 def process_geometry_file(file: str) -> Dict[str, List[Dict[str, Any]]]:
     with open(file, "r") as f:
@@ -17,12 +18,7 @@ def process_geometry_file(file: str) -> Dict[str, List[Dict[str, Any]]]:
             x = float(parts[1])
             y = float(parts[2])
             z = float(parts[3])
-            dict_geoms[molecule].append({
-                "element": atom,
-                "x": x,
-                "y": y,
-                "z": z
-            })
+            dict_geoms[molecule].append({"element": atom, "x": x, "y": y, "z": z})
     return dict_geoms
 
 
@@ -45,11 +41,7 @@ def process_multiplicity_file(file: str) -> pd.DataFrame:
         molecule = parts[0]
         zpve = float(parts[1])
         multiplicity = int(parts[2])
-        data.append({
-            "molecule": molecule,
-            "zpve": zpve,
-            "multiplicity": multiplicity
-        })
+        data.append({"molecule": molecule, "zpve": zpve, "multiplicity": multiplicity})
 
     df_multiplicity = pd.DataFrame(data)
     return df_multiplicity
@@ -57,6 +49,7 @@ def process_multiplicity_file(file: str) -> pd.DataFrame:
 
 def dict_to_numpy(atoms: List[Dict[str, Any]]) -> Tuple[List[str], Any]:
     import numpy as np
+
     elements = [atom["element"] for atom in atoms]
     coords = np.array([[atom["x"], atom["y"], atom["z"]] for atom in atoms])
     return elements, coords

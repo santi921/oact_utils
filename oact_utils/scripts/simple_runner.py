@@ -1,7 +1,10 @@
 import subprocess
-import os 
+import os
 
-def run_orca_and_rename(root_dir, orca_exe="~/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"):
+
+def run_orca_and_rename(
+    root_dir, orca_exe="~/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
+):
     orca_exe = os.path.expanduser(orca_exe)
     for folder in os.listdir(root_dir):
         folder_path = os.path.join(root_dir, folder)
