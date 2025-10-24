@@ -45,6 +45,77 @@ def read_template(template_file):
             lines_cleaned_template.append(line)
     return lines_cleaned_template
 
+def write_orca_input(
+    name, 
+    root_folder,
+    dict_geoms, 
+    df_multiplicity, 
+    lines_cleaned_template, 
+    charge=0, 
+    actinide_basis="ma-def-TZVP",
+    actinide_ecp=None,
+    non_actinide_basis="def2-TZVPD",
+    two_step=None
+):
+
+    _, _, spin = df_multiplicity[df_multiplicity["molecule"]==name].iloc[0].tolist()
+    element_list = [element["element"] for element in dict_geoms[name]]
+    element_set = set(element_list)
+    print(f"Writing ORCA input for {name} with charge {charge} and spin {spin}")
+    actinide_list = fetch_actinides()
+    # write lines to list first 
+    lines_to_write = []
+    lines_to_write.append(f"%basis\n")
+    for element in element_set:        
+        if element in actinide_list:
+            if os.path.isfile(actinide_basis):
+                lines_to_write.append(f"  GTOName      = \"{actinide_basis}\"      # read orbital basis\n")
+            else:
+                lines_to_write.append(f"  NewGTO {element} \"{actinide_basis}\" end\n")
+            
+            if actinide_ecp is not None:
+                lines_to_write.append(f"  NewECP {element} \"{actinide_ecp}\" end\n")
+        else:
+            if os.path.isfile(non_actinide_basis):
+                lines_to_write.append(f"  GTOName      = \"{non_actinide_basis}\"      # read orbital basis\n")
+            else:
+                lines_to_write.append(f"  NewGTO {element} \"{non_actinide_basis}\" end\n")
+
+    lines_to_write.append(f"end\n\n")
+
+    lines_to_write.append(f"* xyz {charge} {spin}\n")
+    for atom in dict_geoms[name]:
+        element = atom["element"]
+        x = atom["x"]
+        y = atom["y"]
+        z = atom["z"]
+        lines_to_write.append(f"{element}\t{x:.6f}\t{y:.6f}\t{z:.6f}\n")
+
+    lines_to_write.append("*\n")
+
+    # create folder if it does not exist
+    if not os.path.exists(f"{root_folder}/{name}_done") and not os.path.exists(f"{root_folder}/{name}_failed_done"):   
+        if not os.path.exists(f"{root_folder}/{name}"):         
+            os.makedirs(f"{root_folder}/{name}")
+        folder_to_use = f"{root_folder}/{name}"        
+    
+    # write to file
+    if two_step is not None:
+        if two_step == "loose": 
+            file_name = f"{folder_to_use}/omol_loose.inp"
+        elif two_step == "tight":
+            file_name = f"{folder_to_use}/omol_tight.inp"
+    else:
+        file_name = f"{folder_to_use}/{name}_orca.inp"
+
+    with open(file_name, "w") as f:
+        for line in lines_cleaned_template:
+                f.write(line)
+        f.write("\n")
+        for line in lines_to_write:
+            f.write(line)
+
+
 
 def write_flux(
     template_file,
@@ -70,7 +141,7 @@ def write_flux(
     for folder in os.listdir(root_dir):
         folder_to_use = os.path.join(root_dir, folder)
         if os.path.isdir(folder_to_use):
-            if two_step=True: 
+            if two_step: 
                 inp_files_loose = [f for f in os.listdir(folder_to_use) if f.endswith("omol_loose.inp")]
                 inp_files_tight = [f for f in os.listdir(folder_to_use) if f.endswith("omol_tight.inp")]
                 inp_files_loose_full_path = [os.path.join(folder_to_use, f) for f in inp_files_loose]
@@ -116,9 +187,9 @@ def write_jobs(
         non_actinide_basis="def2-TZVPD",
         actinide_ecp="def-ECP",
         template_file="template_orca.inp",
-        root_dir="./orca_inputs/",
-        ref_geom_file="ref_geoms.txt",
-        ref_multiplicity_file="ref_multiplicity.txt", 
+        root_dir="./orca_jobs/",
+        ref_geom_file="/Users/santiagovargas/dev/data/ref_geoms.txt",
+        ref_multiplicity_file="/Users/santiagovargas/dev/data/ref_multiplicity.txt",
         two_step=None
 ):
 
