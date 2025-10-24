@@ -1,12 +1,13 @@
 import os 
+from typing import Any, List, Dict, Optional
 
 from .status import check_job_termination
 
 def launch_flux_jobs(
-    root_dir, 
-    second_step=False, 
-    skip_done=True
-):
+    root_dir: str, 
+    second_step: bool = False, 
+    skip_done: bool = True
+) -> None:
     # iterate through every subfolder in root_dir
     for folder in os.listdir(root_dir):
         folder_to_use = os.path.join(root_dir, folder)

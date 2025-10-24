@@ -1,10 +1,8 @@
+from typing import Any, List, Dict, Optional, Tuple, Union
 import pandas as pd 
 import os
 
-from periodictable import elements as ptelements
-
-
-def process_geometry_file(file):
+def process_geometry_file(file: str) -> Dict[str, List[Dict[str, Any]]]:
     with open(file, "r") as f:
         lines = f.readlines()
 
@@ -28,7 +26,7 @@ def process_geometry_file(file):
     return dict_geoms
 
 
-def process_multiplicity_file(file):
+def process_multiplicity_file(file: str) -> pd.DataFrame:
     with open(file, "r") as f:
         lines = f.readlines()
 
@@ -57,7 +55,7 @@ def process_multiplicity_file(file):
     return df_multiplicity
 
 
-def dict_to_numpy(atoms):
+def dict_to_numpy(atoms: List[Dict[str, Any]]) -> Tuple[List[str], Any]:
     import numpy as np
     elements = [atom["element"] for atom in atoms]
     coords = np.array([[atom["x"], atom["y"], atom["z"]] for atom in atoms])

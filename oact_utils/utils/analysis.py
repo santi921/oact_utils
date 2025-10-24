@@ -1,10 +1,15 @@
 from spyrmsd.rmsd import rmsd
 import matplotlib.pyplot as plt
 import os
+from typing import Any, List, Dict, Tuple
 from .an66 import dict_to_numpy, elements_to_atomic_numbers
 from .create import read_xyz_single_file
 
-def get_rmsd_start_final(name, dict_geoms, root_dir):
+
+# TODO: get number of cores and job run time from orca output files
+
+
+def get_rmsd_start_final(name: str, dict_geoms: Dict[str, Any], root_dir: str) -> Tuple[float, List[float]]:
     initial_geom = dict_geoms[name]
 
     folder_results = f"{root_dir}/{name}_done"
@@ -33,7 +38,7 @@ def get_rmsd_start_final(name, dict_geoms, root_dir):
         atomic_numbers_ref
     ), energies
 
-def get_geo_forces(name, root_dir):
+def get_geo_forces(name: str, root_dir: str) -> List[Dict[str, float]]:
     list_info = []
 
     folder_results = f"{root_dir}/{name}_done"

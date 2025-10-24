@@ -1,6 +1,7 @@
 import os 
+from typing import List, Optional
 
-def check_job_termination(dir, check_many=False):
+def check_job_termination(dir: str, check_many: bool = False) -> int | bool:
     # sweep folder file for flux*out files 
     files = os.listdir(dir)
     #print("files: ", files)
@@ -54,8 +55,8 @@ def check_job_termination(dir, check_many=False):
         return 0
 
 def check_sucessful_jobs(
-    root_dir, check_many=False
-):
+    root_dir: str, check_many: bool = False
+) -> None:
     count_folder = 0
     count_success = 0
     count_still_running = 0
@@ -79,7 +80,7 @@ def check_sucessful_jobs(
     print(f"Total still running jobs: {count_still_running} / {count_folder}")
 
 
-def check_job_termination_whole(root_dir, df_multiplicity):
+def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:
     
     job_list = df_multiplicity['molecule'].tolist()
 

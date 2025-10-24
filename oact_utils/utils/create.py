@@ -5,13 +5,13 @@ from .create import write_orca_input
 from .an66 import process_geometry_file, process_multiplicity_file, dict_to_numpy
 
 def fetch_actinides(): 
-     return["Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr"]
+    return ["Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr"]
 
-def elements_to_atomic_numbers(elements):
+def elements_to_atomic_numbers(elements: list[str]) -> list[int]:
     atomic_numbers = [ptelements.symbol(e).number for e in elements]
     return atomic_numbers
 
-def read_xyz_single_file(xyz_file):
+def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], str]:
     with open(xyz_file, "r") as f:
         lines = f.readlines()
     
@@ -33,7 +33,7 @@ def read_xyz_single_file(xyz_file):
     return atoms, comment
 
 
-def read_template(template_file):
+def read_template(template_file: str) -> list[str]:
     with open(template_file, "r") as f:
         lines = f.readlines()
 
@@ -46,17 +46,17 @@ def read_template(template_file):
     return lines_cleaned_template
 
 def write_orca_input(
-    name, 
-    root_folder,
-    dict_geoms, 
-    df_multiplicity, 
-    lines_cleaned_template, 
-    charge=0, 
-    actinide_basis="ma-def-TZVP",
-    actinide_ecp=None,
-    non_actinide_basis="def2-TZVPD",
-    two_step=None
-):
+    name: str,
+    root_folder: str,
+    dict_geoms: dict[str, list[dict[str, float | str]]],
+    df_multiplicity,
+    lines_cleaned_template: list[str],
+    charge: int = 0,
+    actinide_basis: str = "ma-def-TZVP",
+    actinide_ecp: str | None = None,
+    non_actinide_basis: str = "def2-TZVPD",
+    two_step: str | None = None
+) -> None:
 
     _, _, spin = df_multiplicity[df_multiplicity["molecule"]==name].iloc[0].tolist()
     element_list = [element["element"] for element in dict_geoms[name]]
@@ -118,10 +118,10 @@ def write_orca_input(
 
 
 def write_flux(
-    template_file,
-    root_dir,
-    two_step=False
-): 
+    template_file: str,
+    root_dir: str,
+    two_step: bool = False
+) -> None:
     
     with open(template_file, "r") as f:
         lines = f.readlines()
@@ -183,15 +183,15 @@ def write_flux(
 
 
 def write_jobs(
-        actinide_basis="ma-def-TZVP",
-        non_actinide_basis="def2-TZVPD",
-        actinide_ecp="def-ECP",
-        template_file="template_orca.inp",
-        root_dir="./orca_jobs/",
-        ref_geom_file="/Users/santiagovargas/dev/data/ref_geoms.txt",
-        ref_multiplicity_file="/Users/santiagovargas/dev/data/ref_multiplicity.txt",
-        two_step=None
-):
+    actinide_basis: str = "ma-def-TZVP",
+    non_actinide_basis: str = "def2-TZVPD",
+    actinide_ecp: str = "def-ECP",
+    template_file: str = "template_orca.inp",
+    root_dir: str = "./orca_jobs/",
+    ref_geom_file: str = "/Users/santiagovargas/dev/data/ref_geoms.txt",
+    ref_multiplicity_file: str = "/Users/santiagovargas/dev/data/ref_multiplicity.txt",
+    two_step: str | None = None
+) -> None:
 
     df_multiplicity = process_multiplicity_file(ref_multiplicity_file)
     dict_geoms = process_geometry_file(ref_geom_file)
