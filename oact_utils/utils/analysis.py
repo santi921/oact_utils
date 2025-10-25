@@ -1,5 +1,5 @@
 from spyrmsd.rmsd import rmsd
-import matplotlib.pyplot as plt
+
 import os
 from typing import Any, List, Dict, Tuple
 from oact_utils.utils.an66 import dict_to_numpy
@@ -68,18 +68,39 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     # root_name = file_density[0].split(".density")[0]
 
     xyz_output = os.path.join(folder_results, f"{root_name}.xyz")
-    traj_output = os.path.join(folder_results, f"{root_name}_trj.xyz")
     inp_file = os.path.join(folder_results, f"{root_name}.inp")
-
-    if xyz_output is None or traj_output is None or inp_file is None:
-        return {"rmsd": None, "energies_frames": None, "elements": None, "coords": None}
-
+    traj_output = os.path.join(folder_results, f"{root_name}_trj.xyz")
+    
+    
     initial_geom = read_geom_from_inp_file(inp_file)
     # read lines from traj_output that starts with Coordinates
-    with open(traj_output, "r") as f:
-        lines = f.readlines()
-    lines_coords = [i for i, line in enumerate(lines) if line.startswith("Coordinates")]
-    energies = [float(lines[i].strip().split()[-1]) for i in lines_coords]
+    # ccheck if traj_output exists
+    if not os.path.exists(traj_output):
+        print(f"Trajectory file {traj_output} does not exist. Cannot compute RMSD.")
+            # find log file in folder_to_use
+        try:
+            # check for "flux-"
+            # get all files that contains  flux-
+            files_flux = [f for f in os.listdir(root_dir) if "flux-" in f]
+            files_flux.sort(
+                key=lambda x: os.path.getmtime(os.path.join(root_dir, x)),
+                reverse=True,
+            )
+            log_file = os.path.join(root_dir, files_flux[0])
+
+        except:
+            log_file = [f for f in os.listdir(root_dir) if f.endswith("logs")]
+            if len(log_file) == 0:
+                log_file = [
+                    f for f in os.listdir(root_dir) if f.endswith(".out")
+                ]
+        
+        energies = get_energy_from_log_file(os.path.join(root_dir, log_file[0]))
+    else:
+        with open(traj_output, "r") as f:
+            lines = f.readlines()
+        lines_coords = [i for i, line in enumerate(lines) if line.startswith("Coordinates")]
+        energies = [float(lines[i].strip().split()[-1]) for i in lines_coords]
 
     atoms, _ = read_xyz_single_file(xyz_output)
     elements, coords = dict_to_numpy(atoms)
@@ -250,3 +271,15 @@ def get_full_info_all_jobs(
                 }
 
     return perf_info
+
+
+def get_energy_from_log_file(log_file):     
+    energy_arr = []
+
+    with open(log_file, "r") as f:
+        # don't load all into memory
+        for line in f:
+            if "Total Energy" in line:
+                energy = float(line.strip().split()[3])
+                energy_arr.append(energy)
+    return energy_arr
