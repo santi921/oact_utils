@@ -8,65 +8,31 @@ from oact_utils.utils.create import (
     elements_to_atomic_numbers,
     read_geom_from_inp_file,
 )
-from oact_utils.utils.status import check_file_termination, check_job_termination
 
-
-def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
-    # get dir of log_file
-
-    termination_status = check_file_termination(log_file)
-
-    if termination_status != 1:
-        print(
-            f"Job in {log_file} did not complete successfully. Cannot extract timings and cores."
-        )
-        return None, None
-
-    # iterate through files_out until you hit line with "nprocs" line
-    with open(log_file, "r") as f:
-        # don't read whole file into memory
-        for line in f:
-            if "nprocs" in line:
-                nprocs = int(line.strip().split()[-1])
-                # break after finding first occurrence
-                break
-        # get last line
-        last_line = f.readlines()[-1]
-        print(last_line)
-        # format is TOTAL RUN TIME: 0 days 0 hours 3 minutes 16 seconds 840 msec
-        if "TOTAL RUN TIME" in last_line:
-            parts = last_line.strip().split()
-            days = int(parts[3])
-            hours = int(parts[5])
-            minutes = int(parts[7])
-            seconds = int(parts[9])
-            msec = int(parts[11])
-            total_time_seconds = (
-                days * 86400 + hours * 3600 + minutes * 60 + seconds + msec / 1000
-            )
-        else:
-            print(f"Could not find TOTAL RUN TIME in last line of {log_file}.")
-            return nprocs, None
-    return nprocs, total_time_seconds
-
+from oact_utils.utils.status import check_file_termination, check_job_termination, pull_log_file
 
 def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
-
-    # initial_geom = dict_geoms[name]
+    """
+    Calculate RMSD between initial and final geometries from a trajectory file.
+    Also extract energies from the trajectory or log file.
+    Args:
+        root_dir (str): Directory containing the trajectory and input files.
+    Returns:
+        dict: {
+            "rmsd": float,
+            "energies_frames": List[float],
+            "elements": List[str],
+            "coords": np.ndarray
+        }
+    """
     # find xyz folder, traj file, and .inp file
-
-    # folder_results = f"{root_dir}/{name}_done"
-    # xyz_output = f"{folder_results}/{name}_orca.xyz"
-    # traj_output = f"{folder_results}/{name}_orca_trj.xyz"
     folder_results = root_dir
     files_in = os.listdir(folder_results)
     # find file with ".density" in name
     file_density = [f for f in files_in if f.endswith(".densities")]
     # get the shortest name
     root_name = min(file_density, key=len).split(".densities")[0]
-    # print(file_density)
-    # root_name = file_density[0].split(".density")[0]
-
+    
     xyz_output = os.path.join(folder_results, f"{root_name}.xyz")
     inp_file = os.path.join(folder_results, f"{root_name}.inp")
     traj_output = os.path.join(folder_results, f"{root_name}_trj.xyz")
@@ -75,32 +41,24 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     initial_geom = read_geom_from_inp_file(inp_file)
     # read lines from traj_output that starts with Coordinates
     # ccheck if traj_output exists
-    if not os.path.exists(traj_output):
-        print(f"Trajectory file {traj_output} does not exist. Cannot compute RMSD.")
-            # find log file in folder_to_use
-        try:
-            # check for "flux-"
-            # get all files that contains  flux-
-            files_flux = [f for f in os.listdir(root_dir) if "flux-" in f]
-            files_flux.sort(
-                key=lambda x: os.path.getmtime(os.path.join(root_dir, x)),
-                reverse=True,
-            )
-            log_file = os.path.join(root_dir, files_flux[0])
 
-        except:
-            log_file = [f for f in os.listdir(root_dir) if f.endswith("logs")]
-            if len(log_file) == 0:
-                log_file = [
-                    f for f in os.listdir(root_dir) if f.endswith(".out")
-                ]
+    if os.path.exists(traj_output):
+        print(f"Trajectory file {traj_output} does not exist. Cannot compute RMSD @ ea. step.")
+            # find log file in folder_to_use
         
-        energies = get_energy_from_log_file(os.path.join(root_dir, log_file[0]))
-    else:
+        # TODO: get stepwise energies from log files instead of trj file b/c some don't have trj files??
+    
+        print(f"Reading trajectory from {traj_output} for RMSD calculation.")
         with open(traj_output, "r") as f:
             lines = f.readlines()
         lines_coords = [i for i, line in enumerate(lines) if line.startswith("Coordinates")]
         energies = [float(lines[i].strip().split()[-1]) for i in lines_coords]
+    
+    else:
+        log_file = pull_log_file(root_dir)                    
+        energies = get_energy_from_log_file(log_file)
+    
+
 
     atoms, _ = read_xyz_single_file(xyz_output)
     elements, coords = dict_to_numpy(atoms)
@@ -118,7 +76,15 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     return dict_return
 
 
-def get_geo_forces(log_file) -> List[Dict[str, float]]:
+def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
+    """
+    Extract geometry optimization forces from log file.
+    Args:
+        log_file (str): Path to the log file.
+    Returns:
+        List[Dict[str, float]]: List of dictionaries with RMS and Max gradients.
+    """
+
     list_info = []
 
     # read output_file, find lines between
@@ -155,7 +121,13 @@ def get_geo_forces(log_file) -> List[Dict[str, float]]:
 
 
 def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
-
+    """
+    Extract number of processors and timing information from log file.
+    Args:
+        log_file (str): Path to the log file.
+    Returns:
+        Tuple[int, float]: Number of processors and total time in seconds.
+    """
     # get dir of log_file
 
     termination_status = check_file_termination(log_file)
@@ -199,6 +171,14 @@ def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
 def get_full_info_all_jobs(
     root_dir: str, flux_tf: bool
 ) -> List[Tuple[str, int, float]]:
+    """
+    Get full performance and geometry info for all jobs in a root directory.
+    Args:
+        root_dir (str): Root directory containing job subdirectories.
+        flux_tf (bool): Whether to look for flux- log files.
+    Returns:
+        Dict[str, Any]: Dictionary with performance and geometry info for each job.
+    """
     perf_info = {}
     # iterate through every subfolder in root_dir
     for folder in os.listdir(root_dir):
@@ -274,12 +254,19 @@ def get_full_info_all_jobs(
 
 
 def get_energy_from_log_file(log_file):     
+    """
+    Extract energies from log file.
+    Args:
+        log_file (str): Path to the log file.
+    Returns:
+        List[float]: List of energies extracted from the log file.
+    """
     energy_arr = []
 
     with open(log_file, "r") as f:
         # don't load all into memory
         for line in f:
-            if "Total Energy" in line:
+            if "Total Energy       :" in line:
                 energy = float(line.strip().split()[3])
                 energy_arr.append(energy)
     return energy_arr

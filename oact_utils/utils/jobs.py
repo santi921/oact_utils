@@ -38,3 +38,4 @@ def launch_flux_jobs(
                         f"cd {folder_to_use} && flux submit flux_job_loose.inp"
                     )
                     os.system(command_loose)
+
