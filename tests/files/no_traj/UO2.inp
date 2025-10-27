@@ -1,0 +1,28 @@
+! wB97M-V RIJCOSX NoUseSym DIIS NOSOSCF NormalConv DEFGRID2 OPT
+
+%scf
+  MaxIter 300
+  Convergence Tight
+end
+
+%pal
+  nprocs 4
+end
+
+%basis
+  NewGTO U "ma-def-TZVP" end #/ other option "ma-def-TZVPP"
+  NewECP U "def-ECP" end
+  # Oxygen: diffuse-augmented triple-zeta with polarization
+  NewGTO O "def2-TZVPD" end
+end
+
+# Geometry: linear O=U=O starting guess (Å). Adjust bond lengths as needed.
+# CHARGE & MULTIPLICITY:
+#  - Uranyl dication UO2^2+ (common molecular target): charge=+2, singlet => "2 1"
+#  - Neutral UO2 (gas-phase dioxide): often open-shell; one option is triplet => "0 3"
+# Set the line below to what you want to compute.
+* xyz 2 1
+U     0.000000    0.000000    0.000000
+O      0.000000    0.000000    2.00
+O     0.000000    0.000000   -2.00
+*
