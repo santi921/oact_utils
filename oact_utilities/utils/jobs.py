@@ -1,7 +1,7 @@
 import os
 from typing import Any, List, Dict, Optional
 
-from .status import check_job_termination
+from oact_utilities.utils.status import check_job_termination
 
 
 def launch_flux_jobs(

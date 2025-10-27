@@ -1,6 +1,5 @@
-from typing import Any, List, Dict, Optional, Tuple, Union
+from typing import Any, List, Dict, Tuple
 import pandas as pd
-import os
 
 
 def process_geometry_file(file: str) -> Dict[str, List[Dict[str, Any]]]:

@@ -2,14 +2,14 @@ from spyrmsd.rmsd import rmsd
 
 import os
 from typing import Any, List, Dict, Tuple
-from oact_utils.utils.an66 import dict_to_numpy
-from oact_utils.utils.create import (
+from oact_utilities.utils.an66 import dict_to_numpy
+from oact_utilities.utils.create import (
     read_xyz_single_file,
     elements_to_atomic_numbers,
     read_geom_from_inp_file,
 )
 
-from oact_utils.utils.status import check_file_termination, check_job_termination, pull_log_file
+from oact_utilities.utils.status import check_file_termination, check_job_termination, pull_log_file
 
 def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     """

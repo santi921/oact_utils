@@ -1,7 +1,7 @@
 import os
 from periodictable import elements as ptelements
 
-from .an66 import process_geometry_file, process_multiplicity_file
+from oact_utilities.utils.an66 import process_geometry_file, process_multiplicity_file
 
 
 def fetch_actinides():
