@@ -70,8 +70,8 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     dict_return = {
         "rmsd": rmsd(coords, coords_ref, atomic_numbers, atomic_numbers_ref),
         "energies_frames": energies,
-        "elements": elements,
-        "coords": coords,
+        "elements_final": elements,
+        "coords_final": coords,
     }
     return dict_return
 
