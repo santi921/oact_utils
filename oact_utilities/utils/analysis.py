@@ -45,9 +45,7 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     if os.path.exists(traj_output):
         print(f"Trajectory file {traj_output} does not exist. Cannot compute RMSD @ ea. step.")
             # find log file in folder_to_use
-        
-        # TODO: get stepwise energies from log files instead of trj file b/c some don't have trj files??
-    
+ 
         print(f"Reading trajectory from {traj_output} for RMSD calculation.")
         with open(traj_output, "r") as f:
             lines = f.readlines()
@@ -58,6 +56,8 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
         log_file = pull_log_file(root_dir)                    
         energies = get_energy_from_log_file(log_file)
     
+    if os.path.exists(xyz_output) is False:
+        raise FileNotFoundError(f"XYZ output file {xyz_output} not found...reading positions from .inp file instead.")
 
 
     atoms, _ = read_xyz_single_file(xyz_output)

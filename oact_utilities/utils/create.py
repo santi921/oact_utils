@@ -1,8 +1,8 @@
 import os
 from periodictable import elements as ptelements
-
+from typing import Dict, Any
 from oact_utilities.utils.an66 import process_geometry_file, process_multiplicity_file
-
+from oact_utilities.utils.analysis import get_rmsd_start_final
 
 def fetch_actinides():
     return [
@@ -88,6 +88,7 @@ def write_orca_input(
     df_multiplicity,
     lines_cleaned_template: list[str],
     charge: int = 0,
+    cores: int = 8,
     actinide_basis: str = "ma-def-TZVP",
     actinide_ecp: str | None = None,
     non_actinide_basis: str = "def2-TZVPD",
@@ -101,6 +102,9 @@ def write_orca_input(
     actinide_list = fetch_actinides()
     # write lines to list first
     lines_to_write = []
+
+    lines_to_write.append(f"%pal\n nprocs {cores} \nend\n\n")
+
     lines_to_write.append(f"%basis\n")
     for element in element_set:
         if element in actinide_list:
@@ -245,6 +249,98 @@ def write_flux(template_file: str, root_dir: str, two_step: bool = False) -> Non
                     for line in lines_cleaned_template_modified:
                         f.write(line)
 
+"""flux format
+#!/bin/sh
+#flux: -N 1
+#flux: -n 8
+#flux: -q pbatch
+#flux: -B [allocation]
+#flux: -t 120m
+
+source ~/.bashrc
+conda activate py10mpi
+export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH
+/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca 
+"""
+
+def write_flux_no_template(
+        root_dir: str, 
+        two_step: bool = False, 
+        n_cores: int = 4, 
+        n_hours: int = 2, 
+        queue: str = "pbatch",
+        allocation: str = "dnn-sim"
+    ) -> None:
+
+    base_lines = [
+        "#!/bin/sh\n",
+        "#flux: -N 1\n",
+        f"#flux: -n {n_cores}\n",
+        f"#flux: -q {queue}\n",
+        f"#flux: -B {allocation}\n",
+        f"#flux: -t {n_hours*60}m\n",
+        "\n",
+        "source ~/.bashrc\n",
+        "conda activate py10mpi\n",
+        "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
+        "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca"
+    ]
+
+
+    # create folder if it does not exist
+    if not os.path.exists(root_dir):
+        os.makedirs(root_dir)
+
+    # go through each subfolder in root_directory and write a flux job for each, scan for .inp files and add them to last line of template
+    for folder in os.listdir(root_dir):
+        folder_to_use = os.path.join(root_dir, folder)
+        if not os.path.isdir(folder_to_use):
+            continue
+
+        if two_step:
+            loose_files = [
+                os.path.join(folder_to_use, f)
+                for f in os.listdir(folder_to_use)
+                if f.endswith("omol_loose.inp")
+            ]
+            tight_files = [
+                os.path.join(folder_to_use, f)
+                for f in os.listdir(folder_to_use)
+                if f.endswith("omol_tight.inp")
+            ]
+
+            # skip writing if no files found for that step
+            if loose_files:
+                out_lines = base_lines.copy()
+                # ensure last line ends without newline so we can append input list
+                if out_lines[-1].endswith("\n"):
+                    out_lines[-1] = out_lines[-1][:-1]
+                out_lines[-1] = out_lines[-1] + " " + " ".join(loose_files) + "\n"
+                with open(os.path.join(folder_to_use, "flux_job_loose.inp"), "w") as fh:
+                    fh.writelines(out_lines)
+
+            if tight_files:
+                out_lines = base_lines.copy()
+                if out_lines[-1].endswith("\n"):
+                    out_lines[-1] = out_lines[-1][:-1]
+                out_lines[-1] = out_lines[-1] + " " + " ".join(tight_files) + "\n"
+                with open(os.path.join(folder_to_use, "flux_job_tight.inp"), "w") as fh:
+                    fh.writelines(out_lines)
+        else:
+            inp_files = [
+                os.path.join(folder_to_use, f)
+                for f in os.listdir(folder_to_use)
+                if f.endswith(".inp")
+            ]
+            if not inp_files:
+                continue
+            out_lines = base_lines.copy()
+            if out_lines[-1].endswith("\n"):
+                out_lines[-1] = out_lines[-1][:-1]
+            out_lines[-1] = out_lines[-1] + " " + " ".join(inp_files) + "\n"
+            with open(os.path.join(folder_to_use, "flux_job.inp"), "w") as fh:
+                fh.writelines(out_lines)
+
 
 def write_jobs(
     actinide_basis: str = "ma-def-TZVP",
@@ -254,6 +350,7 @@ def write_jobs(
     root_dir: str = "./orca_jobs/",
     ref_geom_file: str = "/Users/santiagovargas/dev/data/ref_geoms.txt",
     ref_multiplicity_file: str = "/Users/santiagovargas/dev/data/ref_multiplicity.txt",
+    cores: int = 8,
     two_step: str | None = None,
 ) -> None:
 
@@ -270,8 +367,12 @@ def write_jobs(
             df_multiplicity=df_multiplicity,
             lines_cleaned_template=lines_cleaned_template,
             charge=0,
+            cores=8,
             actinide_basis=actinide_basis,
             actinide_ecp=actinide_ecp,
             non_actinide_basis=non_actinide_basis,
             two_step=two_step,
         )
+
+
+
