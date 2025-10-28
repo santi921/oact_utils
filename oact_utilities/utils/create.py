@@ -156,6 +156,7 @@ def write_orca_input(
     else:
         file_name = f"{folder_to_use}/{name}_orca.inp"
 
+
     with open(file_name, "w") as f:
         for line in lines_cleaned_template:
             f.write(line)

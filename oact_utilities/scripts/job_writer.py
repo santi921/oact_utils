@@ -23,7 +23,10 @@ def write_flux_orca_an66(
         raise FileNotFoundError(f"Reference geometry file {ref_geom_file} does not exist.")
     if not os.path.exists(ref_multiplicity_file):
         raise FileNotFoundError(f"Reference multiplicity file {ref_multiplicity_file} does not exist.")
-    
+    # make folder if not there 
+    if not os.path.exists(root_dir):
+        os.makedirs(root_dir)
+        
     # baseline OMol
     write_jobs(
         actinide_basis=actinide_basis,
@@ -292,4 +295,3 @@ if __name__ == "__main__":
     #root_directory = "/usr/workspace/vargas58/orca_test/an66_benchmarks/dk3_omol_M062x/"
     #root_directory = "/usr/workspace/vargas58/orca_test/an66_benchmarks/dk3_omol_pbe0/"
     #root_directory = "/usr/workspace/vargas58/orca_test/an66_benchmarks/dk3_omol_tpss/"
-    
