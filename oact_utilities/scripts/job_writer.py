@@ -33,3 +33,5 @@ def main():
         allocation="dnn-sim"
     )
     
+
+main()

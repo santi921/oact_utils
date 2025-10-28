@@ -219,8 +219,8 @@ def write_flux(template_file: str, root_dir: str, two_step: bool = False) -> Non
                     lines_cleaned_template_modified_tight[-1]
                     + f" {inp_files_tight_line}\n"
                 )
-                file_name_loose = f"{folder_to_use}/flux_job_loose.inp"
-                file_name_tight = f"{folder_to_use}/flux_job_tight.inp"
+                file_name_loose = f"{folder_to_use}/flux_job_loose.flux"
+                file_name_tight = f"{folder_to_use}/flux_job_tight.flux"
                 with open(file_name_loose, "w") as f:
                     for line in lines_cleaned_template_modified_loose:
                         f.write(line)
@@ -244,7 +244,7 @@ def write_flux(template_file: str, root_dir: str, two_step: bool = False) -> Non
                     lines_cleaned_template_modified[-1] + f" {inp_files_line}\n"
                 )
 
-                file_name = f"{folder_to_use}/flux_job.inp"
+                file_name = f"{folder_to_use}/flux_job.flux"
                 with open(file_name, "w") as f:
                     for line in lines_cleaned_template_modified:
                         f.write(line)
@@ -316,7 +316,7 @@ def write_flux_no_template(
                 if out_lines[-1].endswith("\n"):
                     out_lines[-1] = out_lines[-1][:-1]
                 out_lines[-1] = out_lines[-1] + " " + " ".join(loose_files) + "\n"
-                with open(os.path.join(folder_to_use, "flux_job_loose.inp"), "w") as fh:
+                with open(os.path.join(folder_to_use, "flux_job_loose.flux"), "w") as fh:
                     fh.writelines(out_lines)
 
             if tight_files:
@@ -324,7 +324,7 @@ def write_flux_no_template(
                 if out_lines[-1].endswith("\n"):
                     out_lines[-1] = out_lines[-1][:-1]
                 out_lines[-1] = out_lines[-1] + " " + " ".join(tight_files) + "\n"
-                with open(os.path.join(folder_to_use, "flux_job_tight.inp"), "w") as fh:
+                with open(os.path.join(folder_to_use, "flux_job_tight.flux"), "w") as fh:
                     fh.writelines(out_lines)
         else:
             inp_files = [
@@ -338,7 +338,7 @@ def write_flux_no_template(
             if out_lines[-1].endswith("\n"):
                 out_lines[-1] = out_lines[-1][:-1]
             out_lines[-1] = out_lines[-1] + " " + " ".join(inp_files) + "\n"
-            with open(os.path.join(folder_to_use, "flux_job.inp"), "w") as fh:
+            with open(os.path.join(folder_to_use, "flux_job.flux"), "w") as fh:
                 fh.writelines(out_lines)
 
 
