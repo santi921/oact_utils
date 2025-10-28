@@ -11,6 +11,7 @@ from oact_utilities.utils.create import (
 
 from oact_utilities.utils.status import check_file_termination, check_job_termination, pull_log_file
 
+
 def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     """
     Calculate RMSD between initial and final geometries from a trajectory file.

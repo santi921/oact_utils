@@ -2,7 +2,7 @@ import os
 from periodictable import elements as ptelements
 from typing import Dict, Any
 from oact_utilities.utils.an66 import process_geometry_file, process_multiplicity_file
-from oact_utilities.utils.analysis import get_rmsd_start_final
+
 
 def fetch_actinides():
     return [
