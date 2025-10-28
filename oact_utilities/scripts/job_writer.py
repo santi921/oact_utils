@@ -24,9 +24,10 @@ def write_flux_orca_an66(
     if not os.path.exists(ref_multiplicity_file):
         raise FileNotFoundError(f"Reference multiplicity file {ref_multiplicity_file} does not exist.")
     # make folder if not there 
+    
     if not os.path.exists(root_dir):
         os.makedirs(root_dir)
-        
+
     # baseline OMol
     write_jobs(
         actinide_basis=actinide_basis,
@@ -143,7 +144,7 @@ if __name__ == "__main__":
 
     actinide_basis = "/usr/workspace/vargas58/orca_test/basis_sets/cc_pvtz_x2c.bas"
     template_file = "/usr/workspace/vargas58/orca_test/templates/x2c_omol.inp" 
-    root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/x2c_pvtz_omol_M062x/"
+    root_directory = "/usr/workspace/vargas58/orca_test/an66_benchmarks/x2c_pvtz_omol_M062x/"
     write_flux_orca_an66(
         actinide_basis=actinide_basis,
         actinide_ecp=actinide_ecp,
@@ -162,7 +163,7 @@ if __name__ == "__main__":
 
 
     template_file = "/usr/workspace/vargas58/orca_test/templates/x2c_omol_tpss.inp" 
-    root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/x2c_pvtz_omol_tpss/"
+    root_directory = "/usr/workspace/vargas58/orca_test/an66_benchmarks/x2c_pvtz_omol_tpss/"
     write_flux_orca_an66(
         actinide_basis=actinide_basis,
         actinide_ecp=actinide_ecp,
@@ -180,7 +181,7 @@ if __name__ == "__main__":
     )
 
     template_file = "/usr/workspace/vargas58/orca_test/templates/x2c_omol_pbe0.inp" 
-    root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/x2c_pvtz_omol_pbe0/"
+    root_directory = "/usr/workspace/vargas58/orca_test/an66_benchmarks/x2c_pvtz_omol_pbe0/"
     write_flux_orca_an66(
         actinide_basis=actinide_basis,
         actinide_ecp=actinide_ecp,
@@ -201,7 +202,7 @@ if __name__ == "__main__":
     # x2c_omol.inp
     actinide_basis = "/usr/workspace/vargas58/orca_test/basis_sets/cc_pwcvtz_x2c.bas"
     template_file = "/usr/workspace/vargas58/orca_test/templates/x2c_omol.inp" 
-    root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/x2c_pwcvtz_omol_M062x/"
+    root_directory = "/usr/workspace/vargas58/orca_test/an66_benchmarks/x2c_pwcvtz_omol_M062x/"
     write_flux_orca_an66(
         actinide_basis=actinide_basis,
         actinide_ecp=actinide_ecp,
@@ -227,7 +228,7 @@ if __name__ == "__main__":
     non_actinide_basis = "DKH-def2-TZVPP"
     
     template_file = "/usr/workspace/vargas58/orca_test/templates/dk3_omol.inp" # 300 step
-    root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/dk3_omol_M062x/"
+    root_directory = "/usr/workspace/vargas58/orca_test/an66_benchmarks/dk3_omol_M062x/"
     
     write_flux_orca_an66(
         actinide_basis=actinide_basis,
@@ -246,7 +247,7 @@ if __name__ == "__main__":
     )
 
     template_file = "/usr/workspace/vargas58/orca_test/templates/dk3_omol_pbe0.inp" # 300 step
-    root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/dk3_omol_pbe0/"
+    root_directory = "/usr/workspace/vargas58/orca_test/an66_benchmarks/dk3_omol_pbe0/"
     # dk3 PBE0
     write_flux_orca_an66(
         actinide_basis=actinide_basis,
@@ -266,7 +267,7 @@ if __name__ == "__main__":
 
 
     template_file = "/usr/workspace/vargas58/orca_test/templates/dk3_omol_tpss.inp" # 300 step
-    root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/dk3_omol_tpss/"
+    root_directory = "/usr/workspace/vargas58/orca_test/an66_benchmarks/dk3_omol_tpss/"
     # dk3 TPSS
     write_flux_orca_an66(
         actinide_basis=actinide_basis,

@@ -368,7 +368,7 @@ def write_jobs(
             df_multiplicity=df_multiplicity,
             lines_cleaned_template=lines_cleaned_template,
             charge=0,
-            cores=8,
+            cores=cores,
             actinide_basis=actinide_basis,
             actinide_ecp=actinide_ecp,
             non_actinide_basis=non_actinide_basis,
