@@ -18,27 +18,30 @@ def launch_flux_jobs(
                     continue
 
             # check for flux_job.inp or flux_job_loose.inp and flux_job_tight.inp
-            if os.path.exists(os.path.join(folder_to_use, "flux_job.inp")):
+            if os.path.exists(os.path.join(folder_to_use, "flux_job.flux")):
                 print(f"Launching job in {folder_to_use}")
-                command = f"cd {folder_to_use} && flux submit flux_job.inp"
+                command = f"cd {folder_to_use} && flux submit flux_job.flux"
+                
                 if not dry:
                     os.system(command)
 
             elif os.path.exists(
                 os.path.join(folder_to_use, "flux_job_loose.inp")
-            ) and os.path.exists(os.path.join(folder_to_use, "flux_job_tight.inp")):
+            ) and os.path.exists(os.path.join(folder_to_use, "flux_job_tight.flux")):
                 if second_step:
                     print(f"Launching tight job in {folder_to_use}")
                     command_tight = (
-                        f"cd {folder_to_use} && flux submit flux_job_tight.inp"
+                        f"cd {folder_to_use} && flux submit flux_job_tight.flux"
                     )
+                
                     if not dry:
                         os.system(command_tight)
                 else:
                     print(f"Launching loose job in {folder_to_use}")
                     command_loose = (
-                        f"cd {folder_to_use} && flux submit flux_job_loose.inp"
+                        f"cd {folder_to_use} && flux submit flux_job_loose.flux"
                     )
+                
                     if not dry:
                         os.system(command_loose)
 
