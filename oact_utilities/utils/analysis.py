@@ -118,21 +118,17 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
                     line.split()[0].lower() ==   "rms"
                     and line.split()[1].lower() == "gradient"
                 ):
-                    print("Parsing RMS gradient: ", line.split())
                     info_dict["RMS_Gradient"] = float(line.split()[2])
                 if (
                     line.split()[0].lower() == "max"
                     and line.split()[1].lower() == "gradient"
                 ):
-                    print("Parsing RMS gradient: ", line.split())
                     info_dict["Max_Gradient"] = float(line.split()[2])
+                    info_block_tf = False
+                    list_info.append(info_dict)
             else: 
-                print("Skipping line in geo forces parsing: ", line)
                 continue
-            
-            if trigger_end_a in line.strip() or trigger_end_b in line.strip():
-                info_block_tf = False
-                list_info.append(info_dict)
+
 
     return list_info
 
