@@ -102,7 +102,7 @@ def check_sucessful_jobs(
             else:
                 if verbose:
                     print(f"Job in {folder_to_use} did not complete successfully.")
-    root_final = root_dir.split("/")[-1]
+    root_final = root_dir.split("/")[-2]
     print(f"Results in {root_final} \t\t\t (Success / Running / Failed): {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}")
 
 
