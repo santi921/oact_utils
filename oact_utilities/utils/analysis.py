@@ -102,8 +102,9 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
         lines = f.readlines()
 
     trigger = "Geometry convergence"
-    trigger_end = "........................................................"
-
+    trigger_end_a = "-------------------------------------------------------------------------"
+    trigger_end_b = "........................................................"
+    
     info_block_tf = False
     for i, line in enumerate(lines):
 
@@ -112,18 +113,24 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
             info_block_tf = True
 
         if info_block_tf:
-            if (
-                line.split()[0].lower() == "rms"
-                and line.split()[1].lower() == "gradient"
-            ):
-                info_dict["RMS_Gradient"] = float(line.split()[2])
-            if (
-                line.split()[0].lower() == "max"
-                and line.split()[1].lower() == "gradient"
-            ):
-                info_dict["Max_Gradient"] = float(line.split()[2])
-
-        if trigger_end in line.strip():
+            if len(line.split()) > 1:
+                if (
+                    line.split()[0].lower() ==   "rms"
+                    and line.split()[1].lower() == "gradient"
+                ):
+                    print("Parsing RMS gradient: ", line.split())
+                    info_dict["RMS_Gradient"] = float(line.split()[2])
+                if (
+                    line.split()[0].lower() == "max"
+                    and line.split()[1].lower() == "gradient"
+                ):
+                    print("Parsing RMS gradient: ", line.split())
+                    info_dict["Max_Gradient"] = float(line.split()[2])
+            else: 
+                print("Skipping line in geo forces parsing: ", line)
+                continue
+        
+        if trigger_end_a in line.strip() or trigger_end_b in line.strip():
             info_block_tf = False
             list_info.append(info_dict)
 
@@ -202,7 +209,15 @@ def get_full_info_all_jobs(
 
             if status != 1:
                 # print(f"Job in {folder_to_use} did not complete successfully. Skipping.")
-                continue
+                perf_info[name] = {
+                    "nprocs": None,
+                    "total_time_seconds": None,
+                    "geo_forces": None,
+                    "rmsd_start_final": None,
+                    "energies_opt": None,
+                    "elements_final": None,
+                    "coords_final": None,
+                }
 
             files = os.listdir(folder_to_use)
             # print("files: ", files)
@@ -220,7 +235,7 @@ def get_full_info_all_jobs(
 
 
             log_file = os.path.join(folder_to_use, files_out[0])
-            print(f"Using log file: {log_file}")
+            #print(f"Using log file: {log_file}")
             # info block
             nprocs, total_time_seconds = find_timings_and_cores(log_file)
             geo_forces = get_geo_forces(log_file=log_file)
