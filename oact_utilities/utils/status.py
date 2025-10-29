@@ -103,7 +103,10 @@ def check_sucessful_jobs(
                 if verbose:
                     print(f"Job in {folder_to_use} did not complete successfully.")
     root_final = root_dir.split("/")[-2]
-    print(f"Results in {root_final} \t\t\t (Success / Running / Failed): {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}")
+    # add tabs depending on length of root_final
+    root_len = len(root_final)
+    tab_count = "\t" * int(3 - (root_len // 8))
+    print(f"Results in {root_final} {tab_count} (Success / Running / Failed): {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}")
 
 
 def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:
