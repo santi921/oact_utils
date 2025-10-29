@@ -122,9 +122,9 @@ def check_sucessful_jobs(
     # add tabs depending on length of root_final
     root_len = len(root_final)
     tab_count = "\t" * int(4 - int(root_len // 8))
-    print(f"Results in {root_final} {tab_count} (Success / Running / Failed): {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}")
+    print(f"Results in {root_final} (S / R / F): {tab_count} {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}")
     if check_traj:
-        print(f"Traj Results in {root_final} {tab_count}: {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}")
+        print(f"Traj Results in {root_final} {tab_count}: {traj_count} / {count_success - traj_count} (With Traj / Without Traj)")
 
 
 def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:

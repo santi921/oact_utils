@@ -5,7 +5,11 @@ from oact_utilities.utils.status import check_job_termination
 
 
 def launch_flux_jobs(
-    root_dir: str, second_step: bool = False, skip_done: bool = True, dry: bool = False
+    root_dir: str, 
+    second_step: bool = False, 
+    skip_done: bool = True, 
+    dry: bool = False, 
+    verbose: bool = False,
 ) -> None:
     # iterate through every subfolder in root_dir
     for folder in os.listdir(root_dir):
@@ -15,7 +19,8 @@ def launch_flux_jobs(
             if skip_done:
                 # check if folder has successful flux job
                 if check_job_termination(folder_to_use):
-                    print(f"Skipping {folder_to_use} as it has a completed job.")
+                    if verbose:
+                        print(f"Skipping {folder_to_use} as it has a completed job.")
                     continue
 
             # check for flux_job.inp or flux_job_loose.inp and flux_job_tight.inp
