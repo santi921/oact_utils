@@ -47,12 +47,9 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     # ccheck if traj_output exists
 
     if os.path.exists(traj_output):
-        print(
-            f"Trajectory file {traj_output} does not exist. Cannot compute RMSD @ ea. step."
-        )
-        # find log file in folder_to_use
 
         print(f"Reading trajectory from {traj_output} for RMSD calculation.")
+        
         with open(traj_output, "r") as f:
             lines = f.readlines()
         lines_coords = [
@@ -61,6 +58,10 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
         energies = [float(lines[i].strip().split()[-1]) for i in lines_coords]
 
     else:
+        print(
+            f"Trajectory file {traj_output} does not exist. Cannot compute RMSD @ ea. step."
+        )
+
         log_file = pull_log_file(root_dir)
         energies = get_energy_from_log_file(log_file)
 
@@ -232,7 +233,7 @@ def get_full_info_all_jobs(
                     "geo_forces": geo_forces,
                     "rmsd_start_final": geom_info["rmsd"],
                     "energies_opt": geom_info["energies_frames"],
-                    "elements": geom_info["elements"],
+                    "elements_final": geom_info["elements_final"],
                     "coords_final": geom_info["coords"],
                 }
             else:
@@ -242,7 +243,7 @@ def get_full_info_all_jobs(
                     "geo_forces": None,
                     "rmsd_start_final": None,
                     "energies_opt": None,
-                    "elements": None,
+                    "elements_final": None,
                     "coords_final": None,
                 }
 
