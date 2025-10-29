@@ -214,6 +214,7 @@ def get_full_info_all_jobs(
                     "elements_final": None,
                     "coords_final": None,
                 }
+                continue
 
             files = os.listdir(folder_to_use)
             # print("files: ", files)
