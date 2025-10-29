@@ -103,8 +103,7 @@ def check_sucessful_jobs(
                 if verbose:
                     print(f"Job in {folder_to_use} did not complete successfully.")
 
-    print(f"Total successful jobs: {count_success} / {count_folder}")
-    print(f"Total still running jobs: {count_still_running} / {count_folder}")
+    print(f"Results in {root_dir} (Success / Running / Failed): {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}")
 
 
 def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:
