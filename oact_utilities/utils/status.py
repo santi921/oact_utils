@@ -87,7 +87,8 @@ def check_sucessful_jobs(
                 )
                 == 1
             ):
-                print(f"Job in {folder_to_use} completed successfully.")
+                if verbose:
+                    print(f"Job in {folder_to_use} completed successfully.")
                 count_success += 1
             elif (
                 check_job_termination(
