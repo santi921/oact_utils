@@ -203,7 +203,7 @@ def get_full_info_all_jobs(
                 # print(f"Job in {folder_to_use} did not complete successfully. Skipping.")
                 continue
 
-            files = os.listdir(dir)
+            files = os.listdir(folder_to_use)
             # print("files: ", files)
             if flux_tf:
                 files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
