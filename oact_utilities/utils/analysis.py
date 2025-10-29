@@ -234,7 +234,7 @@ def get_full_info_all_jobs(
                     "rmsd_start_final": geom_info["rmsd"],
                     "energies_opt": geom_info["energies_frames"],
                     "elements_final": geom_info["elements_final"],
-                    "coords_final": geom_info["coords"],
+                    "coords_final": geom_info["coords_final"],
                 }
             else:
                 perf_info[name] = {
