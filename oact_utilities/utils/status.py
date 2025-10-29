@@ -70,7 +70,7 @@ def check_job_termination(
 
 
 def check_sucessful_jobs(
-    root_dir: str, check_many: bool = False, flux_tf: bool = False
+    root_dir: str, check_many: bool = False, flux_tf: bool = False, verbose: bool = False
 ) -> None:
     count_folder = 0
     count_success = 0
@@ -96,9 +96,11 @@ def check_sucessful_jobs(
                 == 0
             ):
                 count_still_running += 1
-                print(f"Job in {folder_to_use} is still running or incomplete.")
+                if verbose:
+                    print(f"Job in {folder_to_use} is still running or incomplete.")
             else:
-                print(f"Job in {folder_to_use} did not complete successfully.")
+                if verbose:
+                    print(f"Job in {folder_to_use} did not complete successfully.")
 
     print(f"Total successful jobs: {count_success} / {count_folder}")
     print(f"Total still running jobs: {count_still_running} / {count_folder}")
