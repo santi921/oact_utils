@@ -226,7 +226,7 @@ def get_full_info_all_jobs(
 
             if len(files_out) > 1 and type(files_out) is list:
                 files_out.sort(
-                    key=lambda x: os.path.getmtime(os.path.join(dir, x)), reverse=True
+                    key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)), reverse=True
                 )
 
 
