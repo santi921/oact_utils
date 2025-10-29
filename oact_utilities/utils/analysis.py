@@ -224,7 +224,7 @@ def get_full_info_all_jobs(
             if len(log_file) == 0:
                 # print(f"No log file found in {folder_to_use}. Skipping.")
                 continue
-            if len(log_file) > 1:
+            if len(log_file) > 1 and type(log_file) is list:
                 # print(f"Multiple log files found in {folder_to_use}. Using the most recent one.")
                 log_file.sort(
                     key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)),
