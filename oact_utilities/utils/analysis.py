@@ -129,10 +129,10 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
             else: 
                 print("Skipping line in geo forces parsing: ", line)
                 continue
-        
-        if trigger_end_a in line.strip() or trigger_end_b in line.strip():
-            info_block_tf = False
-            list_info.append(info_dict)
+            
+            if trigger_end_a in line.strip() or trigger_end_b in line.strip():
+                info_block_tf = False
+                list_info.append(info_dict)
 
     return list_info
 
