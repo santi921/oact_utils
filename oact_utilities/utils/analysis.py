@@ -9,7 +9,11 @@ from oact_utilities.utils.create import (
     read_geom_from_inp_file,
 )
 
-from oact_utilities.utils.status import check_file_termination, check_job_termination, pull_log_file
+from oact_utilities.utils.status import (
+    check_file_termination,
+    check_job_termination,
+    pull_log_file,
+)
 
 
 def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
@@ -33,33 +37,37 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     file_density = [f for f in files_in if f.endswith(".densities")]
     # get the shortest name
     root_name = min(file_density, key=len).split(".densities")[0]
-    
+
     xyz_output = os.path.join(folder_results, f"{root_name}.xyz")
     inp_file = os.path.join(folder_results, f"{root_name}.inp")
     traj_output = os.path.join(folder_results, f"{root_name}_trj.xyz")
-    
-    
+
     initial_geom = read_geom_from_inp_file(inp_file)
     # read lines from traj_output that starts with Coordinates
     # ccheck if traj_output exists
 
     if os.path.exists(traj_output):
-        print(f"Trajectory file {traj_output} does not exist. Cannot compute RMSD @ ea. step.")
-            # find log file in folder_to_use
- 
+        print(
+            f"Trajectory file {traj_output} does not exist. Cannot compute RMSD @ ea. step."
+        )
+        # find log file in folder_to_use
+
         print(f"Reading trajectory from {traj_output} for RMSD calculation.")
         with open(traj_output, "r") as f:
             lines = f.readlines()
-        lines_coords = [i for i, line in enumerate(lines) if line.startswith("Coordinates")]
+        lines_coords = [
+            i for i, line in enumerate(lines) if line.startswith("Coordinates")
+        ]
         energies = [float(lines[i].strip().split()[-1]) for i in lines_coords]
-    
-    else:
-        log_file = pull_log_file(root_dir)                    
-        energies = get_energy_from_log_file(log_file)
-    
-    if os.path.exists(xyz_output) is False:
-        raise FileNotFoundError(f"XYZ output file {xyz_output} not found...reading positions from .inp file instead.")
 
+    else:
+        log_file = pull_log_file(root_dir)
+        energies = get_energy_from_log_file(log_file)
+
+    if os.path.exists(xyz_output) is False:
+        raise FileNotFoundError(
+            f"XYZ output file {xyz_output} not found...reading positions from .inp file instead."
+        )
 
     atoms, _ = read_xyz_single_file(xyz_output)
     elements, coords = dict_to_numpy(atoms)
@@ -254,7 +262,7 @@ def get_full_info_all_jobs(
     return perf_info
 
 
-def get_energy_from_log_file(log_file):     
+def get_energy_from_log_file(log_file):
     """
     Extract energies from log file.
     Args:

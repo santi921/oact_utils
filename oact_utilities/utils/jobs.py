@@ -10,7 +10,7 @@ def launch_flux_jobs(
     # iterate through every subfolder in root_dir
     for folder in os.listdir(root_dir):
         folder_to_use = os.path.join(root_dir, folder)
-        
+
         if os.path.isdir(folder_to_use):
             if skip_done:
                 # check if folder has successful flux job
@@ -22,7 +22,7 @@ def launch_flux_jobs(
             if os.path.exists(os.path.join(folder_to_use, "flux_job.flux")):
                 print(f"Launching job in {folder_to_use}")
                 command = f"cd {folder_to_use} && flux batch flux_job.flux"
-                
+
                 if not dry:
                     os.system(command)
 
@@ -34,7 +34,7 @@ def launch_flux_jobs(
                     command_tight = (
                         f"cd {folder_to_use} && flux batch flux_job_tight.flux"
                     )
-                
+
                     if not dry:
                         os.system(command_tight)
                 else:
@@ -42,7 +42,6 @@ def launch_flux_jobs(
                     command_loose = (
                         f"cd {folder_to_use} && flux batch flux_job_loose.flux"
                     )
-                
+
                     if not dry:
                         os.system(command_loose)
-

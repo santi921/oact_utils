@@ -129,7 +129,7 @@ def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:
 def pull_log_file(root_dir: str) -> str:
     """
     Pulls the most recent log file from a given directory.
-    
+
     Args:
         root_dir (str): The directory to search for log files.
     Returns:
@@ -137,17 +137,17 @@ def pull_log_file(root_dir: str) -> str:
     """
     try:
         log_file = [f for f in os.listdir(root_dir) if f.endswith("logs")]
-        
+
         if len(log_file) == 0:
             log_file = [f for f in os.listdir(root_dir) if f.endswith(".out")]
-        
+
         if len(log_file) > 1:
             log_file.sort(
                 key=lambda x: os.path.getmtime(os.path.join(root_dir, x)),
                 reverse=True,
             )
         log_file = os.path.join(root_dir, log_file[0])
-    
+
     except:
         # check for "flux-"
         # get all files that contains  flux-
@@ -157,7 +157,7 @@ def pull_log_file(root_dir: str) -> str:
             reverse=True,
         )
         log_file = os.path.join(root_dir, files_flux[0])
-    #if type(log_file) is list:
+    # if type(log_file) is list:
     #    log_file = log_file[0]
 
     return log_file

@@ -156,7 +156,6 @@ def write_orca_input(
     else:
         file_name = f"{folder_to_use}/{name}_orca.inp"
 
-
     with open(file_name, "w") as f:
         for line in lines_cleaned_template:
             f.write(line)
@@ -250,6 +249,7 @@ def write_flux(template_file: str, root_dir: str, two_step: bool = False) -> Non
                     for line in lines_cleaned_template_modified:
                         f.write(line)
 
+
 """flux format
 #!/bin/sh
 #flux: -N 1
@@ -264,14 +264,15 @@ export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY
 /usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca 
 """
 
+
 def write_flux_no_template(
-        root_dir: str, 
-        two_step: bool = False, 
-        n_cores: int = 4, 
-        n_hours: int = 2, 
-        queue: str = "pbatch",
-        allocation: str = "dnn-sim"
-    ) -> None:
+    root_dir: str,
+    two_step: bool = False,
+    n_cores: int = 4,
+    n_hours: int = 2,
+    queue: str = "pbatch",
+    allocation: str = "dnn-sim",
+) -> None:
 
     base_lines = [
         "#!/bin/sh\n",
@@ -284,9 +285,8 @@ def write_flux_no_template(
         "source ~/.bashrc\n",
         "conda activate py10mpi\n",
         "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
-        "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca"
+        "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
     ]
-
 
     # create folder if it does not exist
     if not os.path.exists(root_dir):
@@ -317,7 +317,9 @@ def write_flux_no_template(
                 if out_lines[-1].endswith("\n"):
                     out_lines[-1] = out_lines[-1][:-1]
                 out_lines[-1] = out_lines[-1] + " " + " ".join(loose_files) + "\n"
-                with open(os.path.join(folder_to_use, "flux_job_loose.flux"), "w") as fh:
+                with open(
+                    os.path.join(folder_to_use, "flux_job_loose.flux"), "w"
+                ) as fh:
                     fh.writelines(out_lines)
 
             if tight_files:
@@ -325,7 +327,9 @@ def write_flux_no_template(
                 if out_lines[-1].endswith("\n"):
                     out_lines[-1] = out_lines[-1][:-1]
                 out_lines[-1] = out_lines[-1] + " " + " ".join(tight_files) + "\n"
-                with open(os.path.join(folder_to_use, "flux_job_tight.flux"), "w") as fh:
+                with open(
+                    os.path.join(folder_to_use, "flux_job_tight.flux"), "w"
+                ) as fh:
                     fh.writelines(out_lines)
         else:
             inp_files = [
@@ -374,6 +378,3 @@ def write_jobs(
             non_actinide_basis=non_actinide_basis,
             two_step=two_step,
         )
-
-
-
