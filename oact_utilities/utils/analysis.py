@@ -203,35 +203,22 @@ def get_full_info_all_jobs(
                 # print(f"Job in {folder_to_use} did not complete successfully. Skipping.")
                 continue
 
-            # find log file in folder_to_use
+            files = os.listdir(dir)
+            # print("files: ", files)
             if flux_tf:
-                # check for "flux-"
-                # get all files that contains  flux-
-                files_flux = [f for f in os.listdir(folder_to_use) if "flux-" in f]
-                files_flux.sort(
-                    key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)),
-                    reverse=True,
-                )
-                log_file = os.path.join(folder_to_use, files_flux[0])
-
+                files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
             else:
-                log_file = [f for f in os.listdir(folder_to_use) if f.endswith("logs")]
-                if len(log_file) == 0:
-                    log_file = [
-                        f for f in os.listdir(folder_to_use) if f.endswith(".out")
-                    ]
+                files_out = [f for f in files if f.endswith("out")]
+                if not files_out:
+                    files_out = [f for f in files if f.endswith("logs")]
 
-            if len(log_file) == 0:
-                # print(f"No log file found in {folder_to_use}. Skipping.")
-                continue
-            if len(log_file) > 1 and type(log_file) is list:
-                # print(f"Multiple log files found in {folder_to_use}. Using the most recent one.")
-                log_file.sort(
-                    key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)),
-                    reverse=True,
+            if len(files_out) > 1 and type(files_out) is list:
+                files_out.sort(
+                    key=lambda x: os.path.getmtime(os.path.join(dir, x)), reverse=True
                 )
 
-            log_file = os.path.join(folder_to_use, log_file[0])
+
+            log_file = os.path.join(folder_to_use, files_out[0])
             print(f"Using log file: {log_file}")
             # info block
             nprocs, total_time_seconds = find_timings_and_cores(log_file)
