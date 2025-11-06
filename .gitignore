@@ -228,3 +228,9 @@ __marimo__/
 *.property.*
 *.engrad
 *.densities*
+*png
+*npy
+*txt
+*DS_Store
+*in
+log

@@ -29,14 +29,20 @@ def elements_to_atomic_numbers(elements: list[str]) -> list[int]:
     return atomic_numbers
 
 
-def read_geom_from_inp_file(inp_file: str) -> list[dict[str, float | str]]:
+def read_geom_from_inp_file(inp_file: str, ase_format_tf: bool=False) -> list[dict[str, float | str]]:
     with open(inp_file, "r") as f:
         lines = f.readlines()
 
     geom_start = False
     atoms = []
+    if ase_format_tf:
+        syms_list = []
+        coords_list = []
+
     for line in lines:
         if line.strip().startswith("* xyz"):
+            charge = line.strip().split()[2]
+            spin = line.strip().split()[3]
             geom_start = True
             continue
         if geom_start:
@@ -47,7 +53,17 @@ def read_geom_from_inp_file(inp_file: str) -> list[dict[str, float | str]]:
             x = float(parts[1])
             y = float(parts[2])
             z = float(parts[3])
-            atoms.append({"element": element, "x": x, "y": y, "z": z})
+            
+            if ase_format_tf:
+                syms_list.append(element)
+                coords_list.append([x, y, z])
+            else:
+                atoms.append({"element": element, "x": x, "y": y, "z": z})
+    if ase_format_tf:
+        from ase import Atoms
+        atoms = Atoms(symbols=syms_list, positions=coords_list)
+        atoms.charge = int(charge)
+        atoms.spin = int(spin)
     return atoms
 
 
