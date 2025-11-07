@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import os
 
-#from quacc.recipes.orca.core import run_and_summarize, run_and_summarize_opt
 from oact_utilities.core.orca._base import run_and_summarize, run_and_summarize_opt
-from quacc import get_settings
 from quacc import change_settings
-from quacc.utils.lists import merge_list_params
 
 from oact_utilities.core.orca.calc import (
     Vertical,
@@ -106,8 +103,8 @@ def single_point_calculation(
 
     return doc
 
-#ase_relax_job / relax_job
 
+#ase_relax_job / relax_job
 def ase_relaxation(
     atoms,
     charge,
@@ -163,32 +160,7 @@ def ase_relaxation(
     calc_kwargs:
         Additional kwargs for the custom Orca calculator
     """
-    #from quacc import SETTINGS
 
-    #SETTINGS.RESULTS_DIR = outputdir
-    """
-    if orcasimpleinput is None:
-        orcasimpleinput = ORCA_SIMPLE_INPUT.copy()
-    if orcablocks is None:
-        orcablocks = ORCA_BLOCKS.copy()
-    if opt_params is None:
-        opt_params = OPT_PARAMETERS.copy()
-    if vertical == Vertical.MetalOrganics and spin_multiplicity == 1: # todo: SV update here
-        orcasimpleinput.append("UKS") 
-        orcablocks.append(get_symm_break_block(atoms, charge))
-    if not nbo:
-        orcasimpleinput.extend(["NONBO", "NONPA"])
-    else:
-        orcablocks.append(NBO_FLAGS)
-
-    nprocs = psutil.cpu_count(logical=False) if nprocs == "max" else nprocs
-    default_inputs = [xc, basis, "engrad"]
-    default_blocks = [f"%pal nprocs {nprocs} end"]
-    """
-    #default_inputs = [functional, non_actinide_basis, "engrad"]
-    #default_blocks = [f"%pal nprocs {nprocs} end"]
-    
-    change_settings({"ORCA_CMD": orca_cmd, "RESULTS_DIR": outputdir})
 
     orcasimpleinput, orcablocks = get_orca_blocks(
         atoms,
@@ -216,8 +188,6 @@ def ase_relaxation(
             atoms,
             charge=charge,
             spin_multiplicity=spin_multiplicity,
-            #default_inputs=default_inputs,
-            #default_blocks=default_blocks,
             input_swaps=orcasimpleinput,
             block_swaps=orcablocks,
             opt_params=opt_params,
