@@ -2,7 +2,7 @@ import os
 from periodictable import elements as ptelements
 from typing import Dict, Any
 from oact_utilities.utils.an66 import process_geometry_file, process_multiplicity_file
-
+from ase import Atoms
 
 def fetch_actinides():
     return [
@@ -35,6 +35,7 @@ def read_geom_from_inp_file(inp_file: str, ase_format_tf: bool=False) -> list[di
 
     geom_start = False
     atoms = []
+    
     if ase_format_tf:
         syms_list = []
         coords_list = []
@@ -45,6 +46,7 @@ def read_geom_from_inp_file(inp_file: str, ase_format_tf: bool=False) -> list[di
             spin = line.strip().split()[3]
             geom_start = True
             continue
+
         if geom_start:
             if line.strip().startswith("*"):
                 break
@@ -53,6 +55,7 @@ def read_geom_from_inp_file(inp_file: str, ase_format_tf: bool=False) -> list[di
             x = float(parts[1])
             y = float(parts[2])
             z = float(parts[3])
+
             
             if ase_format_tf:
                 syms_list.append(element)
@@ -60,11 +63,14 @@ def read_geom_from_inp_file(inp_file: str, ase_format_tf: bool=False) -> list[di
             else:
                 atoms.append({"element": element, "x": x, "y": y, "z": z})
     if ase_format_tf:
-        from ase import Atoms
+        print(syms_list)
+        print(coords_list)
         atoms = Atoms(symbols=syms_list, positions=coords_list)
         atoms.charge = int(charge)
         atoms.spin = int(spin)
+    
     return atoms
+    
 
 
 def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], str]:

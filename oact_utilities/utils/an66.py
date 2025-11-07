@@ -1,23 +1,44 @@
 from typing import Any, List, Dict, Tuple
 import pandas as pd
+from ase import Atoms
 
-
-def process_geometry_file(file: str) -> Dict[str, List[Dict[str, Any]]]:
+def process_geometry_file(file: str, ase_format_tf: bool=False) -> Dict[str, List[Dict[str, Any]]]:
+    
+    if ase_format_tf:
+        syms_list = []
+        coords_list = []
+    
     with open(file, "r") as f:
         lines = f.readlines()
 
+    
     dict_geoms = {}
-    for line in lines:
+    for ind, line in enumerate(lines[:-1]):
+        # logic for new geometry
         if line.startswith("Geometry for"):
             molecule = line.split()[-1]
             dict_geoms[molecule] = []
+        
         elif line[0].isalpha():
             parts = line.split()
             atom = parts[0]
             x = float(parts[1])
             y = float(parts[2])
             z = float(parts[3])
-            dict_geoms[molecule].append({"element": atom, "x": x, "y": y, "z": z})
+            
+            if ase_format_tf:
+                syms_list.append(atom)
+                coords_list.append([x, y, z])
+    
+            else:
+                dict_geoms[molecule].append({"element": atom, "x": x, "y": y, "z": z})
+
+        if ase_format_tf:
+            if lines[ind+1].startswith("Geometry for") or ind == len(lines)-2:
+                dict_geoms[molecule] = Atoms(symbols=syms_list, positions=coords_list)
+                syms_list = []
+                coords_list = []
+
     return dict_geoms
 
 

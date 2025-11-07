@@ -63,13 +63,12 @@ def single_point_calculation(
         Additional kwargs for the custom Orca calculator
     """
 
-    default_inputs = [functional, non_actinide_basis, "engrad"]
-    default_blocks = [f"%pal nprocs {nprocs} end"]
     
     orcasimpleinput, orcablocks = get_orca_blocks(
         atoms,
         nbo=nbo,
         cores=nprocs,
+        basis=None, 
         vertical=vertical,
         scf_MaxIter=scf_MaxIter,
         mult=spin_multiplicity,
@@ -93,8 +92,8 @@ def single_point_calculation(
             atoms,
             charge=charge,
             spin_multiplicity=spin_multiplicity,
-            default_inputs=default_inputs,
-            default_blocks=default_blocks,
+            #default_inputs=default_inputs,
+            #default_blocks=default_blocks,
             input_swaps=orcasimpleinput,
             block_swaps=orcablocks,
             copy_files=copy_files,
@@ -167,6 +166,7 @@ def ase_relaxation(
         nbo=nbo,
         cores=nprocs,
         vertical=vertical,
+        basis=None, 
         scf_MaxIter=scf_MaxIter,
         mult=spin_multiplicity,
         functional=functional,

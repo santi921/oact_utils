@@ -409,8 +409,8 @@ def get_orca_blocks(
                 orcablocks[index] = re.sub(r"maxiter \d+", f"maxiter {scf_MaxIter}", block_line)
                 break
             
-    #print(orcablocks)
-    #print(orcasimpleinput)
+    #print("orca_blocks: ", orcablocks)
+    #print("orca_simple: ", orcasimpleinput)
     return orcasimpleinput, orcablocks
 
 def write_orca_inputs(
