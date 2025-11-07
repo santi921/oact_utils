@@ -165,7 +165,3 @@ def test_H2(
     assert abs(rms_forces_quacc) < 1e-3, f"RMS forces between ORCA and Quacc differ too much: {abs(rms_forces_quacc - rms_forces_orca)} eV/A"
     assert abs(rms_forces_orca) < 1e-3, f"RMS forces between ORCA and Quacc differ too much: {abs(rms_forces_quacc - rms_forces_orca)} eV/A"
 
-
-
-
-test_H2()

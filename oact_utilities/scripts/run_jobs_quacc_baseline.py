@@ -1,6 +1,8 @@
 import pickle as pkl 
 from oact_utilities.core.orca.recipes import ase_relaxation
 from oact_utilities.utils.create import * 
+import time
+import random
 
 def jobs_wrapper_an66(
     actinide_basis: str = "ma-def-TZVP",
@@ -19,23 +21,46 @@ def jobs_wrapper_an66(
 
     df_multiplicity_ase = process_multiplicity_file(ref_multiplicity_file)
     dict_geoms_ase = process_geometry_file(ref_geom_file, ase_format_tf=True)
+    
     job_list = df_multiplicity_ase["molecule"].tolist()
     spin_list = df_multiplicity_ase["multiplicity"].tolist()
+    
+    n_draws = len(job_list)
     
     # create folder if it does not exist
     if not os.path.exists(root_directory):
         os.makedirs(root_directory)
     
     
-    for ind, job in enumerate(job_list):
+    for draw in range(n_draws):
+        # randomly select a job
+        ind = random.randint(0, len(job_list)-1)
+        job = job_list[ind]
         atoms = dict_geoms_ase[job]
         nbo_tf = False
         charge = 0
         mult = spin_list[ind]
         root_directory_job = os.path.join(root_directory, job)
+        
         if not os.path.exists(root_directory_job):
             os.makedirs(root_directory_job)
+        else: 
+            # check if the folder has a results.pkl file, if so skip
+            if os.path.exists(os.path.join(root_directory_job, "results.pkl")):
+                print(f"Job for {job} already completed. Skipping.")
+                continue
+            # check if the folder has recently modified files, if so skip
+            files_in_job = os.listdir(root_directory_job)
+            recent_modification = False
+            for f in files_in_job:
+                file_path = os.path.join(root_directory_job, f)
+                if os.path.getmtime(file_path) > time.time() - 900:  # 15 mins
+                    recent_modification = True
+                    print(f"Job for {job} is currently running. Skipping.")
+                    break
+
         
+        time_start = time.time()
         res_dict = ase_relaxation(
             atoms=atoms,
             charge=charge,
@@ -51,9 +76,12 @@ def jobs_wrapper_an66(
             actinide_ecp=actinide_ecp,
             non_actinide_basis=non_actinide_basis
         )
+        time_end = time.time()
+        print(f"Job for {job} completed in {time_end - time_start} seconds.")
     
         # convert res_dict to normal dict
         res_dict = dict(res_dict)
+        res_dict["time_seconds"] = time_end - time_start
         # save res_dict as json
         save_loc = dict(res_dict)["dir_name"]
         with open(os.path.join(save_loc, "results.pkl"), "wb") as f:
