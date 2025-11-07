@@ -192,21 +192,21 @@ ORCA_SIMPLE_INPUT_DK3 = [
 ]
 
 ORCA_BLOCKS = [
-    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\nend",
+    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\nShift Shift 0.1 ErrOff 0.1 end\nend",
     "%elprop Dipole true Quadrupole true end",
     "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
 ]
 
 ORCA_BLOCKS_X2C = [
     "%rel \n  FiniteNuc     true\n  DLU         true\n  LightAtomThresh 0\nend",
-    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\nend",
+    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\nShift Shift 0.1 ErrOff 0.1 end\nend",
     "%elprop Dipole true Quadrupole true end",
     "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
 ]
 
 ORCA_BLOCKS_DK3 = [
     "%rel \n  FiniteNuc     true\nend\n",
-    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\nend\n",
+    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n. Shift Shift 0.1 ErrOff 0.1 end\nend",
     "%elprop Dipole true Quadrupole true end",
     "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
 ]
@@ -330,7 +330,7 @@ def get_mem_estimate(
         # Default UKS scaling as determined by metal-organics in Orca5
         a = 0.016460518374501867
         b = -320.38502508802776
-    mem_est = max(a * nbasis**1.5 + b, 1000)
+    mem_est = max(a * nbasis**1.5 + b, 2000)
     return mem_est
 
     
@@ -365,7 +365,8 @@ def get_orca_blocks(
         orcasimpleinput = " ".join([functional] + [ORCA_BASIS] + simple)
     
     elem_set = set(atoms.get_chemical_symbols())
-    orcablocks.append("\n%basis")
+    
+    orcablocks.append("%basis")
 
     for elem in elem_set:
         if elem in ACTINIDE_LIST:
@@ -379,13 +380,13 @@ def get_orca_blocks(
                 orcablocks.append(f'  NewECP {elem} "{actinide_ecp}" end')
         else:
             if os.path.isfile(non_actinide_basis):
-                orcablocks.append(f'  GTOName      = "{non_actinide_basis}"      # read orbital basis')
+                orcablocks.append(f'  GTOName      = "{non_actinide_basis}"')
                 
             else:
                 orcablocks.append(f'  NewGTO {elem} "{non_actinide_basis}" end')
                 
     orcablocks.append(f"end")
-    orcablocks.append(f"\n%pal\n nprocs " + str(cores) + "\nend")
+    orcablocks.append(f"%pal\n nprocs " + str(cores) + "\nend")
 
     # Include estimate of memory needs
     mem_est = get_mem_estimate(atoms, vertical, mult)
@@ -402,13 +403,12 @@ def get_orca_blocks(
 
     if scf_MaxIter:
         for block_line in orcablocks:
-            print(block_line)
+            
             if "maxiter 500" in block_line:
                 index = orcablocks.index(block_line)
                 orcablocks[index] = re.sub(r"maxiter \d+", f"maxiter {scf_MaxIter}", block_line)
                 break
-        else:
-            orcablocks.append(f"\n%scf\n maxiter {scf_MaxIter}\nend")
+            
     #print(orcablocks)
     #print(orcasimpleinput)
     return orcasimpleinput, orcablocks
