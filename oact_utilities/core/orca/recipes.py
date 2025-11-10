@@ -7,10 +7,7 @@ import os
 from oact_utilities.core.orca._base import run_and_summarize, run_and_summarize_opt
 from quacc import change_settings
 
-from oact_utilities.core.orca.calc import (
-    Vertical,
-    get_orca_blocks
-)
+from oact_utilities.core.orca.calc import Vertical, get_orca_blocks
 
 
 def single_point_calculation(
@@ -63,12 +60,11 @@ def single_point_calculation(
         Additional kwargs for the custom Orca calculator
     """
 
-    
     orcasimpleinput, orcablocks = get_orca_blocks(
         atoms,
         nbo=nbo,
         cores=nprocs,
-        basis=None, 
+        basis=None,
         vertical=vertical,
         scf_MaxIter=scf_MaxIter,
         mult=spin_multiplicity,
@@ -78,9 +74,9 @@ def single_point_calculation(
         actinide_ecp=actinide_ecp,
         non_actinide_basis=non_actinide_basis,
     )
-    #print(orcasimpleinput)
-    #print(orcablocks)
-    
+    # print(orcasimpleinput)
+    # print(orcablocks)
+
     with change_settings(
         {
             "ORCA_CMD": orca_cmd,
@@ -92,8 +88,8 @@ def single_point_calculation(
             atoms,
             charge=charge,
             spin_multiplicity=spin_multiplicity,
-            #default_inputs=default_inputs,
-            #default_blocks=default_blocks,
+            # default_inputs=default_inputs,
+            # default_blocks=default_blocks,
             input_swaps=orcasimpleinput,
             block_swaps=orcablocks,
             copy_files=copy_files,
@@ -103,7 +99,7 @@ def single_point_calculation(
     return doc
 
 
-#ase_relax_job / relax_job
+# ase_relax_job / relax_job
 def ase_relaxation(
     atoms,
     charge,
@@ -160,13 +156,12 @@ def ase_relaxation(
         Additional kwargs for the custom Orca calculator
     """
 
-
     orcasimpleinput, orcablocks = get_orca_blocks(
         atoms,
         nbo=nbo,
         cores=nprocs,
         vertical=vertical,
-        basis=None, 
+        basis=None,
         scf_MaxIter=scf_MaxIter,
         mult=spin_multiplicity,
         functional=functional,

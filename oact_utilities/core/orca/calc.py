@@ -18,7 +18,7 @@ ECP_SIZE = {
     **{i: 60 for i in range(72, 87)},
 }
 
-# SV - change from def2 to def 
+# SV - change from def2 to def
 ECP_SIZE = {
     **{i: 60 for i in range(87, 88)},
     **{i: 78 for i in range(89, 103)},
@@ -112,22 +112,21 @@ BASIS_DICT = {
     "Po": 59,
     "At": 59,
     "Rn": 59,
-    "Ac": 105, 
-    "Th": 105, 
-    "Pa": 105, 
-    "U": 105, 
-    "Np": 105, 
-    "Pu": 105, 
-    "Am": 105, 
-    "Cm": 105, 
-    "Bk": 105, 
-    "Cf": 105, 
-    "Es": 105, 
-    "Fm": 105, 
-    "Md": 105,  
-    "No": 105, 
-    "Lr": 105
-    
+    "Ac": 105,
+    "Th": 105,
+    "Pa": 105,
+    "U": 105,
+    "Np": 105,
+    "Pu": 105,
+    "Am": 105,
+    "Cm": 105,
+    "Bk": 105,
+    "Cf": 105,
+    "Es": 105,
+    "Fm": 105,
+    "Md": 105,
+    "No": 105,
+    "Lr": 105,
 }
 
 ACTINIDE_LIST = [
@@ -145,10 +144,10 @@ ACTINIDE_LIST = [
     "Fm",
     "Md",
     "No",
-    "Lr"
+    "Lr",
 ]
 
-#ORCA_FUNCTIONAL = ""
+# ORCA_FUNCTIONAL = ""
 ORCA_BASIS = "def2-TZVPD"
 ORCA_SIMPLE_INPUT = [
     "EnGrad",
@@ -160,7 +159,7 @@ ORCA_SIMPLE_INPUT = [
     "NormalConv",
     "DEFGRID3",
     "ALLPOP",
-    "NoTRAH" # SV - add for TM complexes
+    "NoTRAH",  # SV - add for TM complexes
 ]
 
 ORCA_SIMPLE_INPUT_X2C = [
@@ -174,12 +173,11 @@ ORCA_SIMPLE_INPUT_X2C = [
     "NormalConv",
     "DEFGRID3",
     "ALLPOP",
-    "NoTRAH" # SV - add for TM complexes
+    "NoTRAH",  # SV - add for TM complexes
 ]
 
 ORCA_SIMPLE_INPUT_DK3 = [
-    "DKH"
-    "EnGrad",
+    "DKH" "EnGrad",
     "RIJCOSX",
     "SARC/J",
     "NoUseSym",
@@ -188,7 +186,7 @@ ORCA_SIMPLE_INPUT_DK3 = [
     "NormalConv",
     "DEFGRID3",
     "ALLPOP",
-    "NoTRAH" # SV - add for TM complexes
+    "NoTRAH",  # SV - add for TM complexes
 ]
 
 ORCA_BLOCKS = [
@@ -211,7 +209,7 @@ ORCA_BLOCKS_DK3 = [
     "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
 ]
 
-NBO_FLAGS = '%nbo NBOKEYLIST = "$NBO NPA NBO E2PERT 0.1 $END" end' # SV - turn off??
+NBO_FLAGS = '%nbo NBOKEYLIST = "$NBO NPA NBO E2PERT 0.1 $END" end'  # SV - turn off??
 
 
 LOOSE_OPT_PARAMETERS = {
@@ -268,6 +266,7 @@ class Vertical(Enum):
     Default = "default"
     MetalOrganics = "metal-organics"
     Oss = "open-shell-singlet"
+
 
 def get_symm_break_block(atoms: Atoms, charge: int) -> str:
     """
@@ -330,10 +329,10 @@ def get_mem_estimate(
         # Default UKS scaling as determined by metal-organics in Orca5
         a = 0.016460518374501867
         b = -320.38502508802776
-    mem_est = max(a * nbasis**1.5 + b, 2000)
+    mem_est = int(max(a * nbasis**1.5 + b, 2000))
     return mem_est
 
-    
+
 def get_orca_blocks(
     atoms: Atoms,
     mult: int = 1,
@@ -348,31 +347,33 @@ def get_orca_blocks(
     actinide_ecp: str | None = None,
     non_actinide_basis: str = "def2-TZVPD",
 ):
-    
+
     if simple_input == "omol":
-        simple = ORCA_SIMPLE_INPUT
-        orcablocks = ORCA_BLOCKS
+        simple = ORCA_SIMPLE_INPUT.copy()
+        orcablocks = ORCA_BLOCKS.copy()
     elif simple_input == "x2c":
-        simple = ORCA_SIMPLE_INPUT_X2C
-        orcablocks = ORCA_BLOCKS_X2C
+        simple = ORCA_SIMPLE_INPUT_X2C.copy()
+        orcablocks = ORCA_BLOCKS_X2C.copy()
     elif simple_input == "dk3":
-        simple = ORCA_SIMPLE_INPUT_DK3
-        orcablocks = ORCA_BLOCKS_DK3
+        simple = ORCA_SIMPLE_INPUT_DK3.copy()
+        orcablocks = ORCA_BLOCKS_DK3.copy()
 
     if basis is not None:
         orcasimpleinput = " ".join([functional] + [basis] + simple)
-    else: 
+    else:
         orcasimpleinput = " ".join([functional] + [ORCA_BASIS] + simple)
-    
+
     elem_set = set(atoms.get_chemical_symbols())
-    
+
     orcablocks.append("%basis")
 
     for elem in elem_set:
         if elem in ACTINIDE_LIST:
             if os.path.isfile(actinide_basis):
-                orcablocks.append(f'  GTOName      = "{actinide_basis}"      # read orbital basis')
-                
+                orcablocks.append(
+                    f'  GTOName      = "{actinide_basis}"      # read orbital basis'
+                )
+
             else:
                 orcablocks.append(f'  NewGTO {elem} "{actinide_basis}" end')
 
@@ -381,17 +382,17 @@ def get_orca_blocks(
         else:
             if os.path.isfile(non_actinide_basis):
                 orcablocks.append(f'  GTOName      = "{non_actinide_basis}"')
-                
+
             else:
                 orcablocks.append(f'  NewGTO {elem} "{non_actinide_basis}" end')
-                
+
     orcablocks.append(f"end")
     orcablocks.append(f"%pal\n nprocs " + str(cores) + "\nend")
 
     # Include estimate of memory needs
     mem_est = get_mem_estimate(atoms, vertical, mult)
     orcablocks.append(f"%maxcore {mem_est}")
-    
+
     if not nbo:
         orcasimpleinput += " NONBO NONPA"
     else:
@@ -403,15 +404,18 @@ def get_orca_blocks(
 
     if scf_MaxIter:
         for block_line in orcablocks:
-            
+
             if "maxiter 500" in block_line:
                 index = orcablocks.index(block_line)
-                orcablocks[index] = re.sub(r"maxiter \d+", f"maxiter {scf_MaxIter}", block_line)
+                orcablocks[index] = re.sub(
+                    r"maxiter \d+", f"maxiter {scf_MaxIter}", block_line
+                )
                 break
-            
-    #print("orca_blocks: ", orcablocks)
-    #print("orca_simple: ", orcasimpleinput)
+
+    # print("orca_blocks: ", orcablocks)
+    # print("orca_simple: ", orcasimpleinput)
     return orcasimpleinput, orcablocks
+
 
 def write_orca_inputs(
     atoms: Atoms,
@@ -434,9 +438,8 @@ def write_orca_inputs(
     system. Primarily used for debugging.
     """
 
-
     orcasimpleinput, orcablocks = get_orca_blocks(
-        atoms,
+        atoms=atoms,
         nbo=nbo,
         cores=cores,
         vertical=vertical,
@@ -448,15 +451,19 @@ def write_orca_inputs(
         actinide_ecp=actinide_ecp,
         non_actinide_basis=non_actinide_basis,
     )
-    
+
+    # print(orcablocks)
+
     mem_est = get_mem_estimate(atoms, vertical, mult)
 
     if orca_path is not None:
         MyOrcaProfile = OrcaProfile(command=orca_path)
     else:
         MyOrcaProfile = OrcaProfile([which("orca")])
-    orca_blocks_as_str = "\n".join([str(block) for block in orcablocks])
-    
+
+    orca_blocks_as_str = "\n".join(orcablocks)
+    # print(orca_blocks_as_str)
+
     calc = ORCA(
         charge=charge,
         mult=mult,

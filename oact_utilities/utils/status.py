@@ -16,9 +16,7 @@ def check_file_termination(file_path: str) -> int:
 
 
 def check_job_termination(
-    dir: str, 
-    check_many: bool = False,
-    flux_tf: bool = False
+    dir: str, check_many: bool = False, flux_tf: bool = False
 ) -> int | bool:
     # sweep folder file for flux*out files
     files = os.listdir(dir)
@@ -72,19 +70,19 @@ def check_job_termination(
 
 
 def check_sucessful_jobs(
-    root_dir: str, 
-    check_many: bool = False, 
-    flux_tf: bool = False, 
-    verbose: bool = False, 
+    root_dir: str,
+    check_many: bool = False,
+    flux_tf: bool = False,
+    verbose: bool = False,
     check_traj: bool = False,
 ) -> None:
-    
+
     count_folder = 0
     count_success = 0
     count_still_running = 0
-    if check_traj: 
+    if check_traj:
         print("Checking trajectory files as well.")
-        traj_count = 0 
+        traj_count = 0
     # iterate through every subfolder in root_dir
     for folder in os.listdir(root_dir):
         folder_to_use = os.path.join(root_dir, folder)
@@ -102,7 +100,9 @@ def check_sucessful_jobs(
                 count_success += 1
                 if check_traj:
                     # traj file should end with "_trj.xyz"
-                    files_in_folder = [f for f in os.listdir(folder_to_use) if f.endswith("_trj.xyz")]
+                    files_in_folder = [
+                        f for f in os.listdir(folder_to_use) if f.endswith("_trj.xyz")
+                    ]
                     if files_in_folder:
                         traj_count += 1
                     else:
@@ -124,9 +124,13 @@ def check_sucessful_jobs(
     # add tabs depending on length of root_final
     root_len = len(root_final)
     tab_count = "\t" * int(4 - int(root_len // 8))
-    print(f"Results in {root_final} (S / R / F): {tab_count} {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}")
+    print(
+        f"Results in {root_final} (S / R / F): {tab_count} {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}"
+    )
     if check_traj:
-        print(f"Traj Results in {root_final} {tab_count}: {traj_count} / {count_success - traj_count} (With Traj / Without Traj)")
+        print(
+            f"Traj Results in {root_final} {tab_count}: {traj_count} / {count_success - traj_count} (With Traj / Without Traj)"
+        )
 
 
 def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:

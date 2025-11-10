@@ -5,10 +5,10 @@ from oact_utilities.utils.status import check_job_termination
 
 
 def launch_flux_jobs(
-    root_dir: str, 
-    second_step: bool = False, 
-    skip_done: bool = True, 
-    dry: bool = False, 
+    root_dir: str,
+    second_step: bool = False,
+    skip_done: bool = True,
+    dry: bool = False,
     verbose: bool = False,
 ) -> None:
     # iterate through every subfolder in root_dir

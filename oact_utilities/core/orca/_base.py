@@ -147,8 +147,6 @@ def run_and_summarize_opt(
     return Summarize(additional_fields=additional_fields).opt(dyn)
 
 
-
-
 def prep_calculator(
     charge: int = 0,
     spin_multiplicity: int = 1,

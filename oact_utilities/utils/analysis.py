@@ -49,7 +49,7 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     if os.path.exists(traj_output):
 
         print(f"Reading trajectory from {traj_output} for RMSD calculation.")
-        
+
         with open(traj_output, "r") as f:
             lines = f.readlines()
         lines_coords = [
@@ -102,9 +102,11 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
         lines = f.readlines()
 
     trigger = "Geometry convergence"
-    trigger_end_a = "-------------------------------------------------------------------------"
+    trigger_end_a = (
+        "-------------------------------------------------------------------------"
+    )
     trigger_end_b = "........................................................"
-    
+
     info_block_tf = False
     for i, line in enumerate(lines):
 
@@ -115,7 +117,7 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
         if info_block_tf:
             if len(line.split()) > 1:
                 if (
-                    line.split()[0].lower() ==   "rms"
+                    line.split()[0].lower() == "rms"
                     and line.split()[1].lower() == "gradient"
                 ):
                     info_dict["RMS_Gradient"] = float(line.split()[2])
@@ -126,9 +128,8 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
                     info_dict["Max_Gradient"] = float(line.split()[2])
                     info_block_tf = False
                     list_info.append(info_dict)
-            else: 
+            else:
                 continue
-
 
     return list_info
 
@@ -219,7 +220,9 @@ def get_full_info_all_jobs(
             files = os.listdir(folder_to_use)
             # print("files: ", files)
             if flux_tf:
-                files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
+                files_out = [
+                    f for f in files if f.startswith("flux") and f.endswith("out")
+                ]
             else:
                 files_out = [f for f in files if f.endswith("out")]
                 if not files_out:
@@ -227,12 +230,12 @@ def get_full_info_all_jobs(
 
             if len(files_out) > 1 and type(files_out) is list:
                 files_out.sort(
-                    key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)), reverse=True
+                    key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)),
+                    reverse=True,
                 )
 
-
             log_file = os.path.join(folder_to_use, files_out[0])
-            #print(f"Using log file: {log_file}")
+            # print(f"Using log file: {log_file}")
             # info block
             nprocs, total_time_seconds = find_timings_and_cores(log_file)
             geo_forces = get_geo_forces(log_file=log_file)

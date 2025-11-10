@@ -4,6 +4,7 @@ from typing import Dict, Any
 from oact_utilities.utils.an66 import process_geometry_file, process_multiplicity_file
 from ase import Atoms
 
+
 def fetch_actinides():
     return [
         "Ac",
@@ -29,13 +30,15 @@ def elements_to_atomic_numbers(elements: list[str]) -> list[int]:
     return atomic_numbers
 
 
-def read_geom_from_inp_file(inp_file: str, ase_format_tf: bool=False) -> list[dict[str, float | str]]:
+def read_geom_from_inp_file(
+    inp_file: str, ase_format_tf: bool = False
+) -> list[dict[str, float | str]]:
     with open(inp_file, "r") as f:
         lines = f.readlines()
 
     geom_start = False
     atoms = []
-    
+
     if ase_format_tf:
         syms_list = []
         coords_list = []
@@ -56,7 +59,6 @@ def read_geom_from_inp_file(inp_file: str, ase_format_tf: bool=False) -> list[di
             y = float(parts[2])
             z = float(parts[3])
 
-            
             if ase_format_tf:
                 syms_list.append(element)
                 coords_list.append([x, y, z])
@@ -68,9 +70,8 @@ def read_geom_from_inp_file(inp_file: str, ase_format_tf: bool=False) -> list[di
         atoms = Atoms(symbols=syms_list, positions=coords_list)
         atoms.charge = int(charge)
         atoms.spin = int(spin)
-    
+
     return atoms
-    
 
 
 def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], str]:
