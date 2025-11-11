@@ -190,7 +190,7 @@ ORCA_SIMPLE_INPUT_DK3 = [
 ]
 
 ORCA_BLOCKS = [
-    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\nShift Shift 0.1 ErrOff 0.1 end\nend",
+    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  Shift Shift 0.1 ErrOff 0.1 end\n  DIISMaxEq   7\n  Guess PModel\nend",
     "%elprop Dipole true Quadrupole true end",
     "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
 ]

@@ -10,7 +10,7 @@ from quacc import get_settings
 from quacc.runners.ase import Runner
 from quacc.schemas.ase import Summarize
 from quacc.utils.dicts import recursive_dict_merge
-from quacc.utils.lists import merge_list_params
+
 
 if TYPE_CHECKING:
     from typing import Any
