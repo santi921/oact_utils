@@ -24,6 +24,7 @@ if __name__ == "__main__":
     radical_semiquinones = "Radical/Semiquinones/"
 
 
+
     list_of_folders = [
         hard_chalc,
         hard_nitrates,
@@ -34,7 +35,7 @@ if __name__ == "__main__":
         soft_ethers,
         soft_chalcogenides,
         soft_dithiocarbamates,
-        radical_semiquinones,
+        radical_semiquinones
     ]
 
     for folder in list_of_folders:
