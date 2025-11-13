@@ -50,8 +50,8 @@ def write_flux_orca_wave_two(
 
     # find subfolders in each directory, reconstruct dur structure in calc_root_dir
     count = 0   
-    for base_dir in [hard_donors_dir, organic_dir, radical_dir, soft_donors_dir]:
-        
+
+    for base_dir in [hard_donors_dir, organic_dir, radical_dir, soft_donors_dir]:        
         # if base_dir does not exist in calc_root_dir, create it
         if not os.path.exists(os.path.join(calc_root_dir, base_dir)):
             os.makedirs(os.path.join(calc_root_dir, base_dir))
@@ -59,6 +59,7 @@ def write_flux_orca_wave_two(
         subfolders = [f.path for f in os.scandir(root_data_dir+base_dir) if f.is_dir()]
         
         for folder_to_use in subfolders:
+            count_subfolders = 0
             print(f"Processing folder: {folder_to_use}")
             folder_name = folder_to_use.split("/")[-1]
             folder_to_use = os.path.join(calc_root_dir,base_dir, folder_name)
@@ -82,12 +83,11 @@ def write_flux_orca_wave_two(
             # zip dict_geoms and df_multiplicity
             dict_unified = {k: {"geometry": dict_geoms[k], "multiplicity": df_multiplicity[k]["multiplicity"],"charge": df_multiplicity[k]["charge"] } for k in dict_geoms.keys() if k in df_multiplicity.keys()}
             
-
-
+            
             for mol_name, vals in dict_geoms.items():
                 #print(f"Processing molecule: {mol_name}, geometry with {len(vals)} atoms")
                 # if orca.inp already exists in folder_to_use/mol_name, delete 
-                
+            
                 write_orca_inputs(
                     atoms=dict_unified[mol_name]["geometry"],
                     output_directory=os.path.join(folder_to_use, mol_name),
@@ -104,6 +104,7 @@ def write_flux_orca_wave_two(
                     non_actinide_basis = non_actinide_basis,
                 )
                 count += 1
+                count_subfolders += 1
 
             if safety:
                 cores += 2
@@ -116,6 +117,7 @@ def write_flux_orca_wave_two(
                 queue = queue, 
                 allocation = allocation
             )
+
 
     print(f"Total number of jobs prepared: {count}")
 
@@ -133,16 +135,20 @@ if __name__ == "__main__":
     actinide_ecp = "def-ECP"
     non_actinide_basis = "def2-TZVPD"
     calc_root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/wave_2_omol_sp/"
-    root_data_dir = "/usr/workspace/vargas58/orca_test/drive-download-20251110T171046Z-1-001/"
+    root_data_dir = "UPDATE ON TUO"
+    orca_exe = "/usr/workspace/vargas58/orca_test/orca_6_2_1_linux_x86-64_openmpi411/orca"
 
-
+    root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
+    calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/"
+    orca_exe = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
+    
     write_flux_orca_wave_two(
         actinide_basis=actinide_basis,
         actinide_ecp=actinide_ecp,
         non_actinide_basis=non_actinide_basis,
         two_step=two_step,
         cores=cores,
-        orca_exe="/usr/workspace/vargas58/orca_test/orca_6_2_1_linux_x86-64_openmpi411/orca",
+        orca_exe=orca_exe,
         safety=False,
         max_scf_iterations=600,
         n_hours=n_hours,

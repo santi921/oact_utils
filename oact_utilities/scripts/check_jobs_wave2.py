@@ -10,28 +10,35 @@ if __name__ == "__main__":
     root = "/Users/santiagovargas/dev/oact_utils/data/baselines/jobs/"
 
     hard_chalc = "Hard_Donors/Chalcogenides/"
+    hard_nitrates = "Hard_Donors/Nitrates/"
+    hard_crown_cryptands = "Hard_Donors/Crown-Cryptands/"
+    
     organic_COT = "Organic/COT/"
+    organic_carbenes = "Organic/carbenes/"
+    organic_tris_cp = "Organic/tris-Cp/"
+
+    
     soft_ethers = "Soft_Donors/ChalcogenidesEthers/"
     soft_chalcogenides = "Soft_Donors/Chalcogenides/"
+    soft_dithiocarbamates = "Soft_Donors/Dithiocarbamates-dithiophosphates-dithiolates/"
+    
     radical_semiquinones = "Radical/Semiquinones/"
 
-    root_directory = os.path.join(root, hard_chalc)
-    check_sucessful_jobs(
-        root_dir=root_directory, check_many=check_many, flux_tf=flux_tf
-    )
-    root_directory = os.path.join(root, organic_COT)
-    check_sucessful_jobs(
-        root_dir=root_directory, check_many=check_many, flux_tf=flux_tf
-    )
-    root_directory = os.path.join(root, soft_ethers)
-    check_sucessful_jobs(
-        root_dir=root_directory, check_many=check_many, flux_tf=flux_tf
-    )
-    root_directory = os.path.join(root, soft_chalcogenides)
-    check_sucessful_jobs(
-        root_dir=root_directory, check_many=check_many, flux_tf=flux_tf
-    )
-    root_directory = os.path.join(root, radical_semiquinones)
-    check_sucessful_jobs(
-        root_dir=root_directory, check_many=check_many, flux_tf=flux_tf
-    )
+    list_of_folders = [
+        hard_chalc,
+        hard_nitrates,
+        hard_crown_cryptands,
+        organic_COT,
+        organic_carbenes,
+        organic_tris_cp,
+        soft_ethers,
+        soft_chalcogenides,
+        soft_dithiocarbamates,
+        radical_semiquinones,
+    ]
+
+    for folder in list_of_folders:
+        root_directory = os.path.join(root, folder)
+        check_sucessful_jobs(
+            root_dir=root_directory, check_many=check_many, flux_tf=flux_tf
+        )
