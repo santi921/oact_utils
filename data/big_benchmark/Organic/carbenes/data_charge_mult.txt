@@ -1,0 +1,3 @@
+AmC27N2H42I-ECP_PBE0, charge=0, mult=7
+NpC27N2H42I-ECP_PBE0, charge=0, mult=5
+PuC27N2H42I-ECP_PBE0, charge=0, mult=6

@@ -1,0 +1,12 @@
+BkC28H32-ZORA_PBE0, charge=0, mult=8
+NpC16H16-ZORA_PBE0, charge=0, mult=4
+PuC16H16-ZORA_PBE0, charge=0, mult=5
+PuSi4C28H48, charge=0, mult=5
+ThC16H16-ZORA_PBE0, charge=0, mult=4
+ThSi4C28H48, charge=0, mult=4
+ThSi4C40H72, charge=0, mult=1
+ThSi6C34H64, charge=0, mult=1
+UC16H16-ZORA_PBE0, charge=0, mult=3
+UC20H20, charge=0, mult=3
+UC22H24, charge=0, mult=3
+UC24H8, charge=0, mult=3

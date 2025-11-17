@@ -1,0 +1,9 @@
+NpN6O18, charge=-2, mult=4
+PuN3O9Cl3, charge=-2, mult=5
+PuN6O18, charge=-2, mult=5
+PuNO5Cl3, charge=-2, mult=3
+ThN6O18, charge=-2, mult=3
+ThN6O18, charge=-2, mult=1
+UN3O11, charge=-2, mult=3
+UN3O11, charge=-1, mult=3
+UN6O18, charge=-2, mult=3

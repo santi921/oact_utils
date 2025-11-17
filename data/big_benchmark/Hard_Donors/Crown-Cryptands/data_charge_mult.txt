@@ -1,0 +1,13 @@
+AmC22NH41O7I, charge=2, mult=7
+CfC12H24O6I2-ZORA_PBE, charge=0, mult=5
+CfC16NH33O8I-ZORA_PBE, charge=2, mult=7
+UB2C20H44O6, charge=1, mult=4
+UC12H24O6Cl3, charge=1, mult=4
+UC18N2H36O6I2, charge=1, mult=4
+UC18N2H38O7I, charge=2, mult=4
+UC18N2H40O8, charge=3, mult=4
+UC20H36O6Cl3, charge=1, mult=3
+UC20N3H39O6I, charge=1, mult=3
+UC20H36O8, charge=2, mult=4
+UC20H36O8, charge=2, mult=1
+UC21N3H45O8, charge=3, mult=4

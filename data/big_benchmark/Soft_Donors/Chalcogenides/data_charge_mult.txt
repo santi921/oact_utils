@@ -1,0 +1,11 @@
+AmC72H60N3P6Se6-ZORA_PBE, charge=0, mult=7
+PuC36H84N3P6S6, charge=0, mult=6
+PuC72H60N3P6S6-ZORA_PBE, charge=0, mult=6
+PuC72H60N3P6Se6-ZORA_PBE, charge=0, mult=6
+PuC36H84N3P6Se6, charge=0, mult=6
+PuC36H84N3P6Te6, charge=0, mult=6
+UC72H60N3P6S6-ZORA_PBE, charge=0, mult=4
+UC36H84N3P6S6, charge=0, mult=4
+UC72H60N3P6Se6-ZORA_PBE, charge=0, mult=4
+UC36H84N3P6Se6, charge=0, mult=4
+UC36H84N3P6Te6, charge=0, mult=4
