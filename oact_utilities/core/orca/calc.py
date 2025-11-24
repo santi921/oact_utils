@@ -338,6 +338,7 @@ def get_orca_blocks(
     mult: int = 1,
     nbo: bool = True,
     cores: int = 12,
+    opt: bool = False,
     simple_input: str = "omol",
     vertical: Enum = Vertical.Default,
     scf_MaxIter: int = None,
@@ -346,6 +347,7 @@ def get_orca_blocks(
     actinide_basis: str = "ma-def-TZVP",
     actinide_ecp: str | None = None,
     non_actinide_basis: str = "def2-TZVPD",
+
 ):
 
     if simple_input == "omol":
@@ -398,6 +400,10 @@ def get_orca_blocks(
     else:
         orcablocks.append(f"{NBO_FLAGS}")
 
+    if opt:
+        orcasimpleinput += " Opt"
+
+
     if vertical in {Vertical.MetalOrganics, Vertical.Oss} and mult == 1:
         orcasimpleinput += " UKS"
         orcablocks.append(get_symm_break_block(atoms, charge=0))
@@ -424,6 +430,7 @@ def write_orca_inputs(
     mult: int = 1,
     nbo: bool = False,
     cores: int = 12,
+    opt: bool=False,
     functional: str = "wB97M-V",
     simple_input: str = "omol",
     orca_path: str = None,
@@ -442,6 +449,7 @@ def write_orca_inputs(
         atoms=atoms,
         nbo=nbo,
         cores=cores,
+        opt=opt,
         vertical=vertical,
         scf_MaxIter=scf_MaxIter,
         mult=mult,
