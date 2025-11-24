@@ -42,6 +42,8 @@ def write_flux_orca_wave_two(
     queue: str = "pbatch",
     skip_done: bool = True,
     replicates: int = 1,
+    lot="omol",
+    functtional="wB97M-V"
 ):
     
     hard_donors_dir = "Hard_Donors/"
@@ -103,9 +105,9 @@ def write_flux_orca_wave_two(
                                 mult=dict_unified[mol_name]["multiplicity"],
                                 nbo = False,
                                 cores = cores,
-                                functional = "wB97M-V",
+                                functional = functional,
                                 scf_MaxIter = max_scf_iterations,
-                                simple_input = "omol",
+                                simple_input = lot,
                                 orca_path = orca_exe,
                                 actinide_basis = actinide_basis,
                                 actinide_ecp = actinide_ecp,
@@ -121,9 +123,9 @@ def write_flux_orca_wave_two(
                         mult=dict_unified[mol_name]["multiplicity"],
                         nbo = False,
                         cores = cores,
-                        functional = "wB97M-V",
+                        functional = functional,
                         scf_MaxIter = max_scf_iterations,
-                        simple_input = "omol",
+                        simple_input = lot,
                         orca_path = orca_exe,
                         actinide_basis = actinide_basis,
                         actinide_ecp = actinide_ecp,
