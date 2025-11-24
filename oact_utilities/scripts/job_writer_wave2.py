@@ -43,7 +43,8 @@ def write_flux_orca_wave_two(
     skip_done: bool = True,
     replicates: int = 1,
     lot="omol",
-    functtional="wB97M-V"
+    functional="wB97M-V", 
+    opt=False
 ):
     
     hard_donors_dir = "Hard_Donors/"
@@ -112,6 +113,7 @@ def write_flux_orca_wave_two(
                                 actinide_basis = actinide_basis,
                                 actinide_ecp = actinide_ecp,
                                 non_actinide_basis = non_actinide_basis,
+                                opt=opt
                             )
                             count += 1
                             count_subfolders += 1
@@ -130,6 +132,7 @@ def write_flux_orca_wave_two(
                         actinide_basis = actinide_basis,
                         actinide_ecp = actinide_ecp,
                         non_actinide_basis = non_actinide_basis,
+                        opt=opt
                     )
                     count += 1
                     count_subfolders += 1
@@ -187,6 +190,68 @@ if __name__ == "__main__":
         calc_root_dir=calc_root_dir,
         skip_done=True, 
         replicates=replicates   
+        lot="omol",
+        functional="wB97M-V"
     )
 
+
+
+    ################################## X2C BLOCK ##################################
+
+        # 1) baseline omol
+    actinide_basis = "ma-def-TZVP"
+    actinide_ecp = "def-ECP"
+    non_actinide_basis = "def2-TZVPD"
+    calc_root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/wave_2_omol_sp/"
+    root_data_dir = "UPDATE ON TUO"
+    orca_exe = "/usr/workspace/vargas58/orca_test/orca_6_2_1_linux_x86-64_openmpi411/orca"
+
+    root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
+    calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/"
+    orca_exe = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
     
+    write_flux_orca_wave_two(
+        actinide_basis=actinide_basis,
+        actinide_ecp=actinide_ecp,
+        non_actinide_basis=non_actinide_basis,
+        two_step=two_step,
+        cores=cores,
+        orca_exe=orca_exe,
+        safety=False,
+        max_scf_iterations=600,
+        n_hours=n_hours,
+        allocation="dnn-sim",
+        queue="pbatch",
+        root_data_dir=root_data_dir,
+        calc_root_dir=calc_root_dir,
+        skip_done=True, 
+        replicates=replicates   
+        lot="omol",
+        functional="wB97M-V"
+    )
+
+
+
+    actinide_basis = "SARC-DKH-TZVPP"
+    actinide_ecp = None
+    non_actinide_basis = "DKH-def2-TZVPP"
+
+    write_flux_orca_wave_two(
+        actinide_basis=actinide_basis,
+        actinide_ecp=actinide_ecp,
+        non_actinide_basis=non_actinide_basis,
+        two_step=two_step,
+        cores=cores,
+        orca_exe=orca_exe,
+        safety=False,
+        max_scf_iterations=600,
+        n_hours=n_hours,
+        allocation="dnn-sim",
+        queue="pbatch",
+        root_data_dir=root_data_dir,
+        calc_root_dir=calc_root_dir,
+        skip_done=True, 
+        replicates=replicates   
+        lot="omol",
+        functional="wB97M-V"
+    )
