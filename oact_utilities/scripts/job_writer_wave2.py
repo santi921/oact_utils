@@ -41,6 +41,7 @@ def write_flux_orca_wave_two(
     two_step: bool = False,
     queue: str = "pbatch",
     skip_done: bool = True,
+    replicates: int = 1,
 ):
     
     hard_donors_dir = "Hard_Donors/"
@@ -51,7 +52,9 @@ def write_flux_orca_wave_two(
     # find subfolders in each directory, reconstruct dur structure in calc_root_dir
     count = 0   
 
-    for base_dir in [hard_donors_dir, organic_dir, radical_dir, soft_donors_dir]:        
+    list_jobs = [hard_donors_dir, organic_dir, radical_dir, soft_donors_dir]
+    
+    for base_dir in list_jobs: 
         # if base_dir does not exist in calc_root_dir, create it
         if not os.path.exists(os.path.join(calc_root_dir, base_dir)):
             os.makedirs(os.path.join(calc_root_dir, base_dir))
@@ -66,6 +69,7 @@ def write_flux_orca_wave_two(
             
             if not os.path.exists(folder_to_use):
                 os.mkdir(os.path.join(calc_root_dir, base_dir, folder_to_use.split("/")[-1]))
+            
             #print(f"Using calculation folder: {folder_to_use}")
             if skip_done:
                 # check if folder has successful flux job
@@ -75,6 +79,7 @@ def write_flux_orca_wave_two(
 
             #open the data_geom.txt file in the original folder, also open data_charge_muilt.txt
             orig_folder = os.path.join(root_data_dir, base_dir, folder_name)
+            
             geom_file = os.path.join(orig_folder, "data_geom.txt")
             mult_file = os.path.join(orig_folder, "data_charge_mult.txt")
             ase_format_tf = True
@@ -87,24 +92,45 @@ def write_flux_orca_wave_two(
             for mol_name, vals in dict_geoms.items():
                 #print(f"Processing molecule: {mol_name}, geometry with {len(vals)} atoms")
                 # if orca.inp already exists in folder_to_use/mol_name, delete 
-            
-                write_orca_inputs(
-                    atoms=dict_unified[mol_name]["geometry"],
-                    output_directory=os.path.join(folder_to_use, mol_name),
-                    charge=dict_unified[mol_name]["charge"],
-                    mult=dict_unified[mol_name]["multiplicity"],
-                    nbo = False,
-                    cores = cores,
-                    functional = "wB97M-V",
-                    scf_MaxIter = max_scf_iterations,
-                    simple_input = "omol",
-                    orca_path = orca_exe,
-                    actinide_basis = actinide_basis,
-                    actinide_ecp = actinide_ecp,
-                    non_actinide_basis = non_actinide_basis,
-                )
-                count += 1
-                count_subfolders += 1
+                if replicates > 1:
+                        for rep in range(replicates):
+                            print(f"  Writing replicate {rep+1} for molecule {mol_name}")
+                            folder_rep = os.path.join(folder_to_use, f"{mol_name}_rep{rep+1}")
+                            write_orca_inputs(
+                                atoms=dict_unified[mol_name]["geometry"],
+                                output_directory=os.path.join(folder_rep),
+                                charge=dict_unified[mol_name]["charge"],
+                                mult=dict_unified[mol_name]["multiplicity"],
+                                nbo = False,
+                                cores = cores,
+                                functional = "wB97M-V",
+                                scf_MaxIter = max_scf_iterations,
+                                simple_input = "omol",
+                                orca_path = orca_exe,
+                                actinide_basis = actinide_basis,
+                                actinide_ecp = actinide_ecp,
+                                non_actinide_basis = non_actinide_basis,
+                            )
+                            count += 1
+                            count_subfolders += 1
+                else:
+                    write_orca_inputs(
+                        atoms=dict_unified[mol_name]["geometry"],
+                        output_directory=os.path.join(folder_to_use, mol_name),
+                        charge=dict_unified[mol_name]["charge"],
+                        mult=dict_unified[mol_name]["multiplicity"],
+                        nbo = False,
+                        cores = cores,
+                        functional = "wB97M-V",
+                        scf_MaxIter = max_scf_iterations,
+                        simple_input = "omol",
+                        orca_path = orca_exe,
+                        actinide_basis = actinide_basis,
+                        actinide_ecp = actinide_ecp,
+                        non_actinide_basis = non_actinide_basis,
+                    )
+                    count += 1
+                    count_subfolders += 1
 
             if safety:
                 cores += 2
@@ -127,6 +153,7 @@ if __name__ == "__main__":
     cores = 20
     two_step = None
     n_hours = 10
+    replicates=2
 
     ################################## OMOL BLOCK ##################################
 
@@ -156,7 +183,8 @@ if __name__ == "__main__":
         queue="pbatch",
         root_data_dir=root_data_dir,
         calc_root_dir=calc_root_dir,
-        skip_done=True
+        skip_done=True, 
+        replicates=replicates   
     )
 
     
