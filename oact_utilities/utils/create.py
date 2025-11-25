@@ -295,6 +295,9 @@ def write_slurm_no_template(
     n_hours: int = 2,
     queue: str = "pbatch",
     allocation: str = "dnn-sim",
+    source_bashrc: str = "source ~/.bashrc",
+    conda_env: str = "py10mpi",
+    LD_LIBRARY_PATH: str = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib",
     orca_command: str = "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
 ) -> None:
 
@@ -306,9 +309,9 @@ def write_slurm_no_template(
         f"#SBATCH: -A {allocation}\n",
         f"#SBATCH: -t {n_hours*60}m\n",
         "\n",
-        "source ~/.bashrc\n",
-        "conda activate py10mpi\n",
-        "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
+        f"{source_bashrc}\n",
+        f"conda activate {conda_env}\n",
+        f"export LD_LIBRARY_PATH={LD_LIBRARY_PATH}:$LD_LIBRARY_PATH\n",
         orca_command,
     ]
 

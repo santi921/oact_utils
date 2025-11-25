@@ -45,7 +45,10 @@ def write_flux_orca_wave_two(
     lot="omol",
     functional="wB97M-V", 
     opt=False, 
-    job_handler="flux"
+    job_handler="flux",
+    source_bashrc: str = "source ~/.bashrc",
+    conda_env: str = "py10mpi", 
+    LD_LIBRARY_PATH: str = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
 ):
     
     hard_donors_dir = "Hard_Donors/"
@@ -158,7 +161,12 @@ def write_flux_orca_wave_two(
                     n_cores = cores, 
                     n_hours = n_hours, 
                     queue = queue, 
-                    allocation = allocation
+                    allocation = allocation,
+                    conda_env="py10mpi",
+                    source_bashrc="source ~/.bashrc",
+                    LD_LIBRARY_PATH="", 
+                    orca_command=orca_exe
+                    
                 )
             else: 
                 raise ValueError(f"Unknown job handler: {job_handler}")
