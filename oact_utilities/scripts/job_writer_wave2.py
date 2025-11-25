@@ -5,7 +5,7 @@ from oact_utilities.utils.create import write_flux_no_template
 from oact_utilities.utils.baselines import process_multiplicity_file, process_geometry_file
 #from oact_utilities.core.orca.recipes import ase_relaxation, single_point_calculation
 from oact_utilities.core.orca.calc import write_orca_inputs
-from oact_utilities.utils.create import write_flux_no_template
+from oact_utilities.utils.create import write_flux_no_template, write_slurm_no_template
 from oact_utilities.utils.status import check_job_termination
 
 
@@ -44,7 +44,8 @@ def write_flux_orca_wave_two(
     replicates: int = 1,
     lot="omol",
     functional="wB97M-V", 
-    opt=False
+    opt=False, 
+    job_handler="flux"
 ):
     
     hard_donors_dir = "Hard_Donors/"
@@ -140,15 +141,27 @@ def write_flux_orca_wave_two(
             if safety:
                 cores += 2
             
-            write_flux_no_template(
-                root_dir=folder_to_use,
-                two_step=two_step,
-                n_cores = cores, 
-                n_hours = n_hours, 
-                queue = queue, 
-                allocation = allocation
-            )
-
+            if job_handler == "flux":
+                write_flux_no_template(
+                    root_dir=folder_to_use,
+                    two_step=two_step,
+                    n_cores = cores, 
+                    n_hours = n_hours, 
+                    queue = queue, 
+                    allocation = allocation
+                )
+            elif job_handler == "slurm":
+                
+                write_slurm_no_template(
+                    root_dir=folder_to_use,
+                    two_step=two_step,
+                    n_cores = cores, 
+                    n_hours = n_hours, 
+                    queue = queue, 
+                    allocation = allocation
+                )
+            else: 
+                raise ValueError(f"Unknown job handler: {job_handler}")
 
     print(f"Total number of jobs prepared: {count}")
 
@@ -191,7 +204,8 @@ if __name__ == "__main__":
         skip_done=True, 
         replicates=replicates   
         lot="omol",
-        functional="wB97M-V"
+        functional="wB97M-V", 
+        job_handler="flux"# ritwik change this to slurm 
     )
 
 
@@ -227,7 +241,8 @@ if __name__ == "__main__":
         skip_done=True, 
         replicates=replicates   
         lot="omol",
-        functional="wB97M-V"
+        functional="wB97M-V", 
+        job_handler="flux"# ritwik change this to slurm 
     )
 
 
@@ -253,5 +268,6 @@ if __name__ == "__main__":
         skip_done=True, 
         replicates=replicates   
         lot="omol",
-        functional="wB97M-V"
+        functional="wB97M-V", 
+        job_handler="flux"# ritwik change this to slurm 
     )

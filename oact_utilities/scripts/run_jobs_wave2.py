@@ -41,3 +41,5 @@ if __name__ == "__main__":
     for folder in list_of_folders:
         root_directory = os.path.join(root, folder)
         launch_flux_jobs(root_dir=root_directory, dry=dry, skip_done=skip_done)
+        # ritwik change for slurm systems
+        #launch_slurm_jobs(root_dir=root_directory, dry=dry, skip_done=skip_done)
