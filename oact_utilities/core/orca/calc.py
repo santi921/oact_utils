@@ -150,7 +150,6 @@ ACTINIDE_LIST = [
 # ORCA_FUNCTIONAL = ""
 ORCA_BASIS = "def2-TZVPD"
 ORCA_SIMPLE_INPUT = [
-    "EnGrad",
     "RIJCOSX",
     "def2/J",
     "NoUseSym",
@@ -164,7 +163,6 @@ ORCA_SIMPLE_INPUT = [
 
 ORCA_SIMPLE_INPUT_X2C = [
     "DLU-X2C",
-    "EnGrad",
     "RIJCOSX",
     "AutoAux",
     "NoUseSym",
@@ -177,7 +175,7 @@ ORCA_SIMPLE_INPUT_X2C = [
 ]
 
 ORCA_SIMPLE_INPUT_DK3 = [
-    "DKH" "EnGrad",
+    "DKH",
     "RIJCOSX",
     "SARC/J",
     "NoUseSym",
@@ -350,15 +348,27 @@ def get_orca_blocks(
 
 ):
 
+
+    if opt:
+        job = 'Opt'
+    else: 
+        job = 'EnGrad'
+
     if simple_input == "omol":
         simple = ORCA_SIMPLE_INPUT.copy()
+        # add opt or engrad at the start
+        simple.insert(0, job)
         orcablocks = ORCA_BLOCKS.copy()
     elif simple_input == "x2c":
         simple = ORCA_SIMPLE_INPUT_X2C.copy()
+        # add as second item in list after x2c
+        simple.insert(1, job)
         orcablocks = ORCA_BLOCKS_X2C.copy()
     elif simple_input == "dk3":
         simple = ORCA_SIMPLE_INPUT_DK3.copy()
+        simple.insert(1, job)
         orcablocks = ORCA_BLOCKS_DK3.copy()
+
 
     if basis is not None:
         orcasimpleinput = " ".join([functional] + [basis] + simple)
@@ -399,9 +409,6 @@ def get_orca_blocks(
         orcasimpleinput += " NONBO NONPA"
     else:
         orcablocks.append(f"{NBO_FLAGS}")
-
-    if opt:
-        orcasimpleinput += " Opt"
 
 
     if vertical in {Vertical.MetalOrganics, Vertical.Oss} and mult == 1:
