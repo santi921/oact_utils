@@ -307,6 +307,87 @@ export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY
 /usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca 
 """
 
+def write_flux_no_template(
+    root_dir: str,
+    two_step: bool = False,
+    n_cores: int = 4,
+    n_hours: int = 2,
+    queue: str = "pbatch",
+    allocation: str = "dnn-sim",
+) -> None:
+
+    base_lines = [
+        "#!/bin/sh\n",
+        "#flux: -N 1\n",
+        f"#flux: -n {n_cores}\n",
+        f"#flux: -q {queue}\n",
+        f"#flux: -B {allocation}\n",
+        f"#flux: -t {n_hours*60}m\n",
+        "\n",
+        "source ~/.bashrc\n",
+        "conda activate py10mpi\n",
+        "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
+        "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
+    ]
+
+    # create folder if it does not exist
+    if not os.path.exists(root_dir):
+        os.makedirs(root_dir)
+
+    # go through each subfolder in root_directory and write a flux job for each, scan for .inp files and add them to last line of template
+    for folder in os.listdir(root_dir):
+        folder_to_use = os.path.join(root_dir, folder)
+        if not os.path.isdir(folder_to_use):
+            continue
+
+        if two_step:
+            loose_files = [
+                os.path.join(folder_to_use, f)
+                for f in os.listdir(folder_to_use)
+                if f.endswith("omol_loose.inp")
+            ]
+            tight_files = [
+                os.path.join(folder_to_use, f)
+                for f in os.listdir(folder_to_use)
+                if f.endswith("omol_tight.inp")
+            ]
+
+            # skip writing if no files found for that step
+            if loose_files:
+                out_lines = base_lines.copy()
+                # ensure last line ends without newline so we can append input list
+                if out_lines[-1].endswith("\n"):
+                    out_lines[-1] = out_lines[-1][:-1]
+                out_lines[-1] = out_lines[-1] + " " + " ".join(loose_files) + "\n"
+                with open(
+                    os.path.join(folder_to_use, "flux_job_loose.flux"), "w"
+                ) as fh:
+                    fh.writelines(out_lines)
+
+            if tight_files:
+                out_lines = base_lines.copy()
+                if out_lines[-1].endswith("\n"):
+                    out_lines[-1] = out_lines[-1][:-1]
+                out_lines[-1] = out_lines[-1] + " " + " ".join(tight_files) + "\n"
+                with open(
+                    os.path.join(folder_to_use, "flux_job_tight.flux"), "w"
+                ) as fh:
+                    fh.writelines(out_lines)
+        else:
+            inp_files = [
+                os.path.join(folder_to_use, f)
+                for f in os.listdir(folder_to_use)
+                if f.endswith(".inp")
+            ]
+            if not inp_files:
+                continue
+            out_lines = base_lines.copy()
+            if out_lines[-1].endswith("\n"):
+                out_lines[-1] = out_lines[-1][:-1]
+            out_lines[-1] = out_lines[-1] + " " + " ".join(inp_files) + "\n"
+            with open(os.path.join(folder_to_use, "flux_job.flux"), "w") as fh:
+                fh.writelines(out_lines)
+
 
 def write_slurm_no_template(
     root_dir: str,
