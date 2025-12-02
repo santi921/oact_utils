@@ -378,10 +378,11 @@ def get_orca_blocks(
         # add as second item in list after x2c
         simple.insert(1, job)
         orcablocks = ORCA_BLOCKS_X2C.copy()
+        
         if error_handle:
-            print("Using looser SCF settings due to previous SCF failure + PModel guess.")
             # replace with looser scf settings and pmodel guess if error code indicates scf failure
             if error_code == -1:
+                print("Using looser SCF settings due to previous SCF failure + PModel guess.")
                 # we know it's the second block we need to modify
                 orcablocks[1] = "%scf \n  Convergence Medium\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  DIISMaxEq   7\n  Guess PModel\n Shift Shift 0.1 ErrOff 0.1 end\nend",
                 
@@ -393,9 +394,9 @@ def get_orca_blocks(
         
         orcablocks = ORCA_BLOCKS_DK3.copy()
         if error_handle:
-            print("Using looser SCF settings due to previous SCF failure + PModel guess.")
             # replace with looser scf settings and pmodel guess if error code indicates scf failure
             if error_code == -1:
+                print("Using looser SCF settings due to previous SCF failure + PModel guess.")
                 # we know it's the second block we need to modify
                 orcablocks[1] = "%scf \n  Convergence Medium\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  DIISMaxEq   7\n  Guess PModel\n Shift Shift 0.1 ErrOff 0.1 end\nend",
                 
