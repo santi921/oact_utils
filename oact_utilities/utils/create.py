@@ -93,12 +93,18 @@ def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], s
 def read_xyz_from_orca(xyz_file: str) -> Atoms:
     with open(xyz_file, "r") as f:
         lines = f.readlines()
+    # find first non-empty line
+    index_first_non_empty = 0
+    for i, line in enumerate(lines):
+        if line.strip() != "":
+            index_first_non_empty = i
+            break
 
-    num_atoms = int(lines[1].strip())
-    comment = lines[2].strip()
+    num_atoms = int(lines[index_first_non_empty].strip())
+    comment = lines[index_first_non_empty + 1].strip()
     elem_list = []
     coord_list = []
-    for line in lines[3 : 3 + num_atoms]:
+    for line in lines[index_first_non_empty + 2 : index_first_non_empty + 2 + num_atoms]:
         parts = line.split()
         element = parts[0]
         x = float(parts[1])
