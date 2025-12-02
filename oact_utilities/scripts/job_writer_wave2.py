@@ -10,7 +10,6 @@ from oact_utilities.utils.status import check_job_termination
 
 
 
-
 def check_recent_edits(root_directory_job, cutoff=900): 
     # go to most recently created subfolder
     list_sub_folders = [f.path for f in os.scandir(root_directory_job) if f.is_dir()]
@@ -77,10 +76,12 @@ def write_flux_orca_wave_two(
             if not os.path.exists(folder_to_use):
                 os.mkdir(os.path.join(calc_root_dir, base_dir, folder_to_use.split("/")[-1]))
             
+            error_code = check_job_termination(folder_to_use)
+            
             #print(f"Using calculation folder: {folder_to_use}")
             if skip_done:
                 # check if folder has successful flux job
-                if check_job_termination(folder_to_use):
+                if error_code:
                     print(f"Skipping {folder_to_use} as it has a completed job.")
                     continue
 
@@ -117,7 +118,9 @@ def write_flux_orca_wave_two(
                                 actinide_basis = actinide_basis,
                                 actinide_ecp = actinide_ecp,
                                 non_actinide_basis = non_actinide_basis,
-                                opt=opt
+                                opt=opt,
+                                error_handle=True, 
+                                error_code= error_code
                             )
                             count += 1
                             count_subfolders += 1
@@ -136,7 +139,9 @@ def write_flux_orca_wave_two(
                         actinide_basis = actinide_basis,
                         actinide_ecp = actinide_ecp,
                         non_actinide_basis = non_actinide_basis,
-                        opt=opt
+                        opt=opt, 
+                        error_handle=True, 
+                        error_code=error_code
                     )
                     count += 1
                     count_subfolders += 1
@@ -162,9 +167,9 @@ def write_flux_orca_wave_two(
                     n_hours = n_hours, 
                     queue = queue, 
                     allocation = allocation,
-                    conda_env="py10mpi",
-                    source_bashrc="source ~/.bashrc",
-                    LD_LIBRARY_PATH="", 
+                    conda_env=conda_env,
+                    source_bashrc=source_bashrc,
+                    LD_LIBRARY_PATH=LD_LIBRARY_PATH, 
                     orca_command=orca_exe
                     
                 )
@@ -179,7 +184,7 @@ if __name__ == "__main__":
     cores = 20
     two_step = None
     n_hours = 10
-    replicates=2
+    replicates=1
 
     ################################## OMOL BLOCK ##################################
 
@@ -210,7 +215,7 @@ if __name__ == "__main__":
         root_data_dir=root_data_dir,
         calc_root_dir=calc_root_dir,
         skip_done=True, 
-        replicates=replicates   
+        replicates=replicates,   
         lot="omol",
         functional="wB97M-V", 
         job_handler="flux"# ritwik change this to slurm 
@@ -220,7 +225,7 @@ if __name__ == "__main__":
 
     ################################## X2C BLOCK ##################################
 
-        # 1) baseline omol
+    # 1) baseline omol
     actinide_basis = "ma-def-TZVP"
     actinide_ecp = "def-ECP"
     non_actinide_basis = "def2-TZVPD"
@@ -247,7 +252,7 @@ if __name__ == "__main__":
         root_data_dir=root_data_dir,
         calc_root_dir=calc_root_dir,
         skip_done=True, 
-        replicates=replicates   
+        replicates=replicates,   
         lot="omol",
         functional="wB97M-V", 
         job_handler="flux"# ritwik change this to slurm 
@@ -274,7 +279,7 @@ if __name__ == "__main__":
         root_data_dir=root_data_dir,
         calc_root_dir=calc_root_dir,
         skip_done=True, 
-        replicates=replicates   
+        replicates=replicates,   
         lot="omol",
         functional="wB97M-V", 
         job_handler="flux"# ritwik change this to slurm 

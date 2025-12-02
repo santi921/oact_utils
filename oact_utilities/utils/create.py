@@ -90,6 +90,26 @@ def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], s
         atoms.append({"element": element, "x": x, "y": y, "z": z})
     return atoms, comment
 
+def read_xyz_from_orca(xyz_file: str) -> Atoms:
+    with open(xyz_file, "r") as f:
+        lines = f.readlines()
+
+    num_atoms = int(lines[1].strip())
+    comment = lines[2].strip()
+    elem_list = []
+    coord_list = []
+    for line in lines[3 : 3 + num_atoms]:
+        parts = line.split()
+        element = parts[0]
+        x = float(parts[1])
+        y = float(parts[2])
+        z = float(parts[3])
+        elem_list.append(element)
+        coord_list.append([float(x), float(y), float(z)])
+
+    atoms_ase = Atoms(symbols=elem_list, positions=coord_list)
+    return atoms_ase, comment
+
 
 def read_template(template_file: str) -> list[str]:
     with open(template_file, "r") as f:

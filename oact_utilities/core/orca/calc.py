@@ -10,6 +10,9 @@ from ase.calculators.orca import ORCA, OrcaProfile
 from ase.optimize import LBFGS
 from sella import Sella
 
+from oact_utilities.utils.create import read_xyz_from_orca
+
+
 # ECP sizes taken from Table 6.5 in the Orca 5.0.3 manual
 ECP_SIZE = {
     **{i: 28 for i in range(37, 55)},
@@ -345,6 +348,8 @@ def get_orca_blocks(
     actinide_basis: str = "ma-def-TZVP",
     actinide_ecp: str | None = None,
     non_actinide_basis: str = "def2-TZVPD",
+    error_handle: bool = False,
+    error_code: int = 0,
 
 ):
 
@@ -359,16 +364,41 @@ def get_orca_blocks(
         # add opt or engrad at the start
         simple.insert(0, job)
         orcablocks = ORCA_BLOCKS.copy()
+        if error_handle:
+            # replace with looser scf settings if error code indicates scf failure
+            if error_code == -1:
+                print("Using looser SCF settings due to previous SCF failure.")
+                # we know it's the first block we need to modify
+                orcablocks[0] = re.sub(
+                    r"Convergence Tight", f"Convergence Medium", orcablocks[0]
+                )
+                    
     elif simple_input == "x2c":
         simple = ORCA_SIMPLE_INPUT_X2C.copy()
         # add as second item in list after x2c
         simple.insert(1, job)
         orcablocks = ORCA_BLOCKS_X2C.copy()
+        if error_handle:
+            print("Using looser SCF settings due to previous SCF failure + PModel guess.")
+            # replace with looser scf settings and pmodel guess if error code indicates scf failure
+            if error_code == -1:
+                # we know it's the second block we need to modify
+                orcablocks[1] = "%scf \n  Convergence Medium\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  DIISMaxEq   7\n  Guess PModel\n Shift Shift 0.1 ErrOff 0.1 end\nend",
+                
+            
+
     elif simple_input == "dk3":
         simple = ORCA_SIMPLE_INPUT_DK3.copy()
         simple.insert(1, job)
+        
         orcablocks = ORCA_BLOCKS_DK3.copy()
-
+        if error_handle:
+            print("Using looser SCF settings due to previous SCF failure + PModel guess.")
+            # replace with looser scf settings and pmodel guess if error code indicates scf failure
+            if error_code == -1:
+                # we know it's the second block we need to modify
+                orcablocks[1] = "%scf \n  Convergence Medium\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  DIISMaxEq   7\n  Guess PModel\n Shift Shift 0.1 ErrOff 0.1 end\nend",
+                
 
     if basis is not None:
         orcasimpleinput = " ".join([functional] + [basis] + simple)
@@ -417,7 +447,6 @@ def get_orca_blocks(
 
     if scf_MaxIter:
         for block_line in orcablocks:
-
             if "maxiter 500" in block_line:
                 index = orcablocks.index(block_line)
                 orcablocks[index] = re.sub(
@@ -446,11 +475,20 @@ def write_orca_inputs(
     actinide_basis: str = "ma-def-TZVP",
     actinide_ecp: str | None = None,
     non_actinide_basis: str = "def2-TZVPD",
+    error_handle: bool = False,
+    error_code: int = 0,
 ):
     """
     One-off method to be used if you wanted to write inputs for an arbitrary
     system. Primarily used for debugging.
     """
+
+    if error_handle:
+        if error_code == 0: # assume this is not a fresh calc and we need to pull atoms from orca.xyz
+            # read in atoms from orca.xyz in output_directory
+            print("Reading atoms from existing orca.xyz!")
+            atoms, comment = read_xyz_from_orca(os.path.join(output_directory, "orca.xyz"))
+
 
     orcasimpleinput, orcablocks = get_orca_blocks(
         atoms=atoms,
@@ -465,6 +503,8 @@ def write_orca_inputs(
         actinide_basis=actinide_basis,
         actinide_ecp=actinide_ecp,
         non_actinide_basis=non_actinide_basis,
+        error_handle=error_handle,
+        error_code=error_code
     )
 
     # print(orcablocks)
