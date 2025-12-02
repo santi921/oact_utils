@@ -76,15 +76,6 @@ def write_flux_orca_wave_two(
             if not os.path.exists(folder_to_use):
                 os.mkdir(os.path.join(calc_root_dir, base_dir, folder_to_use.split("/")[-1]))
             
-            error_code = check_job_termination(folder_to_use)
-            
-            #print(f"Using calculation folder: {folder_to_use}")
-            if skip_done:
-                # check if folder has successful flux job
-                if error_code:
-                    print(f"Skipping {folder_to_use} as it has a completed job.")
-                    continue
-
             #open the data_geom.txt file in the original folder, also open data_charge_muilt.txt
             orig_folder = os.path.join(root_data_dir, base_dir, folder_name)
             
@@ -104,6 +95,15 @@ def write_flux_orca_wave_two(
                         for rep in range(replicates):
                             print(f"  Writing replicate {rep+1} for molecule {mol_name}")
                             folder_rep = os.path.join(folder_to_use, f"{mol_name}_rep{rep+1}")
+                            error_code = check_job_termination(folder_rep)
+            
+                            #print(f"Using calculation folder: {folder_to_use}")
+                            if skip_done:
+                                # check if folder has successful flux job
+                                if error_code:
+                                    print(f"Skipping {folder_rep} as it has a completed job.")
+                                    continue
+
                             write_orca_inputs(
                                 atoms=dict_unified[mol_name]["geometry"],
                                 output_directory=os.path.join(folder_rep),
@@ -120,14 +120,25 @@ def write_flux_orca_wave_two(
                                 non_actinide_basis = non_actinide_basis,
                                 opt=opt,
                                 error_handle=True, 
-                                error_code= error_code
+                                error_code=error_code
                             )
                             count += 1
                             count_subfolders += 1
                 else:
+
+                    folder_mol = os.path.join(folder_to_use, mol_name)
+                    error_code = check_job_termination(folder_mol)
+
+                    #print(f"Using calculation folder: {folder_to_use}")
+                    if skip_done:
+                        # check if folder has successful flux job
+                        if error_code == 1:
+                            print(f"Skipping {folder_mol} as it has a completed job.")
+                            continue
+
                     write_orca_inputs(
                         atoms=dict_unified[mol_name]["geometry"],
-                        output_directory=os.path.join(folder_to_use, mol_name),
+                        output_directory=folder_mol,
                         charge=dict_unified[mol_name]["charge"],
                         mult=dict_unified[mol_name]["multiplicity"],
                         nbo = False,

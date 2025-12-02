@@ -17,7 +17,7 @@ def check_file_termination(file_path: str) -> int:
 
 def check_job_termination(
     dir: str, check_many: bool = False, flux_tf: bool = False
-) -> int | bool:
+) -> int:
     # sweep folder file for flux*out files
     files = os.listdir(dir)
     # print("files: ", files)
@@ -36,8 +36,8 @@ def check_job_termination(
             files_out = files_out[:1]
 
     if len(files_out) == 0:
-        return False
-
+        return 0
+    
     if check_many and len(files_out) > 1:
         status_list = []
         for file_out in files_out:

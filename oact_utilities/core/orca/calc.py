@@ -198,14 +198,14 @@ ORCA_BLOCKS = [
 
 ORCA_BLOCKS_X2C = [
     "%rel \n  FiniteNuc     true\n  DLU         true\n  LightAtomThresh 0\nend",
-    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\nShift Shift 0.1 ErrOff 0.1 end\nend",
+    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  Shift Shift 0.1 ErrOff 0.1 end\nend",
     "%elprop Dipole true Quadrupole true end",
     "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
 ]
 
 ORCA_BLOCKS_DK3 = [
     "%rel \n  FiniteNuc     true\nend\n",
-    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n. Shift Shift 0.1 ErrOff 0.1 end\nend",
+    "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  Shift Shift 0.1 ErrOff 0.1 end\nend",
     "%elprop Dipole true Quadrupole true end",
     "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
 ]
@@ -384,7 +384,7 @@ def get_orca_blocks(
             if error_code == -1:
                 print("Using looser SCF settings due to previous SCF failure + PModel guess.")
                 # we know it's the second block we need to modify
-                orcablocks[1] = "%scf \n  Convergence Medium\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  DIISMaxEq   7\n  Guess PModel\n Shift Shift 0.1 ErrOff 0.1 end\nend",
+                orcablocks[1] = "%scf \n  Convergence Medium\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  DIISMaxEq   7\n  Guess PModel\n Shift Shift 0.1 ErrOff 0.1 end\nend"
                 
             
 
@@ -398,7 +398,7 @@ def get_orca_blocks(
             if error_code == -1:
                 print("Using looser SCF settings due to previous SCF failure + PModel guess.")
                 # we know it's the second block we need to modify
-                orcablocks[1] = "%scf \n  Convergence Medium\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  DIISMaxEq   7\n  Guess PModel\n Shift Shift 0.1 ErrOff 0.1 end\nend",
+                orcablocks[1] = "%scf \n  Convergence Medium\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  DIISMaxEq   7\n  Guess PModel\n Shift Shift 0.1 ErrOff 0.1 end\nend"
                 
 
     if basis is not None:
