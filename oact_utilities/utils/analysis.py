@@ -289,27 +289,36 @@ def get_full_info_all_jobs(
             nprocs, total_time_seconds = find_timings_and_cores(log_file)
             geo_forces = get_geo_forces(log_file=log_file)
             geom_info = get_rmsd_start_final(folder_to_use)
+            
+            perf_info[name] = {}
+            
+            try:
+                nprocs, total_time_seconds = find_timings_and_cores(log_file)
+                perf_info[name]["nprocs"] = nprocs
+                perf_info[name]["total_time_seconds"] = total_time_seconds
+                
+            except:
+                perf_info[name]["nprocs"] = None
+                perf_info[name]["total_time_seconds"] = None
+                print(f"Could not extract timings and cores for job in {folder_to_use}.")
 
-            if nprocs is not None and total_time_seconds is not None:
-                perf_info[name] = {
-                    "nprocs": nprocs,
-                    "total_time_seconds": total_time_seconds,
-                    "geo_forces": geo_forces,
-                    "rmsd_start_final": geom_info["rmsd"],
-                    "energies_opt": geom_info["energies_frames"],
-                    "elements_final": geom_info["elements_final"],
-                    "coords_final": geom_info["coords_final"],
-                }
-            else:
-                perf_info[name] = {
-                    "nprocs": None,
-                    "total_time_seconds": None,
-                    "geo_forces": None,
-                    "rmsd_start_final": None,
-                    "energies_opt": None,
-                    "elements_final": None,
-                    "coords_final": None,
-                }
+            try:
+                perf_info[name]["geo_forces"] = geo_forces
+            except:
+                perf_info[name]["geo_forces"] = None
+                print(f"Could not extract geometry forces for job in {folder_to_use}.")
+
+            try:
+                perf_info[name]["rmsd_start_final"] = geom_info["rmsd"]
+                perf_info[name]["energies_opt"] = geom_info["energies_frames"]
+                perf_info[name]["elements_final"] = geom_info["elements_final"]
+                perf_info[name]["coords_final"] = geom_info["coords_final"]
+            except:
+                perf_info[name]["rmsd_start_final"] = None
+                perf_info[name]["energies_opt"] = None
+                perf_info[name]["elements_final"] = None
+                perf_info[name]["coords_final"] = None
+                print(f"Could not extract geometry info for job in {folder_to_use}.")
 
     return perf_info
 
