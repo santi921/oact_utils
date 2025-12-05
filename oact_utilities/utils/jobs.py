@@ -8,6 +8,7 @@ def launch_flux_jobs(
     root_dir: str,
     second_step: bool = False,
     skip_done: bool = True,
+    skip_failed: bool = False,
     dry: bool = False,
     verbose: bool = False,
 ) -> None:
@@ -22,7 +23,13 @@ def launch_flux_jobs(
                 # check if folder has successful flux job
                 if check_job_termination(folder_to_use):
                     if verbose:
-                        print(f"Skipping {folder_to_use} as it has a completed job.")
+                        print(f"Skipping {folder_to_use} - succcessful job found.")
+                    if skip_failed:
+                        # check if folder has failed flux job
+                        if check_job_termination(folder_to_use) == -1:
+                            if verbose:
+                                print(f"Skipping {folder_to_use} - failed job found.")
+                            continue
                     continue
 
             # check for flux_job.inp or flux_job_loose.inp and flux_job_tight.inp
