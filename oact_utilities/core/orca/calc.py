@@ -488,7 +488,8 @@ def write_orca_inputs(
         if error_code == 0: # assume this is not a fresh calc and we need to pull atoms from orca.xyz
             # read in atoms from orca.xyz in output_directory
             print("Reading atoms from existing orca.xyz!")
-            atoms, comment = read_xyz_from_orca(os.path.join(output_directory, "orca.xyz"))
+            if os.path.exists(os.path.join(output_directory, "orca.xyz")):
+                atoms, comment = read_xyz_from_orca(os.path.join(output_directory, "orca.xyz"))
 
 
     orcasimpleinput, orcablocks = get_orca_blocks(

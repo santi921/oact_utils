@@ -95,8 +95,10 @@ def write_flux_orca_wave_two(
                         for rep in range(replicates):
                             print(f"  Writing replicate {rep+1} for molecule {mol_name}")
                             folder_rep = os.path.join(folder_to_use, f"{mol_name}_rep{rep+1}")
+                            if not os.path.exists(folder_rep):
+                                os.mkdir(folder_rep)
                             error_code = check_job_termination(folder_rep)
-            
+                            
                             #print(f"Using calculation folder: {folder_to_use}")
                             if skip_done:
                                 # check if folder has successful flux job
@@ -127,6 +129,8 @@ def write_flux_orca_wave_two(
                 else:
 
                     folder_mol = os.path.join(folder_to_use, mol_name)
+                    if not os.path.exists(folder_mol):
+                        os.mkdir(folder_mol)
                     error_code = check_job_termination(folder_mol)
 
                     #print(f"Using calculation folder: {folder_to_use}")

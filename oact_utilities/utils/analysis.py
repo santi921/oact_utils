@@ -133,6 +133,54 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
 
     return list_info
 
+""" Format  of orca.engrad file: 
+# Number of atoms
+#
+ 148
+#
+# The current total energy in Eh
+#
+  -6038.704591758878
+#
+# The current gradient in Eh/bohr
+#
+      -0.001219869801
+      -0.000908215297
+       0.004618780904
+       0.004660568634
+#
+# The atomic numbers and current coordinates in Bohr
+#
+  95     0.0000000    0.0000000    0.0000000
+   7    -7.5442081    0.6697378   -0.0184305
+"""
+
+def get_engrad(engrad_file: str) -> Dict[str, Any]:
+    """
+    Extract energy and gradient information from orca.engrad file.
+    Args:
+        engrad_file (str): Path to the orca.engrad file.
+    Returns:
+        List[Dict[str, Any]]: List of dictionaries with energy and gradient info.
+    """
+
+    dict_info = {}
+    with open(engrad_file, "r") as f:
+        lines = f.readlines()
+    for i, line in enumerate(lines):
+        if "The current total energy in Eh" in line:
+            energy = float(lines[i + 2].strip())
+            dict_info["total_energy_Eh"] = energy
+        if "The current gradient in Eh/bohr" in line:
+            gradient = []
+            j = i + 2
+            while lines[j].strip() != "#":
+                gradient.append(float(lines[j].strip()))
+                j += 1
+            dict_info["gradient_Eh_per_bohr"] = gradient
+            
+            return dict_info
+
 
 def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
     """
@@ -183,7 +231,8 @@ def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
 
 
 def get_full_info_all_jobs(
-    root_dir: str, flux_tf: bool
+    root_dir: str, 
+    flux_tf: bool
 ) -> List[Tuple[str, int, float]]:
     """
     Get full performance and geometry info for all jobs in a root directory.
@@ -262,6 +311,83 @@ def get_full_info_all_jobs(
                     "coords_final": None,
                 }
 
+    return perf_info
+
+
+def get_sp_info_all_jobs(
+    root_dir: str, 
+    flux_tf: bool
+) -> List[Tuple[str, int, float]]:
+    """
+    Get full performance and geometry info for all jobs in a root directory.
+    Args:
+        root_dir (str): Root directory containing job subdirectories.
+        flux_tf (bool): Whether to look for flux- log files.
+    Returns:
+        Dict[str, Any]: Dictionary with performance and geometry info for each job.
+    """
+    perf_info = {}
+    # iterate through every subfolder in root_dir
+    for folder in os.listdir(root_dir):
+
+        name = folder.split("_")[0]
+
+        folder_to_use = os.path.join(root_dir, folder)
+
+        if os.path.isdir(folder_to_use):
+            status = check_job_termination(folder_to_use, flux_tf)
+
+            if status != 1:
+                # print(f"Job in {folder_to_use} did not complete successfully. Skipping.")
+                perf_info[name] = {
+                    "nprocs": None,
+                    "total_time_seconds": None,
+                    "engrad": None,
+                }
+                continue
+
+            files = os.listdir(folder_to_use)
+            # print("files: ", files)
+            if flux_tf:
+                files_out = [
+                    f for f in files if f.startswith("flux") and f.endswith("out")
+                ]
+            else:
+                files_out = [f for f in files if f.endswith("out")]
+                if not files_out:
+                    files_out = [f for f in files if f.endswith("logs")]
+
+            if len(files_out) > 1 and type(files_out) is list:
+                files_out.sort(
+                    key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)),
+                    reverse=True,
+                )
+
+            log_file = os.path.join(folder_to_use, files_out[0])
+            # just called orca.engrad
+            engrad_file = os.path.join(folder_to_use, "orca.engrad")
+            # print(f"Using log file: {log_file}")
+            # info block
+            nprocs, total_time_seconds = find_timings_and_cores(log_file)
+            engrad = get_engrad(engrad_file=engrad_file)
+
+            #geom_info = get_rmsd_start_final(folder_to_use)
+
+            if nprocs is not None and total_time_seconds is not None:
+                perf_info[name] = {
+                    "nprocs": nprocs,
+                    "total_time_seconds": total_time_seconds,
+                    "energy": engrad["total_energy_Eh"],
+                    "gradient": engrad["gradient_Eh_per_bohr"]
+
+                }
+            else:
+                perf_info[name] = {
+                    "nprocs": None,
+                    "total_time_seconds": None,
+                    "energy": engrad["total_energy_Eh"],
+                    "gradient": engrad["gradient_Eh_per_bohr"]
+                }
     return perf_info
 
 
