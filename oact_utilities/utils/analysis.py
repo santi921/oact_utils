@@ -256,11 +256,10 @@ def get_full_info_all_jobs(
             status = check_job_termination(
                 folder_to_use, 
                 check_many=check_many, 
-                flux_tf=flux_tf,
-                verbose=verbose
+                flux_tf=flux_tf
             )
-
-            #print(f"Status for job in {folder_to_use}: {status}")
+            if verbose:
+                print(f"Status for job in {folder_to_use}: {status}")
 
             if status != 1:
                 # print(f"Job in {folder_to_use} did not complete successfully. Skipping.")
