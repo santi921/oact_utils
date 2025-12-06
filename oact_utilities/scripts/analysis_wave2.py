@@ -7,6 +7,11 @@ def save_analysis_data(folder, prefix_save=None, flux_tf=True):
     json_data = get_full_info_all_jobs(folder, flux_tf=flux_tf)
     #print(root_name)
     #print(json_data)
+    print("Saving analysis data for {}...".format(root_name))
+    print("Data keys: {}".format(list(json_data.keys())))
+    # count the number of successful jobs, ie ones that are not all none values in the key 
+    num_successful_jobs = sum(1 for v in json_data.values() if any(val is not None for val in v.values()))
+    print(f"Number of successful jobs: {num_successful_jobs}")
     np.save('./analysis/{}{}.npy'.format(root_name, prefix_save if prefix_save else ""), json_data)
 
 
