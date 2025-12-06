@@ -232,7 +232,8 @@ def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
 
 def get_full_info_all_jobs(
     root_dir: str, 
-    flux_tf: bool
+    flux_tf: bool,
+    check_many: bool = False
 ) -> List[Tuple[str, int, float]]:
     """
     Get full performance and geometry info for all jobs in a root directory.
@@ -251,8 +252,14 @@ def get_full_info_all_jobs(
         folder_to_use = os.path.join(root_dir, folder)
 
         if os.path.isdir(folder_to_use):
-            status = check_job_termination(folder_to_use, flux_tf)
+            status = check_job_termination(
+                folder_to_use, 
+                check_many=check_many, 
+                flux_tf=flux_tf
+            )
 
+            print(f"Status for job in {folder_to_use}: {status}")
+            
             if status != 1:
                 # print(f"Job in {folder_to_use} did not complete successfully. Skipping.")
                 perf_info[name] = {
@@ -283,32 +290,28 @@ def get_full_info_all_jobs(
                     reverse=True,
                 )
 
-            log_file = os.path.join(folder_to_use, files_out[0])
-            # print(f"Using log file: {log_file}")
-            # info block
-            nprocs, total_time_seconds = find_timings_and_cores(log_file)
-            geo_forces = get_geo_forces(log_file=log_file)
-            geom_info = get_rmsd_start_final(folder_to_use)
+            log_file = os.path.join(folder_to_use, files_out[0])            
             
             perf_info[name] = {}
             
             try:
                 nprocs, total_time_seconds = find_timings_and_cores(log_file)
                 perf_info[name]["nprocs"] = nprocs
-                perf_info[name]["total_time_seconds"] = total_time_seconds
-                
+                perf_info[name]["total_time_seconds"] = total_time_seconds                
             except:
                 perf_info[name]["nprocs"] = None
                 perf_info[name]["total_time_seconds"] = None
                 print(f"Could not extract timings and cores for job in {folder_to_use}.")
 
             try:
+                geo_forces = get_geo_forces(log_file=log_file)
                 perf_info[name]["geo_forces"] = geo_forces
             except:
                 perf_info[name]["geo_forces"] = None
                 print(f"Could not extract geometry forces for job in {folder_to_use}.")
 
             try:
+                geom_info = get_rmsd_start_final(folder_to_use)
                 perf_info[name]["rmsd_start_final"] = geom_info["rmsd"]
                 perf_info[name]["energies_opt"] = geom_info["energies_frames"]
                 perf_info[name]["elements_final"] = geom_info["elements_final"]
