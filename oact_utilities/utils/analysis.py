@@ -178,8 +178,19 @@ def get_engrad(engrad_file: str) -> Dict[str, Any]:
                 gradient.append(float(lines[j].strip()))
                 j += 1
             dict_info["gradient_Eh_per_bohr"] = gradient
-            
-            return dict_info
+        if "The atomic numbers and current coordinates in Bohr" in line:
+            coords = []
+            elements = []
+            j = i + 2
+            while j < len(lines) and lines[j].strip() != "":
+                parts = lines[j].strip().split()
+                elements.append(int(parts[0]))
+                coords.append([float(x) for x in parts[1:4]])
+                j += 1
+            dict_info["elements"] = elements
+            dict_info["coords_bohr"] = coords
+        
+        return dict_info
 
 
 def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
@@ -355,7 +366,11 @@ def get_sp_info_all_jobs(
                 perf_info[name] = {
                     "nprocs": None,
                     "total_time_seconds": None,
-                    "engrad": None,
+                    "energy": None,
+                    "elements": None,
+                    "coords_bohr": None,
+                    "gradient": None
+
                 }
                 continue
 
@@ -391,7 +406,9 @@ def get_sp_info_all_jobs(
                     "nprocs": nprocs,
                     "total_time_seconds": total_time_seconds,
                     "energy": engrad["total_energy_Eh"],
-                    "gradient": engrad["gradient_Eh_per_bohr"]
+                    "gradient": engrad["gradient_Eh_per_bohr"],
+                    "elements": engrad["elements"],
+                    "coords_bohr": engrad["coords_bohr"],
 
                 }
             else:
@@ -399,7 +416,9 @@ def get_sp_info_all_jobs(
                     "nprocs": None,
                     "total_time_seconds": None,
                     "energy": engrad["total_energy_Eh"],
-                    "gradient": engrad["gradient_Eh_per_bohr"]
+                    "gradient": engrad["gradient_Eh_per_bohr"],
+                    "elements": engrad["elements"],
+                    "coords_bohr": engrad["coords_bohr"],
                 }
     return perf_info
 
