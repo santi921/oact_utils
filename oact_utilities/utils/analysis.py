@@ -171,6 +171,7 @@ def get_engrad(engrad_file: str) -> Dict[str, Any]:
         if "The current total energy in Eh" in line:
             energy = float(lines[i + 2].strip())
             dict_info["total_energy_Eh"] = energy
+
         if "The current gradient in Eh/bohr" in line:
             gradient = []
             j = i + 2
@@ -178,6 +179,7 @@ def get_engrad(engrad_file: str) -> Dict[str, Any]:
                 gradient.append(float(lines[j].strip()))
                 j += 1
             dict_info["gradient_Eh_per_bohr"] = gradient
+            
         if "The atomic numbers and current coordinates in Bohr" in line:
             coords = []
             elements = []
@@ -190,7 +192,7 @@ def get_engrad(engrad_file: str) -> Dict[str, Any]:
             dict_info["elements"] = elements
             dict_info["coords_bohr"] = coords
         
-        return dict_info
+    return dict_info
 
 
 def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
