@@ -46,7 +46,7 @@ def check_job_termination(
 
     if len(files_out) == 0:
         return 0
-    
+
     if check_many and len(files_out) > 1:
         status_list = []
         for file_out in files_out:
@@ -111,7 +111,7 @@ def check_geometry_steps(
 
     if len(files_out) == 0:
         return 0
-    
+
     if check_many and len(files_out) > 1:
         status_list = []
         for file_out in files_out:
@@ -137,7 +137,7 @@ def check_geometry_steps(
         # reverse lines and traverse to find "GEOMETRY OPTIMIZATION CYCLE"
         # example line: *                GEOMETRY OPTIMIZATION CYCLE   1            *
 
-        for line in reversed(lines):        
+        for line in reversed(lines):
             if "GEOMETRY OPTIMIZATION CYCLE" in line:
                 cycle_number = int(line.split()[-2])
                 if cycle_number > 1:
@@ -168,14 +168,14 @@ def check_sucessful_jobs(
     count_folder = 0
     count_success = 0
     count_still_running = 0
-    count_geom_beyond_1_then_fail = 0 
+    count_geom_beyond_1_then_fail = 0
     count_geom_beyond_1 = 0
 
     if check_traj:
         print("Checking trajectory files as well.")
         traj_count = 0
     # iterate through every subfolder in root_dir
-    
+
     for folder in os.listdir(root_dir):
         folder_to_use = os.path.join(root_dir, folder)
         if os.path.isdir(folder_to_use):
@@ -207,19 +207,21 @@ def check_sucessful_jobs(
                 == 0
             ):
                 count_still_running += 1
-                if check_geometry_steps(folder_to_use, check_many=check_many, flux_tf=flux_tf):
-                    count_geom_beyond_1 +=1
-                
+                if check_geometry_steps(
+                    folder_to_use, check_many=check_many, flux_tf=flux_tf
+                ):
+                    count_geom_beyond_1 += 1
+
                 if verbose:
                     print(f"Job in {folder_to_use} is still running or incomplete.")
             else:
-                if check_geometry_steps(folder_to_use, check_many=check_many, flux_tf=flux_tf):
-                    count_geom_beyond_1_then_fail +=1
-                
+                if check_geometry_steps(
+                    folder_to_use, check_many=check_many, flux_tf=flux_tf
+                ):
+                    count_geom_beyond_1_then_fail += 1
+
                 if verbose:
                     print(f"Job in {folder_to_use} did not complete successfully.")
-
-
 
     root_final = root_dir.split("/")[-2]
     # add tabs depending on length of root_final
@@ -232,7 +234,9 @@ def check_sucessful_jobs(
         print(
             f"Traj Results in {root_final} {tab_count}: {traj_count} / {count_success - traj_count} (With Traj / Without Traj)"
         )
-        print (f"Geometry optimization >1 step (running / fail): {count_geom_beyond_1} / {count_geom_beyond_1_then_fail}")
+        print(
+            f"Geometry optimization >1 step (running / fail): {count_geom_beyond_1} / {count_geom_beyond_1_then_fail}"
+        )
 
 
 def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:

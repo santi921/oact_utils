@@ -31,8 +31,7 @@ def elements_to_atomic_numbers(elements: list[str]) -> list[int]:
 
 
 def read_geom_from_inp_file(
-    inp_file: str, 
-    ase_format_tf: bool = False
+    inp_file: str, ase_format_tf: bool = False
 ) -> list[dict[str, float | str]]:
     with open(inp_file, "r") as f:
         lines = f.readlines()
@@ -72,8 +71,8 @@ def read_geom_from_inp_file(
             else:
                 atoms.append({"element": element, "x": x, "y": y, "z": z})
     if ase_format_tf:
-        #print(syms_list)
-        #print(coords_list)
+        # print(syms_list)
+        # print(coords_list)
         atoms = Atoms(symbols=syms_list, positions=coords_list)
         atoms.charge = int(charge)
         atoms.spin = int(spin)
@@ -97,6 +96,7 @@ def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], s
         atoms.append({"element": element, "x": x, "y": y, "z": z})
     return atoms, comment
 
+
 def read_xyz_from_orca(xyz_file: str) -> Atoms:
     with open(xyz_file, "r") as f:
         lines = f.readlines()
@@ -111,7 +111,9 @@ def read_xyz_from_orca(xyz_file: str) -> Atoms:
     comment = lines[index_first_non_empty + 1].strip()
     elem_list = []
     coord_list = []
-    for line in lines[index_first_non_empty + 2 : index_first_non_empty + 2 + num_atoms]:
+    for line in lines[
+        index_first_non_empty + 2 : index_first_non_empty + 2 + num_atoms
+    ]:
         parts = line.split()
         element = parts[0]
         x = float(parts[1])
@@ -320,6 +322,7 @@ export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY
 /usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca 
 """
 
+
 def write_flux_no_template(
     root_dir: str,
     two_step: bool = False,
@@ -458,9 +461,7 @@ def write_slurm_no_template(
                 if out_lines[-1].endswith("\n"):
                     out_lines[-1] = out_lines[-1][:-1]
                 out_lines[-1] = out_lines[-1] + " " + " ".join(loose_files) + "\n"
-                with open(
-                    os.path.join(folder_to_use, "slurm_job_loose.sh"), "w"
-                ) as fh:
+                with open(os.path.join(folder_to_use, "slurm_job_loose.sh"), "w") as fh:
                     fh.writelines(out_lines)
 
             if tight_files:
@@ -468,9 +469,7 @@ def write_slurm_no_template(
                 if out_lines[-1].endswith("\n"):
                     out_lines[-1] = out_lines[-1][:-1]
                 out_lines[-1] = out_lines[-1] + " " + " ".join(tight_files) + "\n"
-                with open(
-                    os.path.join(folder_to_use, "slurm_job_tight.sh"), "w"
-                ) as fh:
+                with open(os.path.join(folder_to_use, "slurm_job_tight.sh"), "w") as fh:
                     fh.writelines(out_lines)
         else:
             inp_files = [

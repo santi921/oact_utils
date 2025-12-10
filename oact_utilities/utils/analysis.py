@@ -133,6 +133,7 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
 
     return list_info
 
+
 """ Format  of orca.engrad file: 
 # Number of atoms
 #
@@ -154,6 +155,7 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
   95     0.0000000    0.0000000    0.0000000
    7    -7.5442081    0.6697378   -0.0184305
 """
+
 
 def get_engrad(engrad_file: str) -> Dict[str, Any]:
     """
@@ -179,7 +181,7 @@ def get_engrad(engrad_file: str) -> Dict[str, Any]:
                 gradient.append(float(lines[j].strip()))
                 j += 1
             dict_info["gradient_Eh_per_bohr"] = gradient
-            
+
         if "The atomic numbers and current coordinates in Bohr" in line:
             coords = []
             elements = []
@@ -191,7 +193,7 @@ def get_engrad(engrad_file: str) -> Dict[str, Any]:
                 j += 1
             dict_info["elements"] = elements
             dict_info["coords_bohr"] = coords
-        
+
     return dict_info
 
 
@@ -244,10 +246,7 @@ def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
 
 
 def get_full_info_all_jobs(
-    root_dir: str, 
-    flux_tf: bool,
-    check_many: bool = False, 
-    verbose: bool = False
+    root_dir: str, flux_tf: bool, check_many: bool = False, verbose: bool = False
 ) -> List[Tuple[str, int, float]]:
     """
     Get full performance and geometry info for all jobs in a root directory.
@@ -267,9 +266,7 @@ def get_full_info_all_jobs(
 
         if os.path.isdir(folder_to_use):
             status = check_job_termination(
-                folder_to_use, 
-                check_many=check_many, 
-                flux_tf=flux_tf
+                folder_to_use, check_many=check_many, flux_tf=flux_tf
             )
             if verbose:
                 print(f"Status for job in {folder_to_use}: {status}")
@@ -304,18 +301,20 @@ def get_full_info_all_jobs(
                     reverse=True,
                 )
 
-            log_file = os.path.join(folder_to_use, files_out[0])            
-            
+            log_file = os.path.join(folder_to_use, files_out[0])
+
             perf_info[name] = {}
-            
+
             try:
                 nprocs, total_time_seconds = find_timings_and_cores(log_file)
                 perf_info[name]["nprocs"] = nprocs
-                perf_info[name]["total_time_seconds"] = total_time_seconds                
+                perf_info[name]["total_time_seconds"] = total_time_seconds
             except:
                 perf_info[name]["nprocs"] = None
                 perf_info[name]["total_time_seconds"] = None
-                print(f"Could not extract timings and cores for job in {folder_to_use}.")
+                print(
+                    f"Could not extract timings and cores for job in {folder_to_use}."
+                )
 
             try:
                 geo_forces = get_geo_forces(log_file=log_file)
@@ -340,10 +339,7 @@ def get_full_info_all_jobs(
     return perf_info
 
 
-def get_sp_info_all_jobs(
-    root_dir: str, 
-    flux_tf: bool
-) -> List[Tuple[str, int, float]]:
+def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> List[Tuple[str, int, float]]:
     """
     Get full performance and geometry info for all jobs in a root directory.
     Args:
@@ -371,8 +367,7 @@ def get_sp_info_all_jobs(
                     "energy": None,
                     "elements": None,
                     "coords_bohr": None,
-                    "gradient": None
-
+                    "gradient": None,
                 }
                 continue
 
@@ -401,7 +396,7 @@ def get_sp_info_all_jobs(
             nprocs, total_time_seconds = find_timings_and_cores(log_file)
             engrad = get_engrad(engrad_file=engrad_file)
 
-            #geom_info = get_rmsd_start_final(folder_to_use)
+            # geom_info = get_rmsd_start_final(folder_to_use)
 
             if nprocs is not None and total_time_seconds is not None:
                 perf_info[name] = {
@@ -411,7 +406,6 @@ def get_sp_info_all_jobs(
                     "gradient": engrad["gradient_Eh_per_bohr"],
                     "elements": engrad["elements"],
                     "coords_bohr": engrad["coords_bohr"],
-
                 }
             else:
                 perf_info[name] = {

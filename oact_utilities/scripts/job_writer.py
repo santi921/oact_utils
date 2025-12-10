@@ -3,6 +3,7 @@ from oact_utilities.utils.create import write_flux_no_template, write_jobs
 from oact_utilities.utils.an66 import process_geometry_file, process_multiplicity_file
 from oact_utilities.core.orca.calc import write_orca_inputs
 
+
 def write_flux_orca_an66(
     actinide_basis: str,
     actinide_ecp: str,
@@ -33,7 +34,6 @@ def write_flux_orca_an66(
     if not os.path.exists(root_dir):
         os.makedirs(root_dir)
 
-
     dict_geoms = process_geometry_file(ref_geom_file, ase_format_tf=True)
     df_multiplicity = process_multiplicity_file(ref_multiplicity_file)
     print("Combining geometry and multiplicity data...")
@@ -41,13 +41,22 @@ def write_flux_orca_an66(
     print(f"Geometries keys: {list(dict_geoms.keys())[:5]}")
     print(f"Number of multiplicities found: {len(df_multiplicity)}")
     print(f"Multiplicity keys: {list(df_multiplicity.molecule.tolist())[:5]}")
-    dict_unified = {k: {"geometry": dict_geoms[k], "multiplicity": df_multiplicity[df_multiplicity.molecule == k]["multiplicity"].values[0]} for k in dict_geoms.keys() if k in df_multiplicity.molecule.tolist()}
+    dict_unified = {
+        k: {
+            "geometry": dict_geoms[k],
+            "multiplicity": df_multiplicity[df_multiplicity.molecule == k][
+                "multiplicity"
+            ].values[0],
+        }
+        for k in dict_geoms.keys()
+        if k in df_multiplicity.molecule.tolist()
+    }
     print(f"Number of unified entries: {len(dict_unified)}")
 
     count = 0
     for mol_name in dict_unified.keys():
         print(f"Preparing job for molecule: {mol_name}")
-        folder_to_use =  os.path.join(root_dir, mol_name)
+        folder_to_use = os.path.join(root_dir, mol_name)
         if not os.path.exists(folder_to_use):
             os.mkdir(folder_to_use)
         print(f"Using calculation folder: {folder_to_use}")
@@ -57,15 +66,15 @@ def write_flux_orca_an66(
             output_directory=folder_to_use,
             charge=0,
             mult=dict_unified[mol_name]["multiplicity"],
-            nbo = False,
-            cores = cores,
-            functional = "wB97M-V",
-            scf_MaxIter = 600,
-            simple_input = "omol",
-            orca_path = orca_exe,
-            actinide_basis = actinide_basis,
-            actinide_ecp = actinide_ecp,
-            non_actinide_basis = non_actinide_basis,
+            nbo=False,
+            cores=cores,
+            functional="wB97M-V",
+            scf_MaxIter=600,
+            simple_input="omol",
+            orca_path=orca_exe,
+            actinide_basis=actinide_basis,
+            actinide_ecp=actinide_ecp,
+            non_actinide_basis=non_actinide_basis,
         )
         count += 1
 
@@ -88,7 +97,9 @@ if __name__ == "__main__":
     two_step = None
     n_hours = 4
     ref_geom_file = "/Users/santiagovargas/dev/oact_utils/data/data/ref_geoms.txt"
-    ref_multiplicity_file = "/Users/santiagovargas/dev/oact_utils/data/data/ref_multiplicity.txt"
+    ref_multiplicity_file = (
+        "/Users/santiagovargas/dev/oact_utils/data/data/ref_multiplicity.txt"
+    )
     ################################## OMOL BLOCK ##################################
 
     # 1) baseline omol

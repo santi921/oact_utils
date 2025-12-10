@@ -3,15 +3,15 @@ from oact_utilities.utils.jobs import launch_flux_jobs
 
 
 if __name__ == "__main__":
-    
+
     ##############################################################################
     # Ritwik - Things to modify for your system
     dry = True
     root = "/Users/santiagovargas/dev/oact_utils/data/baselines/jobs/"
     ##############################################################################
-    
+
     skip_done = True
-    
+
     hard_chalc = "Hard_Donors/Chalcogenides/"
     hard_nitrates = "Hard_Donors/Nitrates/"
     hard_crown_cryptands = "Hard_Donors/Crown-Cryptands/"
@@ -33,7 +33,7 @@ if __name__ == "__main__":
         soft_ethers,
         soft_chalcogenides,
         soft_dithiocarbamates,
-        radical_semiquinones
+        radical_semiquinones,
     ]
 
     for folder in list_of_folders:

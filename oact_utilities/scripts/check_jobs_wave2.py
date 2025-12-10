@@ -3,7 +3,7 @@ from oact_utilities.utils.status import check_sucessful_jobs
 
 
 if __name__ == "__main__":
-    
+
     check_many = False
     hard_chalc = "Hard_Donors/Chalcogenides/"
     hard_nitrates = "Hard_Donors/Nitrates/"
@@ -34,7 +34,6 @@ if __name__ == "__main__":
     root = "/Users/santiagovargas/dev/oact_utils/data/baselines/jobs/"
     flux_tf = True
     ##############################################################################
-    
 
     for folder in list_of_folders:
         root_directory = os.path.join(root, folder)
