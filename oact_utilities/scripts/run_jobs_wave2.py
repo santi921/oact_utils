@@ -1,5 +1,5 @@
 import os
-from oact_utilities.utils.jobs import launch_flux_jobs
+from oact_utilities.utils.jobs import launch_flux_jobs, launch_slurm_jobs
 
 
 if __name__ == "__main__":
@@ -38,4 +38,6 @@ if __name__ == "__main__":
 
     for folder in list_of_folders:
         root_directory = os.path.join(root, folder)
-        launch_flux_jobs(root_dir=root_directory, dry=dry, skip_done=skip_done)
+        #launch_flux_jobs(root_dir=root_directory, dry=dry, skip_done=skip_done)
+        # Ritwik - use this to launch SLURM jobs
+        launch_slurm_jobs(root_dir=root_directory, dry=dry, skip_done=skip_done)
