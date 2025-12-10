@@ -2,12 +2,24 @@ import os
 import numpy as np 
 from oact_utilities.utils.analysis import get_sp_info_all_jobs
 
-def save_analysis_data(folder, prefix_save=None, flux_tf=True):
+def save_analysis_data(
+        folder: str, 
+        save_dir: str = "./analysis/",
+        prefix_save: str = None, 
+        flux_tf: bool = True
+    ) -> None:
+    """
+    Simple script to save analysis data for all jobs in a folder.
+    Args:
+        folder (str): Path to the root folder containing job subfolders.
+        prefix_save (str, optional): Prefix to add to the saved file name. Defaults to None.
+        flux_tf (bool, optional): Whether to check for flux output files. Defaults to True.
+    Returns:
+        None
+    """
     root_name = folder.split("/")[-2]
     json_data = get_sp_info_all_jobs(folder, flux_tf=flux_tf)
-    #print(root_name)
-    #print(json_data)
-    np.save('./analysis/{}{}_sp.npy'.format(root_name, prefix_save if prefix_save else ""), json_data)
+    np.save('{}/{}{}_sp.npy'.format(save_dir, root_name, prefix_save if prefix_save else ""), json_data)
 
 
 if __name__ == "__main__":
@@ -42,15 +54,14 @@ if __name__ == "__main__":
         soft_dithiocarbamates,
         #radical_semiquinones
     ]
-
+    
+    ##############################################################################
+    # Ritwik - Things to modify for your system
     root = "/usr/workspace/vargas58/orca_test/maria_benchmarks/wave_2_x2c_opt_filtered/"
+    ##############################################################################
+    
     for folder in list_of_folders:
         root_directory = os.path.join(root, folder)
-        #launch_flux_jobs(root_dir=root_directory, dry=dry, skip_done=skip_done, skip_failed=skip_failed, verbose=verbose)
         save_analysis_data(root_directory, flux_tf=flux_tf, prefix_save="x2c_")
-
-    root = "/usr/workspace/vargas58/orca_test/maria_benchmarks/wave_2_omol_opt_filtered/"
-    for folder in list_of_folders:
-        root_directory = os.path.join(root, folder)
-        #launch_flux_jobs(root_dir=root_directory, dry=dry, skip_done=skip_done, skip_failed=skip_failed, verbose=verbose)
-        save_analysis_data(root_directory, flux_tf=flux_tf, prefix_save="omol_")
+    
+    

@@ -1,28 +1,10 @@
 import os
 import time 
 
-from oact_utilities.utils.create import write_flux_no_template
 from oact_utilities.utils.baselines import process_multiplicity_file, process_geometry_file
-#from oact_utilities.core.orca.recipes import ase_relaxation, single_point_calculation
 from oact_utilities.core.orca.calc import write_orca_inputs
 from oact_utilities.utils.create import write_flux_no_template, write_slurm_no_template
 from oact_utilities.utils.status import check_job_termination
-
-
-
-def check_recent_edits(root_directory_job, cutoff=900): 
-    # go to most recently created subfolder
-    list_sub_folders = [f.path for f in os.scandir(root_directory_job) if f.is_dir()]
-    list_sub_folders.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-    most_recent_sub_folder = list_sub_folders[0]
-    files_in_job = os.listdir(most_recent_sub_folder)
-          
-    recent_modification = False
-    for f in files_in_job:
-        file_path = os.path.join(root_directory_job, f)
-        if os.path.getmtime(file_path) > time.time() - cutoff:  # 15 mins
-            return True
-    return recent_modification
 
 
 def write_flux_orca_wave_two(
@@ -49,6 +31,33 @@ def write_flux_orca_wave_two(
     conda_env: str = "py10mpi", 
     LD_LIBRARY_PATH: str = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
 ):
+    """
+    Write ORCA input files and job submission scripts for Wave 2 calculations. Can run sp or opt
+    
+    Takes:
+        - actinide_basis(str): Basis set for actinides
+        - actinide_ecp(str): ECP for actinides
+        - non_actinide_basis(str): Basis set for non-actinides
+        - root_data_dir(str): Root directory where data folders are located
+        - calc_root_dir(str): Root directory where calculation folders will be created
+        - orca_exe(str): Path to ORCA executable
+        - cores(int): Number of cores to use
+        - safety(bool): Whether to add safety cores to job submission script
+        - n_hours(int): Number of hours to request for job submission script
+        - max_scf_iterations(int): Maximum number of SCF iterations
+        - allocation(str): Allocation name for job submission script
+        - two_step(bool): Whether to use two-step submission script
+        - queue(str): Queue name for job submission script
+        - skip_done(bool): Whether to skip jobs that are already done
+        - replicates(int): Number of replicates to create for each molecule
+        - lot(str): Level of theory to use ("omol" or "x2c")
+        - functional(str): Functional to use 
+        - opt(bool): Whether to run optimization or single point
+        - job_handler(str): "flux" or "slurm" to determine job submission script
+        - source_bashrc(str): Command to source bashrc for jobs
+        - conda_env(str): Conda environment name for jobs
+        - LD_LIBRARY_PATH(str): LD_LIBRARY_PATH for jobs
+    """
     
     hard_donors_dir = "Hard_Donors/"
     organic_dir = "Organic/"
@@ -196,17 +205,15 @@ def write_flux_orca_wave_two(
 
 if __name__ == "__main__":
 
-    cores = 20
-    two_step = None
-    n_hours = 10
-    replicates=1
 
+    two_step = None
     ################################## OMOL BLOCK ##################################
 
     # 1) baseline omol
     actinide_basis = "ma-def-TZVP"
     actinide_ecp = "def-ECP"
     non_actinide_basis = "def2-TZVPD"
+    
     calc_root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/wave_2_omol_sp/"
     root_data_dir = "UPDATE ON TUO"
     orca_exe = "/usr/workspace/vargas58/orca_test/orca_6_2_1_linux_x86-64_openmpi411/orca"
@@ -215,69 +222,18 @@ if __name__ == "__main__":
     calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/"
     orca_exe = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
     
-    write_flux_orca_wave_two(
-        actinide_basis=actinide_basis,
-        actinide_ecp=actinide_ecp,
-        non_actinide_basis=non_actinide_basis,
-        two_step=two_step,
-        cores=cores,
-        orca_exe=orca_exe,
-        safety=False,
-        max_scf_iterations=600,
-        n_hours=n_hours,
-        allocation="dnn-sim",
-        queue="pbatch",
-        root_data_dir=root_data_dir,
-        calc_root_dir=calc_root_dir,
-        skip_done=True, 
-        replicates=replicates,   
-        lot="omol",
-        functional="wB97M-V", 
-        job_handler="flux"# ritwik change this to slurm 
-    )
-
-
-
-    ################################## X2C BLOCK ##################################
-
-    # 1) baseline omol
-    actinide_basis = "ma-def-TZVP"
-    actinide_ecp = "def-ECP"
-    non_actinide_basis = "def2-TZVPD"
-    calc_root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/wave_2_omol_sp/"
-    root_data_dir = "UPDATE ON TUO"
-    orca_exe = "/usr/workspace/vargas58/orca_test/orca_6_2_1_linux_x86-64_openmpi411/orca"
-
-    root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
-    calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/"
-    orca_exe = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
-    
-    write_flux_orca_wave_two(
-        actinide_basis=actinide_basis,
-        actinide_ecp=actinide_ecp,
-        non_actinide_basis=non_actinide_basis,
-        two_step=two_step,
-        cores=cores,
-        orca_exe=orca_exe,
-        safety=False,
-        max_scf_iterations=600,
-        n_hours=n_hours,
-        allocation="dnn-sim",
-        queue="pbatch",
-        root_data_dir=root_data_dir,
-        calc_root_dir=calc_root_dir,
-        skip_done=True, 
-        replicates=replicates,   
-        lot="omol",
-        functional="wB97M-V", 
-        job_handler="flux"# ritwik change this to slurm 
-    )
-
-
-
-    actinide_basis = "SARC-DKH-TZVPP"
-    actinide_ecp = None
-    non_actinide_basis = "DKH-def2-TZVPP"
+    ##############################################################################
+    # Ritwik - Things to modify for your system
+    job_handler = "flux" 
+    queue = "pbatch"  
+    allocation = "dnn-sim"  
+    source_bashrc = "source ~/.bashrc"
+    conda_env = "py10mpi"
+    LD_LIBRARY_PATH = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
+    n_hours = 10
+    replicates=1
+    cores = 20
+    ##############################################################################
 
     write_flux_orca_wave_two(
         actinide_basis=actinide_basis,
@@ -289,13 +245,17 @@ if __name__ == "__main__":
         safety=False,
         max_scf_iterations=600,
         n_hours=n_hours,
-        allocation="dnn-sim",
-        queue="pbatch",
+        allocation=allocation,
+        queue=queue,
         root_data_dir=root_data_dir,
         calc_root_dir=calc_root_dir,
         skip_done=True, 
         replicates=replicates,   
         lot="omol",
         functional="wB97M-V", 
-        job_handler="flux"# ritwik change this to slurm 
+        job_handler=job_handler, 
+        opt=False, 
+        source_bashrc=source_bashrc,
+        conda_env=conda_env,
+        LD_LIBRARY_PATH=LD_LIBRARY_PATH
     )

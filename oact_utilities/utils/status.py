@@ -18,6 +18,15 @@ def check_file_termination(file_path: str) -> int:
 def check_job_termination(
     dir: str, check_many: bool = False, flux_tf: bool = False
 ) -> int:
+    """
+    Utility function to check if a job in a given directory has terminated successfully.
+    Args:
+        dir (str): Path to the directory containing the job.
+        check_many (bool, optional): Whether to check multiple output files. Defaults to False.
+        flux_tf (bool, optional): Whether to check for flux output files. Defaults to False.
+    Returns:
+        int: 1 if the job terminated successfully, -1 if it failed, 0 if still running or incomplete.
+    """
     # sweep folder file for flux*out files
     files = os.listdir(dir)
     # print("files: ", files)
@@ -68,9 +77,19 @@ def check_job_termination(
                 return -1
         return 0
 
+
 def check_geometry_steps(
     dir: str, check_many: bool = False, flux_tf: bool = False
 ) -> int:
+    """
+    Utility function to check if a job in a given directory has gone beyond 1 geometry optimization step.
+    Args:
+        dir (str): Path to the directory containing the job.
+        check_many (bool, optional): Whether to check multiple output files. Defaults to False.
+        flux_tf (bool, optional): Whether to check for flux output files. Defaults to False
+    Returns:
+        int: True if the job went beyond 1 geometry optimization step, False otherwise.
+    """
     # sweep folder file for flux*out files
     files = os.listdir(dir)
     # print("files: ", files)
@@ -78,6 +97,8 @@ def check_geometry_steps(
         files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
     else:
         files_out = [f for f in files if f.endswith("out")]
+        # also check slurm-*.log files
+        files_out += [f for f in files if f.startswith("slurm-") and f.endswith(".log")]
         if not files_out:
             files_out = [f for f in files if f.endswith("logs")]
 
@@ -124,6 +145,7 @@ def check_geometry_steps(
                 else:
                     return False
 
+
 def check_sucessful_jobs(
     root_dir: str,
     check_many: bool = False,
@@ -131,6 +153,17 @@ def check_sucessful_jobs(
     verbose: bool = False,
     check_traj: bool = False,
 ) -> None:
+    """
+    Utility function to check and report the status of jobs in a given root directory.
+    Args:
+        root_dir (str): Path to the root directory containing job subfolders.
+        check_many (bool, optional): Whether to check multiple output files per job. Defaults to False.
+        flux_tf (bool, optional): Whether to check for flux output files. Defaults to False.
+        verbose (bool, optional): Whether to print detailed status messages. Defaults to False.
+        check_traj (bool, optional): Whether to check for trajectory files. Defaults to False.
+    Returns:
+        None
+    """
 
     count_folder = 0
     count_success = 0
@@ -203,7 +236,15 @@ def check_sucessful_jobs(
 
 
 def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:
-
+    """
+    Utility function to check the termination status of jobs listed in a dataframe.
+    Args:
+        root_dir (str): Path to the root directory containing job subfolders.
+        df_multiplicity (DataFrame): DataFrame containing job information with a 'molecule
+        ' column.
+    Returns:
+        None
+    """
     job_list = df_multiplicity["molecule"].tolist()
 
     for job in job_list:

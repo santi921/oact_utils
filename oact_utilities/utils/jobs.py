@@ -12,6 +12,21 @@ def launch_flux_jobs(
     dry: bool = False,
     verbose: bool = False,
 ) -> None:
+    """
+    Utility to launch flux jobs in all subdirectories of a given root directory.
+    It checks for the presence of job input files and whether jobs have already been completed.
+    Args:
+        root_dir (str): Path to the root directory containing job subdirectories.
+        second_step (bool, optional): If True, launches the second step (tight) jobs.
+                                       Defaults to False.
+        skip_done (bool, optional): If True, skips directories with completed jobs. Defaults to True.
+        skip_failed (bool, optional): If True, skips directories with failed jobs. Defaults to False.
+        dry (bool, optional): If True, performs a dry run without executing commands. Defaults to False.
+        verbose (bool, optional): If True, prints detailed information during execution. Defaults to False.
+    Returns:
+        None
+    """
+
     # iterate through every subfolder in root_dir
     for folder in os.listdir(root_dir):
         folder_to_use = os.path.join(root_dir, folder)
@@ -68,6 +83,19 @@ def launch_slurm_jobs(
     dry: bool = False,
     verbose: bool = False,
 ) -> None:
+    """
+    Utility to launch SLURM jobs in all subdirectories of a given root directory.
+    It checks for the presence of job scripts and whether jobs have already been completed.
+    Args:
+        root_dir (str): Path to the root directory containing job subdirectories.
+        second_step (bool, optional): If True, launches the second step (tight) jobs.
+                                       Defaults to False.
+        skip_done (bool, optional): If True, skips directories with completed jobs. Defaults to True.
+        dry (bool, optional): If True, performs a dry run without executing commands. Defaults to False.
+        verbose (bool, optional): If True, prints detailed information during execution. Defaults to False.
+    Returns:
+        None
+    """
     # iterate through every subfolder in root_dir
     for folder in os.listdir(root_dir):
         folder_to_use = os.path.join(root_dir, folder)
