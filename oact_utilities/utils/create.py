@@ -420,11 +420,12 @@ def write_slurm_no_template(
 
     base_lines = [
         "#!/bin/sh\n",
-        "#SBATCH: -N 1\n",
-        f"#SBATCH: -n {n_cores}\n",
-        f"#SBATCH: -q {queue}\n",
-        f"#SBATCH: -A {allocation}\n",
-        f"#SBATCH: -t {n_hours*60}m\n",
+        "#SBATCH -N 1\n",
+        f"#SBATCH -n {n_cores}\n",
+        f"#SBATCH --constraints standard\n",
+        f"#SBATCH --qos {queue}\n",
+        f"#SBATCH --account {allocation}\n",
+        f"#SBATCH -t {n_hours}:00:00\n",
         "\n",
         f"{source_bashrc}\n",
         f"conda activate {conda_env}\n",

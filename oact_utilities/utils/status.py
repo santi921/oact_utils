@@ -14,6 +14,32 @@ def check_file_termination(file_path: str) -> int:
             return -1
     return 0
 
+def done_geo_opt_ase(opt_log_file, fmax_cutoff=0.01):
+    """
+    Check if geometry optimization is done based on final forces using ASE.
+    Args:
+        opt_log_file (str): Path to the optimization log file.
+        fmax_cutoff (float, optional): Force maximum cutoff to consider optimization done. Defaults to 0.01.        Returns:
+    Returns:
+        bool: True if optimization is done, False otherwise.
+    """
+
+    # iterate thgouth lines to find final forces
+    with open(opt_log_file, "r") as f:
+        line = f.readlines()
+    forces = []
+    for line in line:
+        # check if it's a float
+        if line.split()[-1].replace('.','',1).isdigit():
+            forces.append(float(line.split()[3]))
+    if len(forces) == 0:
+        return False
+    force_check = forces[-1]
+    if force_check < fmax_cutoff:
+        return True
+    else:
+        return False
+    
 
 def check_job_termination(
     dir: str, check_many: bool = False, flux_tf: bool = False
