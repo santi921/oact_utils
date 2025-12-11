@@ -14,6 +14,7 @@ def write_flux_orca_wave_two(
     actinide_basis: str,
     actinide_ecp: str,
     non_actinide_basis: str,
+    tight_two_e_int: bool,
     root_data_dir: str,
     calc_root_dir: str,
     orca_exe: str,
@@ -41,6 +42,7 @@ def write_flux_orca_wave_two(
         - actinide_basis(str): Basis set for actinides
         - actinide_ecp(str): ECP for actinides
         - non_actinide_basis(str): Basis set for non-actinides
+        - tight_two_e_int(bool): Whether to use tight two-electron integrals
         - root_data_dir(str): Root directory where data folders are located
         - calc_root_dir(str): Root directory where calculation folders will be created
         - orca_exe(str): Path to ORCA executable
@@ -150,6 +152,7 @@ def write_flux_orca_wave_two(
                             opt=opt,
                             error_handle=True,
                             error_code=error_code,
+                            tight_two_e_int=tight_two_e_int
                         )
                         count += 1
                         count_subfolders += 1
@@ -184,6 +187,7 @@ def write_flux_orca_wave_two(
                         opt=opt,
                         error_handle=True,
                         error_code=error_code,
+                        tight_two_e_int=tight_two_e_int
                     )
                     count += 1
                     count_subfolders += 1

@@ -348,6 +348,7 @@ def get_orca_blocks(
     actinide_basis: str = "ma-def-TZVP",
     actinide_ecp: str | None = None,
     non_actinide_basis: str = "def2-TZVPD",
+    tight_two_e_int: bool = False,
     error_handle: bool = False,
     error_code: int = 0,
 ):
@@ -457,6 +458,17 @@ def get_orca_blocks(
                 )
                 break
 
+    if tight_two_e_int:
+        for block_line in orcablocks:
+            if "THRESH 1e-12\n  TCUT 1e-13\n" in block_line:
+                index = orcablocks.index(block_line)
+                orcablocks[index] = re.sub(
+                    r"THRESH 1e-12\n  TCUT 1e-13\n",
+                    f"THRESH 1e-15\n  TCUT 1e-16\n",
+                    block_line,
+                )
+                break
+
     # print("orca_blocks: ", orcablocks)
     # print("orca_simple: ", orcasimpleinput)
     return orcasimpleinput, orcablocks
@@ -478,6 +490,7 @@ def write_orca_inputs(
     actinide_basis: str = "ma-def-TZVP",
     actinide_ecp: str | None = None,
     non_actinide_basis: str = "def2-TZVPD",
+    tight_two_e_int: bool = False,
     error_handle: bool = False,
     error_code: int = 0,
 ):
@@ -512,6 +525,7 @@ def write_orca_inputs(
         non_actinide_basis=non_actinide_basis,
         error_handle=error_handle,
         error_code=error_code,
+        tight_two_e_int=tight_two_e_int
     )
 
     # print(orcablocks)
