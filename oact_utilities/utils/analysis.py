@@ -271,18 +271,6 @@ def get_full_info_all_jobs(
             if verbose:
                 print(f"Status for job in {folder_to_use}: {status}")
 
-            if status != 1:
-                # print(f"Job in {folder_to_use} did not complete successfully. Skipping.")
-                perf_info[name] = {
-                    "nprocs": None,
-                    "total_time_seconds": None,
-                    "geo_forces": None,
-                    "rmsd_start_final": None,
-                    "energies_opt": None,
-                    "elements_final": None,
-                    "coords_final": None,
-                }
-                continue
 
             files = os.listdir(folder_to_use)
             # print("files: ", files)
@@ -303,8 +291,22 @@ def get_full_info_all_jobs(
 
             log_file = os.path.join(folder_to_use, files_out[0])
 
-            perf_info[name] = {}
+            perf_info[name] = {"status": status}
 
+            """
+            if status != 1:
+                # print(f"Job in {folder_to_use} did not complete successfully. Skipping.")
+                perf_info[name] = {
+                    "nprocs": None,
+                    "total_time_seconds": None,
+                    "geo_forces": None,
+                    "rmsd_start_final": None,
+                    "energies_opt": None,
+                    "elements_final": None,
+                    "coords_final": None,
+                }
+                continue
+            """
             try:
                 nprocs, total_time_seconds = find_timings_and_cores(log_file)
                 perf_info[name]["nprocs"] = nprocs
