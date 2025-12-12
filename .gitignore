@@ -231,7 +231,7 @@ __marimo__/
 *png
 *npy
 *txt
-^requirements.txt$
+!requirements.txt
 *DS_Store
 *err
 *gz
