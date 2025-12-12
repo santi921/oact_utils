@@ -421,8 +421,8 @@ def write_slurm_no_template(
     base_lines = [
         "#!/bin/sh\n",
         "#SBATCH -N 1\n",
-        f"#SBATCH -n {n_cores}\n",
-        f"#SBATCH --constraints standard\n",
+        #f"#SBATCH -n {n_cores}\n", # optional, remove with None 
+        f"#SBATCH --constraint standard\n",
         f"#SBATCH --qos {queue}\n",
         f"#SBATCH --account {allocation}\n",
         f"#SBATCH -t {n_hours}:00:00\n",

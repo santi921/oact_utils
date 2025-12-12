@@ -464,7 +464,7 @@ def get_orca_blocks(
                 index = orcablocks.index(block_line)
                 orcablocks[index] = re.sub(
                     r"THRESH 1e-12\n  TCUT 1e-13\n",
-                    f"THRESH 1e-15\n  TCUT 1e-16\n",
+                    f"THRESH 1e-13\n  TCUT 1e-14\n",
                     block_line,
                 )
                 break
@@ -476,7 +476,7 @@ def get_orca_blocks(
 
 def write_orca_inputs(
     atoms: Atoms,
-    output_directory,
+    output_directory: str,
     charge: int = 0,
     mult: int = 1,
     nbo: bool = False,

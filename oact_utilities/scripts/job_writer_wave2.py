@@ -255,6 +255,7 @@ if __name__ == "__main__":
     n_hours = 10
     replicates = 1
     cores = 20
+    tight_two_e_int=True
     ##############################################################################
 
     write_flux_orca_wave_two(
@@ -280,4 +281,5 @@ if __name__ == "__main__":
         source_bashrc=source_bashrc,
         conda_env=conda_env,
         LD_LIBRARY_PATH=LD_LIBRARY_PATH,
+        tight_two_e_int=tight_two_e_int,
     )
