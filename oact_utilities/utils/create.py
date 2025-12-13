@@ -343,7 +343,7 @@ def write_flux_no_template_sella_ase(
         "source ~/.bashrc\n",
         "conda activate py10mpi\n",
         "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
-        "export 'JAX_PLATFORMS'='cpu'\n",
+        "export JAX_PLATFORMS=cpu\n",
         "python orca.py\n",
     ]
 
