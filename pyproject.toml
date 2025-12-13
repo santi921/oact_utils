@@ -1,0 +1,17 @@
+[project]
+name = "oact_utilities"
+version = "0.1.0"
+description = "Utilities for ORCA and actinide chemistry workflows"
+authors = [
+    { name = "Santiago Vargas", email = "santiagovargas921@gmail.com" }
+]
+requires-python = ">=3.9"
+dependencies = ["sella", "ase", "periodictable", "pandas"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["oact_utilities*"]
+exclude = ["data*"]

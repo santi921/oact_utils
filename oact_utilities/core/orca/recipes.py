@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 
+from annotated_types import doc
+
 from oact_utilities.core.orca._base import run_and_summarize, run_and_summarize_opt
 from quacc import change_settings
+from sella import Sella
 
 from oact_utilities.core.orca.calc import Vertical, get_orca_blocks
 
@@ -194,10 +197,12 @@ def ase_relaxation(
     return doc
 
 
-def ase_relaxation_wave2(
+from ase.calculators.orca import ORCA, OrcaProfile
+
+def pure_ase_relaxation(
     atoms,
     charge,
-    mult,
+    spin_multiplicity,
     functional: str = "wB97M-V",
     simple_input: str = "omol",
     scf_MaxIter: int = None,
@@ -205,22 +210,16 @@ def ase_relaxation_wave2(
     actinide_ecp: str | None = None,
     non_actinide_basis: str = "def2-TZVPD",
     nprocs=12,
-    opt_params=None,
     outputdir=os.getcwd(),
     vertical=Vertical.Default,
-    copy_files=None,
     nbo=False,
-    error_handle: bool = False,
-    error_code: int = 0,
-    tight_two_e_int: bool = False,
+    traj_file: str = "opt.traj",
     orca_cmd: str = "orca",
-    step_counter_start=0,
     **calc_kwargs,
 ):
     """
-    Wrapper around QUACC's ase_relax_job to standardize geometry optimizations.
-    See github.com/Quantum-Accelerators/quacc/blob/main/src/quacc/recipes/orca/core.py#L22
-    for more details.
+    Just uses sella and orca without quacc's run_and_summarize_opt
+    to standardize geometry optimizations.
 
     Arguments
     ---------
@@ -254,42 +253,49 @@ def ase_relaxation_wave2(
     """
 
     orcasimpleinput, orcablocks = get_orca_blocks(
-        atoms=atoms,
+        atoms,
         nbo=nbo,
         cores=nprocs,
-        opt=False,
         vertical=vertical,
+        basis=None,
         scf_MaxIter=scf_MaxIter,
-        mult=mult,
+        mult=spin_multiplicity,
         functional=functional,
         simple_input=simple_input,
         actinide_basis=actinide_basis,
         actinide_ecp=actinide_ecp,
         non_actinide_basis=non_actinide_basis,
-        error_handle=error_handle,
-        error_code=error_code,
-        tight_two_e_int=tight_two_e_int
     )
 
+    input_swaps=orcasimpleinput
+    block_swaps=orcablocks
+    orcasimpleinput = input_swaps
+    orcablocks = "\n".join(block_swaps)
 
-    with change_settings(
-        {
-            "ORCA_CMD": orca_cmd,
-            "RESULTS_DIR": outputdir,
-            "SCRATCH_DIR": outputdir,
-        }
-    ):
+    orca_calculator = ORCA(
+        profile=OrcaProfile(command=orca_cmd),
+        charge=charge,
+        mult=spin_multiplicity,
+        orcasimpleinput=orcasimpleinput,
+        orcablocks=orcablocks,
+        **calc_kwargs,
+    )
 
-        doc = run_and_summarize_opt(
-            atoms,
-            charge=charge,
-            spin_multiplicity=mult,
-            input_swaps=orcasimpleinput,
-            block_swaps=orcablocks,
-            opt_params=opt_params,
-            copy_files=copy_files,
-            step_counter_start=step_counter_start,
-            **calc_kwargs,
-        )
+    atoms.calc = orca_calculator
 
-    return doc
+    opt = Sella(
+        atoms, 
+        trajectory=traj_file, 
+        logfile=os.path.join(outputdir, "sella.log"), 
+        #append_trajectory=False,
+        internal=True,
+        #fmax=0.05,
+        order=0, 
+        #**(opt_params or {})
+    )
+
+    opt.run(fmax=0.05 )
+    
+
+
+
