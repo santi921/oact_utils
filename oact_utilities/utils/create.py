@@ -365,9 +365,9 @@ def write_flux_no_template_sella_ase(
         if not inp_files:
             continue
         out_lines = base_lines.copy()
-        if out_lines[-1].endswith("\n"):
-            out_lines[-1] = out_lines[-1][:-1]
-        out_lines[-1] = out_lines[-1] + " " + " ".join(inp_files) + "\n"
+        #if out_lines[-1].endswith("\n"):
+        #    out_lines[-1] = out_lines[-1][:-1]
+        #out_lines[-1] = out_lines[-1] + " " + " ".join(inp_files) + "\n"
         with open(os.path.join(folder_to_use, "flux_job.flux"), "w") as fh:
             fh.writelines(out_lines)
 
