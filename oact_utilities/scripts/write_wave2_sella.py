@@ -10,56 +10,10 @@ from oact_utilities.utils.create import write_flux_no_template_sella_ase
 from oact_utilities.utils.status import check_job_termination
 from oact_utilities.core.orca.calc import write_orca_inputs
 
-#from oact_utilities.core.orca.recipes import pure_ase_relaxation
-#from oact_utilities.utils.create import read_geom_from_inp_file
-
-
 import time 
 
 os.environ['JAX_PLATFORMS'] = 'cpu'
 
-""" Template for writing Sella geometry optimization jobs using ASE and ORCA
-import time 
-import os
-from oact_utilities.core.orca.recipes import pure_ase_relaxation
-from oact_utilities.utils.create import read_geom_from_inp_file
-
-def main():
-    os.environ['JAX_PLATFORMS'] = 'cpu'
-    inp_test = "/Users/santiagovargas/dev/oact_utils/data/orca_inputs/AmO/AmO_orca.inp"
-    atoms_orca = read_geom_from_inp_file(inp_test, ase_format_tf=True)
-    charge = atoms_orca.charge
-    mult = atoms_orca.spin
-    output_directory = "/Users/santiagovargas/dev/oact_utils/data/quacc_opt/"
-    orca_path = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
-    nbo_tf = False
-    cores=12
-    actinide_basis = "ma-def-TZVP"
-    actinide_ecp = "def-ECP"
-    non_actinide_basis = "def2-TZVPD"
-    time_start = time.time()
-    res_dict = pure_ase_relaxation(
-        atoms=atoms_orca,
-        charge=charge,
-        spin_multiplicity=mult,
-        functional="wB97M-V",
-        simple_input="omol",
-        scf_MaxIter=1000,
-        outputdir=output_directory,
-        orca_cmd=orca_path,
-        nbo=nbo_tf,
-        nprocs=cores,
-        actinide_basis=actinide_basis,
-        actinide_ecp=actinide_ecp,
-        non_actinide_basis=non_actinide_basis,
-        restart=True
-    )
-    time_end = time.time()
-    print("Total time (s): ", time_end - time_start)
-
-if __name__ == "__main__":
-    main()
-"""
 def write_inputs_ase(
     output_directory: str,
     charge: int,
@@ -72,11 +26,13 @@ def write_inputs_ase(
     orca_path: str,
     actinide_basis: str,
     actinide_ecp: str | None,
+    traj_file: str,
     non_actinide_basis: str,
     opt: bool = False,
     error_handle: bool = False,
     error_code: int = 0,
     tight_two_e_int: bool = False,
+    restart=True
 ):
     """
     Write ORCA input files for a given set of parameters.
@@ -127,10 +83,13 @@ def write_inputs_ase(
         f.write("        spin_multiplicity=mult,\n")
         f.write(f"        functional='{functional}',\n")
         f.write(f"        simple_input='{simple_input}',\n")
+        if restart:
+            f.write("        restart=True,\n")
         f.write(f"        scf_MaxIter={scf_MaxIter},\n")
         f.write("        outputdir=output_directory,\n")
         f.write("        orca_cmd=orca_path,\n")
         f.write("        nbo=nbo_tf,\n")
+        f.write(f"        traj_file='{traj_file}',\n")
         f.write("        nprocs=cores,\n")
         f.write("        actinide_basis=actinide_basis,\n")
         f.write("        actinide_ecp=actinide_ecp,\n")
@@ -165,6 +124,7 @@ def write_sella_python_ase_job(
     lot="omol",
     functional="wB97M-V",
     opt=False,
+    overwrite=False,
     job_handler="flux",
     source_bashrc: str = "source ~/.bashrc",
     conda_env: str = "py10mpi",
@@ -263,6 +223,39 @@ def write_sella_python_ase_job(
                     if error_code == 1:
                         print(f"Skipping {folder_mol} as it has a completed job.")
                         continue
+                
+                # check if traj_file exists in folder_mol, also if so, traj_file = folder_mol/opt.traj
+                traj_file = os.path.join(folder_mol, "opt.traj")
+                if not os.path.exists(traj_file):
+                    traj_file = None
+
+                restart= False
+                # check if there is no *inp file already there 
+                if ".inp" not in os.listdir(folder_mol) and overwrite==False:
+                    write_orca_inputs(
+                        atoms=dict_unified[mol_name]["geometry"],
+                        output_directory=folder_mol,
+                        charge=dict_unified[mol_name]["charge"],
+                        mult=dict_unified[mol_name]["multiplicity"],
+                        nbo=False,
+                        cores=cores,
+                        functional=functional,
+                        scf_MaxIter=max_scf_iterations,
+                        simple_input=lot,
+                        orca_path=orca_exe,
+                        actinide_basis=actinide_basis,
+                        actinide_ecp=actinide_ecp,
+                        non_actinide_basis=non_actinide_basis,
+                        opt=opt,
+                        error_handle=True,
+                        error_code=error_code,
+                        tight_two_e_int=tight_two_e_int
+                    )
+                    restart= True
+                else:
+                    print(f"Input file already exists in {folder_mol}, skipping input writing.")
+                
+                
                 write_inputs_ase(
                     output_directory=os.path.join(folder_mol),
                     charge=dict_unified[mol_name]["charge"],
@@ -277,29 +270,11 @@ def write_sella_python_ase_job(
                     actinide_ecp=actinide_ecp,
                     non_actinide_basis=non_actinide_basis,
                     opt=opt,
+                    restart=restart,
                     error_handle=True,
                     error_code=error_code,
-                    tight_two_e_int=tight_two_e_int
-                )
-
-                write_orca_inputs(
-                    atoms=dict_unified[mol_name]["geometry"],
-                    output_directory=folder_mol,
-                    charge=dict_unified[mol_name]["charge"],
-                    mult=dict_unified[mol_name]["multiplicity"],
-                    nbo=False,
-                    cores=cores,
-                    functional=functional,
-                    scf_MaxIter=max_scf_iterations,
-                    simple_input=lot,
-                    orca_path=orca_exe,
-                    actinide_basis=actinide_basis,
-                    actinide_ecp=actinide_ecp,
-                    non_actinide_basis=non_actinide_basis,
-                    opt=opt,
-                    error_handle=True,
-                    error_code=error_code,
-                    tight_two_e_int=tight_two_e_int
+                    tight_two_e_int=tight_two_e_int,
+                    traj_file=traj_file
                 )
                 count += 1
                 count_subfolders += 1
@@ -341,7 +316,7 @@ if __name__ == "__main__":
     actinide_basis = "ma-def-TZVP"
     actinide_ecp = "def-ECP"
     non_actinide_basis = "def2-TZVPD"
-
+    
 
 
     write_sella_python_ase_job(

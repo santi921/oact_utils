@@ -264,7 +264,6 @@ def check_sucessful_jobs(
             f"Geometry optimization >1 step (running / fail): {count_geom_beyond_1} / {count_geom_beyond_1_then_fail}"
         )
 
-
 def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:
     """
     Utility function to check the termination status of jobs listed in a dataframe.
@@ -330,3 +329,99 @@ def pull_log_file(root_dir: str) -> str:
     #    log_file = log_file[0]
 
     return log_file
+
+
+def check_sella_complete(root_dir: str, fmax=0.05) -> bool:
+    """
+    Check if a Sella optimization has completed successfully by examining the log file.
+
+    Args:
+        root_dir (str): The directory containing the Sella log file.
+    Returns:
+        bool: True if the optimization completed successfully, False otherwise.
+
+    """
+    # check if sella.log exists in root_dir
+    sella_log = os.path.join(root_dir, "sella.log")
+    if not os.path.exists(sella_log):
+        return 0
+    # read sella.log and check for final forces
+    with open(sella_log, "r") as f:
+        lines = f.readlines()
+    forces = []
+    for line in lines:
+        # check if it's a float
+        if line.split()[4].replace('.','',1).replace('-','',1).isdigit():
+            forces.append(float(line.split()[4]))
+    
+    if len(forces) == 0:
+        return 0
+    force_check = forces[-1]
+
+    
+    if force_check < fmax:
+        return 1
+    else:
+        return 0
+
+
+
+def check_sucessful_jobs_sella(
+    root_dir: str,
+    verbose: bool = False,
+    fmax: float = 0.05,
+) -> None:
+    """
+    Utility function to check and report the status of jobs in a given root directory.
+    Args:
+        root_dir (str): Path to the root directory containing job subfolders.
+        check_many (bool, optional): Whether to check multiple output files per job. Defaults to False.
+        flux_tf (bool, optional): Whether to check for flux output files. Defaults to False.
+        verbose (bool, optional): Whether to print detailed status messages. Defaults to False.
+        check_traj (bool, optional): Whether to check for trajectory files. Defaults to False.
+    Returns:
+        None
+    """
+
+    count_folder = 0
+    count_success = 0
+    count_still_running = 0
+    count_geom_beyond_1_then_fail = 0
+    count_geom_beyond_1 = 0
+    # iterate through every subfolder in root_dir
+
+    for folder in os.listdir(root_dir):
+        folder_to_use = os.path.join(root_dir, folder)
+        if os.path.isdir(folder_to_use):
+            count_folder += 1
+            sella_log_tf = check_sella_complete(
+                    folder_to_use, fmax=fmax
+            )
+            dft_log_tf = check_job_termination(
+                    folder_to_use, check_many=False, flux_tf=False
+            )
+
+            # check if folder has successful flux job
+            if (sella_log_tf == True and dft_log_tf == 1):
+                if verbose:
+                    print(f"Job in {folder_to_use} completed successfully.")
+                count_success += 1
+
+            elif dft_log_tf == 0: 
+                count_still_running += 1
+                if verbose:
+                    print(f"Job in {folder_to_use} is still running or incomplete.")
+            
+            elif dft_log_tf == -1: 
+                
+                if verbose:
+                    print(f"Job in {folder_to_use} did not complete successfully.")
+
+    root_final = root_dir.split("/")[-2]
+    # add tabs depending on length of root_final
+    root_len = len(root_final)
+    tab_count = "\t" * int(4 - int(root_len // 8))
+    print(
+        f"Results in {root_final} (S / R / F): {tab_count} {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}"
+    )
+
