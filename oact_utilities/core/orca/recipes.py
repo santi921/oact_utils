@@ -287,7 +287,7 @@ def pure_ase_relaxation(
         atoms, 
         trajectory=traj_file, 
         logfile=os.path.join(outputdir, "sella.log"), 
-        #append_trajectory=False,
+        append_trajectory=True,
         internal=True,
         #fmax=0.05,
         order=0, 
