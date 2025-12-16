@@ -124,6 +124,7 @@ def write_sella_python_ase_job(
     lot="omol",
     functional="wB97M-V",
     opt=False,
+    dry_run: bool = False,
     overwrite=False,
     job_handler="flux",
     source_bashrc: str = "source ~/.bashrc",
@@ -224,17 +225,41 @@ def write_sella_python_ase_job(
                         print(f"Skipping {folder_mol} as it has a completed job.")
                         continue
                 
-                # check if traj_file exists in folder_mol, also if so, traj_file = folder_mol/opt.traj
-                traj_file = os.path.join(folder_mol, "opt.traj")
-                if not os.path.exists(traj_file):
-                    traj_file = None
+                if not dry_run:
+                    # check if traj_file exists in folder_mol, also if so, traj_file = folder_mol/opt.traj
+                    traj_file = os.path.join(folder_mol, "opt.traj")
+                    if not os.path.exists(traj_file):
+                        traj_file = None
 
-                restart= False
-                # check if there is no *inp file already there 
-                if ".inp" not in os.listdir(folder_mol) and overwrite==False:
-                    write_orca_inputs(
-                        atoms=dict_unified[mol_name]["geometry"],
-                        output_directory=folder_mol,
+                    restart= False
+                    # check if there is no *inp file already there 
+                    if "orca.inp" not in os.listdir(folder_mol) and overwrite==False:
+                        write_orca_inputs(
+                            atoms=dict_unified[mol_name]["geometry"],
+                            output_directory=folder_mol,
+                            charge=dict_unified[mol_name]["charge"],
+                            mult=dict_unified[mol_name]["multiplicity"],
+                            nbo=False,
+                            cores=cores,
+                            functional=functional,
+                            scf_MaxIter=max_scf_iterations,
+                            simple_input=lot,
+                            orca_path=orca_exe,
+                            actinide_basis=actinide_basis,
+                            actinide_ecp=actinide_ecp,
+                            non_actinide_basis=non_actinide_basis,
+                            opt=opt,
+                            error_handle=True,
+                            error_code=error_code,
+                            tight_two_e_int=tight_two_e_int
+                        )
+                        restart= True
+                    else:
+                        print(f"Input file already exists in {folder_mol}, skipping input writing.")
+                    
+                    
+                    write_inputs_ase(
+                        output_directory=os.path.join(folder_mol),
                         charge=dict_unified[mol_name]["charge"],
                         mult=dict_unified[mol_name]["multiplicity"],
                         nbo=False,
@@ -247,50 +272,27 @@ def write_sella_python_ase_job(
                         actinide_ecp=actinide_ecp,
                         non_actinide_basis=non_actinide_basis,
                         opt=opt,
+                        restart=restart,
                         error_handle=True,
                         error_code=error_code,
-                        tight_two_e_int=tight_two_e_int
+                        tight_two_e_int=tight_two_e_int,
+                        traj_file=traj_file
                     )
-                    restart= True
-                else:
-                    print(f"Input file already exists in {folder_mol}, skipping input writing.")
-                
-                
-                write_inputs_ase(
-                    output_directory=os.path.join(folder_mol),
-                    charge=dict_unified[mol_name]["charge"],
-                    mult=dict_unified[mol_name]["multiplicity"],
-                    nbo=False,
-                    cores=cores,
-                    functional=functional,
-                    scf_MaxIter=max_scf_iterations,
-                    simple_input=lot,
-                    orca_path=orca_exe,
-                    actinide_basis=actinide_basis,
-                    actinide_ecp=actinide_ecp,
-                    non_actinide_basis=non_actinide_basis,
-                    opt=opt,
-                    restart=restart,
-                    error_handle=True,
-                    error_code=error_code,
-                    tight_two_e_int=tight_two_e_int,
-                    traj_file=traj_file
-                )
-                count += 1
-                count_subfolders += 1
+                    count += 1
+                    count_subfolders += 1
 
             if safety:
                 cores += 2
 
-            
-            write_flux_no_template_sella_ase(
-                root_dir=folder_to_use,
-                two_step=two_step,
-                n_cores=cores,
-                n_hours=n_hours,
-                queue=queue,
-                allocation=allocation,
-            )
+            if not dry_run:
+                write_flux_no_template_sella_ase(
+                    root_dir=folder_to_use,
+                    two_step=two_step,
+                    n_cores=cores,
+                    n_hours=n_hours,
+                    queue=queue,
+                    allocation=allocation,
+                )
 
 
     print(f"Total number of jobs prepared: {count}")
