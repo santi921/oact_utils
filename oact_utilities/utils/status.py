@@ -402,7 +402,7 @@ def check_sucessful_jobs_sella(
             )
 
             # check if folder has successful flux job
-            if (sella_log_tf == True and dft_log_tf == 1):
+            if (sella_log_tf == True):
                 if verbose:
                     print(f"Job in {folder_to_use} completed successfully.")
                 count_success += 1
@@ -413,7 +413,7 @@ def check_sucessful_jobs_sella(
                     print(f"Job in {folder_to_use} is still running or incomplete.")
             
             elif dft_log_tf == -1: 
-                
+
                 if verbose:
                     print(f"Job in {folder_to_use} did not complete successfully.")
 
