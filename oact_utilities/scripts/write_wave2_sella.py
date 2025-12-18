@@ -74,7 +74,10 @@ def write_inputs_ase(
         f.write(f"    nbo_tf = {nbo}\n")
         f.write(f"    cores={cores}\n")
         f.write(f"    actinide_basis = '{actinide_basis}'\n")
-        f.write(f"    actinide_ecp = '{actinide_ecp}'\n")
+        if actinide_ecp is None:
+            f.write(f"    actinide_ecp = None\n")
+        else: 
+            f.write(f"    actinide_ecp = '{actinide_ecp}'\n")
         f.write(f"    non_actinide_basis = '{non_actinide_basis}'\n")
         f.write("    time_start = time.time()\n")
         f.write("    res_dict = pure_ase_relaxation(\n")
@@ -320,6 +323,51 @@ if __name__ == "__main__":
     non_actinide_basis = "def2-TZVPD"
     
 
+
+    write_sella_python_ase_job(
+        actinide_basis=actinide_basis,
+        actinide_ecp=actinide_ecp,
+        non_actinide_basis=non_actinide_basis,
+        cores=cores,
+        orca_exe=orca_exe,
+        safety=False,
+        max_scf_iterations=600,
+        n_hours=n_hours,
+        allocation=allocation,
+        queue=queue,
+        root_data_dir=root_data_dir,
+        calc_root_dir=calc_root_dir,
+        skip_done=True,
+        lot="omol",
+        functional="wB97M-V",
+        job_handler=job_handler,
+        opt=False,
+        source_bashrc=source_bashrc,
+        conda_env=conda_env,
+        LD_LIBRARY_PATH=LD_LIBRARY_PATH,
+        tight_two_e_int=tight_two_e_int,
+    )
+
+
+
+    job_handler = "flux"
+    queue = "pbatch"
+    allocation = "dnn-sim"
+    source_bashrc = "source ~/.bashrc"
+    conda_env = "py10mpi"
+    LD_LIBRARY_PATH = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
+    n_hours = 10
+    cores = 8
+    tight_two_e_int=True
+
+
+    root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
+    calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out_sella/"
+    orca_exe = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
+
+    actinide_basis = "ma-def-TZVP"
+    actinide_ecp = "def-ECP"
+    non_actinide_basis = "def2-TZVPD"
 
     write_sella_python_ase_job(
         actinide_basis=actinide_basis,
