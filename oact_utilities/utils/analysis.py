@@ -90,6 +90,42 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     }
     return dict_return
 
+def get_rmsd_between_traj_frames(traj_file: str) -> dict:
+    #traj_file = root + "opt.traj"
+    traj = TrajectoryReader(traj_file)
+    atoms_init_traj = traj[0]
+    atoms_final_traj = traj[-1]
+    elements_init_traj = [atom.symbol for atom in atoms_init_traj]
+    coords_init_traj = atoms_init_traj.get_positions()
+    elements_final_traj = [atom.symbol for atom in atoms_final_traj]
+    coords_final_traj = atoms_final_traj.get_positions()
+
+    # get rmsd between first and last frame
+    from spyrmsd.rmsd import rmsd
+    atomic_numbers = elements_to_atomic_numbers(elements_final_traj)
+    rmsd_value = rmsd(coords_final_traj, coords_init_traj, atomic_numbers, atomic_numbers)
+    # print energy at each frame
+    
+    energies_frames = []
+    rms_forces_frames = []
+    for i, frame in enumerate(traj):
+        energy = frame.get_potential_energy()
+        energies_frames.append(energy)
+        force = frame.get_calculator().get_forces(frame)
+        # compute rms force from numpy 
+        mean_squared_force = np.mean(force**2)
+        rms_force = float(np.sqrt(mean_squared_force))
+        rms_forces_frames.append(rms_force)
+    
+    ret_dict = {
+        "rmsd_value": rmsd_value, 
+        "elements_final": elements_final_traj,
+        "coords_final": coords_final_traj,
+        "energies_frames": energies_frames,
+        "rms_forces_frames": rms_forces_frames
+    }
+    return ret_dict
+
 
 def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
     """
@@ -575,22 +611,7 @@ def get_full_info_all_jobs_sella(
             engrad_file = os.path.join(folder_to_use, "orca.engrad")
 
             perf_info[name] = {"status": status}
-
-
-
-            try:
-                geom_info = get_rmsd_start_final(folder_to_use)
-                perf_info[name]["rmsd_start_final"] = geom_info["rmsd"]
-                perf_info[name]["energies_opt"] = geom_info["energies_frames"]
-                perf_info[name]["elements_final"] = geom_info["elements_final"]
-                perf_info[name]["coords_final"] = geom_info["coords_final"]
-            except:
-                perf_info[name]["rmsd_start_final"] = None
-                perf_info[name]["energies_opt"] = None
-                perf_info[name]["elements_final"] = None
-                perf_info[name]["coords_final"] = None
-                print(f"Could not extract geometry info for job in {folder_to_use}.")
-
+            print(f"Processing job {name} in {folder_to_use} with status {status}.")
 
             try:
                 rmsd_traj = get_rmsd_between_traj_frames(traj_file)
@@ -606,7 +627,8 @@ def get_full_info_all_jobs_sella(
                 perf_info[name]["coords_final"] = None
                 perf_info[name]["energies_opt"] = None
                 perf_info[name]["rms_forces_frames"] = None
-                print(f"Could not extract RMSD from traj for job in {folder_to_use}.")
+                if verbose:
+                    print(f"Could not extract RMSD from traj for job in {folder_to_use}.")
 
 
             try:
@@ -618,7 +640,8 @@ def get_full_info_all_jobs_sella(
                 perf_info[name]["sella_steps"] = None
                 perf_info[name]["sella_forces"] = None
                 perf_info[name]["sella_energy_frames"] = None
-                print(f"Could not extract Sella log info for job in {folder_to_use}.")
+                if verbose:
+                    print(f"Could not extract Sella log info for job in {folder_to_use}.")
                 
             try:
                 dict_engrad = get_engrad(engrad_file)   
@@ -631,5 +654,6 @@ def get_full_info_all_jobs_sella(
                 perf_info[name]["gradient_final_Eh_per_bohr"] = None
                 perf_info[name]["elements_engrad"] = None
                 perf_info[name]["coords_final_bohr"] = None
-                print(f"Could not extract orca.engrad info for job in {folder_to_use}.")    
+                if verbose:
+                    print(f"Could not extract orca.engrad info for job in {folder_to_use}.")    
     return perf_info
