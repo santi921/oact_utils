@@ -1,7 +1,11 @@
+from sympy import root
 from spyrmsd.rmsd import rmsd
 
 import os
 from typing import Any, List, Dict, Tuple
+from ase.io.trajectory import TrajectoryReader
+import numpy as np
+
 from oact_utilities.utils.an66 import dict_to_numpy
 from oact_utilities.utils.create import (
     read_xyz_single_file,
@@ -12,6 +16,7 @@ from oact_utilities.utils.create import (
 from oact_utilities.utils.status import (
     check_file_termination,
     check_job_termination,
+    check_sella_complete,
     pull_log_file,
 )
 
@@ -341,6 +346,10 @@ def get_full_info_all_jobs(
     return perf_info
 
 
+
+
+
+
 def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> List[Tuple[str, int, float]]:
     """
     Get full performance and geometry info for all jobs in a root directory.
@@ -438,3 +447,189 @@ def get_energy_from_log_file(log_file):
                 energy = float(line.strip().split()[3])
                 energy_arr.append(energy)
     return energy_arr
+
+
+
+def parse_sella_log(sella_log_file, filter: bool = False) -> dict:
+    """
+    Check if a Sella optimization has completed successfully by examining the log file.
+
+    Args:
+        sella_log_file (str): Path to the Sella log file.
+    Returns:
+        bool: True if the optimization completed successfully, False otherwise.
+
+    """
+
+    # check if sella.log exists in root_dir
+    
+    if not os.path.exists(sella_log_file):
+        return False
+    # read sella.log and check for final forces
+    with open(sella_log_file, "r") as f:
+        lines = f.readlines()
+    forces = []
+    steps = []
+    energy = []
+
+    for line in lines:    
+        if "Sella" in line: 
+            steps.append(int(line.split()[1]))
+            forces.append(float(line.split()[4]))
+            energy.append(float(line.split()[3]))
+    
+
+    if len(forces) == 0:
+        return {}
+
+    dict_ret = {
+        "steps": steps,
+        "forces": forces,
+        "energy_frames": energy
+    }
+
+    return dict_ret
+
+
+
+def get_rmsd_between_traj_frames(traj_file: str) -> dict:
+    #traj_file = root + "opt.traj"
+    traj = TrajectoryReader(traj_file)
+    atoms_init_traj = traj[0]
+    atoms_final_traj = traj[-1]
+    elements_init_traj = [atom.symbol for atom in atoms_init_traj]
+    coords_init_traj = atoms_init_traj.get_positions()
+    elements_final_traj = [atom.symbol for atom in atoms_final_traj]
+    coords_final_traj = atoms_final_traj.get_positions()
+
+    # get rmsd between first and last frame
+    from spyrmsd.rmsd import rmsd
+    atomic_numbers = elements_to_atomic_numbers(elements_final_traj)
+    rmsd_value = rmsd(coords_final_traj, coords_init_traj, atomic_numbers, atomic_numbers)
+    # print energy at each frame
+    
+    energies_frames = []
+    rms_forces_frames = []
+    for i, frame in enumerate(traj):
+        energy = frame.get_potential_energy()
+        energies_frames.append(energy)
+        force = frame.get_calculator().get_forces(frame)
+        # compute rms force from numpy 
+        mean_squared_force = np.mean(force**2)
+        rms_force = float(np.sqrt(mean_squared_force))
+        rms_forces_frames.append(rms_force)
+    
+    ret_dict = {
+        "rmsd_value": rmsd_value, 
+        "elements_final": elements_final_traj,
+        "coords_final": coords_final_traj,
+        "energies_frames": energies_frames,
+        "rms_forces_frames": rms_forces_frames
+    }
+    return ret_dict
+
+
+
+def get_full_info_all_jobs_sella(
+    root_dir: str, verbose: bool = False, fmax: float = 0.05
+) -> List[Tuple[str, int, float]]:
+    
+
+    """
+    Get full performance and geometry info for all jobs in a root directory.
+    Args:
+        root_dir (str): Root directory containing job subdirectories.
+        flux_tf (bool): Whether to look for flux- log files.
+    Returns:
+        Dict[str, Any]: Dictionary with performance and geometry info for each job. 
+    """
+
+    perf_info = {}
+    # iterate through every subfolder in root_dir
+    for folder in os.listdir(root_dir):
+
+        name = folder.split("_")[0]
+
+        folder_to_use = os.path.join(root_dir, folder)
+
+        if os.path.isdir(folder_to_use):
+
+            sella_log_tf = check_sella_complete(
+                    folder_to_use, fmax=fmax
+            )
+            dft_log_tf = check_job_termination(
+                    folder_to_use, check_many=False, flux_tf=False
+            )
+
+            if verbose:
+                print(f"Status for job in {folder_to_use}: DFT: {dft_log_tf}, Sella: {sella_log_tf}")
+
+            status = 1 if (sella_log_tf) else 0
+            if dft_log_tf == -1:
+                status = -1
+
+            # check if the files "opt.traj", "sella.log", "orca.engrad" exist
+            files = os.listdir(folder_to_use)
+            traj_file = os.path.join(folder_to_use, "opt.traj")
+            sella_log = os.path.join(folder_to_use, "sella.log")
+            engrad_file = os.path.join(folder_to_use, "orca.engrad")
+
+            perf_info[name] = {"status": status}
+
+
+
+            try:
+                geom_info = get_rmsd_start_final(folder_to_use)
+                perf_info[name]["rmsd_start_final"] = geom_info["rmsd"]
+                perf_info[name]["energies_opt"] = geom_info["energies_frames"]
+                perf_info[name]["elements_final"] = geom_info["elements_final"]
+                perf_info[name]["coords_final"] = geom_info["coords_final"]
+            except:
+                perf_info[name]["rmsd_start_final"] = None
+                perf_info[name]["energies_opt"] = None
+                perf_info[name]["elements_final"] = None
+                perf_info[name]["coords_final"] = None
+                print(f"Could not extract geometry info for job in {folder_to_use}.")
+
+
+            try:
+                rmsd_traj = get_rmsd_between_traj_frames(traj_file)
+                perf_info[name] = {"status": status}
+                perf_info[name]["rmsd_start_final"] = rmsd_traj["rmsd_value"]
+                perf_info[name]["elements_final"] = rmsd_traj["elements_final"]
+                perf_info[name]["coords_final"] = rmsd_traj["coords_final"]
+                perf_info[name]["energies_opt"] = rmsd_traj["energies_frames"]
+                perf_info[name]["rms_forces_frames"] = rmsd_traj["rms_forces_frames"]
+            except:
+                perf_info[name]["rmsd_start_final"] = None
+                perf_info[name]["elements_final"] = None
+                perf_info[name]["coords_final"] = None
+                perf_info[name]["energies_opt"] = None
+                perf_info[name]["rms_forces_frames"] = None
+                print(f"Could not extract RMSD from traj for job in {folder_to_use}.")
+
+
+            try:
+                dict_sella = parse_sella_log(sella_log)
+                perf_info[name]["sella_steps"] = dict_sella.get("steps", [])
+                perf_info[name]["sella_forces"] = dict_sella.get("forces", [])
+                perf_info[name]["sella_energy_frames"] = dict_sella.get("energy_frames", [])
+            except:
+                perf_info[name]["sella_steps"] = None
+                perf_info[name]["sella_forces"] = None
+                perf_info[name]["sella_energy_frames"] = None
+                print(f"Could not extract Sella log info for job in {folder_to_use}.")
+                
+            try:
+                dict_engrad = get_engrad(engrad_file)   
+                perf_info[name]["energy_final_Eh"] = dict_engrad.get("total_energy_Eh", None)
+                perf_info[name]["gradient_final_Eh_per_bohr"] = dict_engrad.get("gradient_Eh_per_bohr", None)
+                perf_info[name]["elements_engrad"] = dict_engrad.get("elements", None)
+                perf_info[name]["coords_final_bohr"] = dict_engrad.get("coords_bohr", None)
+            except:
+                perf_info[name]["energy_final_Eh"] = None
+                perf_info[name]["gradient_final_Eh_per_bohr"] = None
+                perf_info[name]["elements_engrad"] = None
+                perf_info[name]["coords_final_bohr"] = None
+                print(f"Could not extract orca.engrad info for job in {folder_to_use}.")    
+    return perf_info
