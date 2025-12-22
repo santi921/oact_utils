@@ -525,7 +525,7 @@ def write_orca_inputs(
         non_actinide_basis=non_actinide_basis,
         error_handle=error_handle,
         error_code=error_code,
-        tight_two_e_int=tight_two_e_int
+        tight_two_e_int=tight_two_e_int,
     )
 
     # print(orcablocks)

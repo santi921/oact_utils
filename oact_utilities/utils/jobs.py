@@ -10,7 +10,7 @@ def launch_flux_sella_jobs(
     skip_failed: bool = False,
     dry: bool = False,
     verbose: bool = False,
-    fmax=0.05
+    fmax=0.05,
 ) -> None:
     """
     Utility to launch flux jobs in all subdirectories of a given root directory.
@@ -56,7 +56,6 @@ def launch_flux_sella_jobs(
 
                 if not dry:
                     os.system(command)
-
 
 
 def launch_flux_jobs(
@@ -192,5 +191,3 @@ def launch_slurm_jobs(
 
                     if not dry:
                         os.system(command_loose)
-
-

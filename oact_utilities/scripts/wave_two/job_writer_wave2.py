@@ -152,7 +152,7 @@ def write_flux_orca_wave_two(
                             opt=opt,
                             error_handle=True,
                             error_code=error_code,
-                            tight_two_e_int=tight_two_e_int
+                            tight_two_e_int=tight_two_e_int,
                         )
                         count += 1
                         count_subfolders += 1
@@ -187,7 +187,7 @@ def write_flux_orca_wave_two(
                         opt=opt,
                         error_handle=True,
                         error_code=error_code,
-                        tight_two_e_int=tight_two_e_int
+                        tight_two_e_int=tight_two_e_int,
                     )
                     count += 1
                     count_subfolders += 1
@@ -255,7 +255,7 @@ if __name__ == "__main__":
     n_hours = 10
     replicates = 1
     cores = 20
-    tight_two_e_int=True
+    tight_two_e_int = True
     ##############################################################################
 
     write_flux_orca_wave_two(

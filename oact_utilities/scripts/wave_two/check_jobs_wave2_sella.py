@@ -1,17 +1,10 @@
 import os
-from oact_utilities.utils.jobs import launch_flux_jobs, launch_slurm_jobs
+from oact_utilities.utils.status import check_sucessful_jobs_sella
 
 
 if __name__ == "__main__":
 
-    ##############################################################################
-    # Ritwik - Things to modify for your system
-    dry = True
-    root = "/Users/santiagovargas/dev/oact_utils/data/baselines/jobs/"
-    ##############################################################################
-
-    skip_done = True
-
+    check_many = False
     hard_chalc = "Hard_Donors/Chalcogenides/"
     hard_nitrates = "Hard_Donors/Nitrates/"
     hard_crown_cryptands = "Hard_Donors/Crown-Cryptands/"
@@ -36,8 +29,14 @@ if __name__ == "__main__":
         radical_semiquinones,
     ]
 
+    ##############################################################################
+    # Ritwik - Things to modify for your system
+    root = "/Users/santiagovargas/dev/oact_utils/data/baselines/jobs/"
+    flux_tf = True
+    ##############################################################################
+
     for folder in list_of_folders:
         root_directory = os.path.join(root, folder)
-        #launch_flux_jobs(root_dir=root_directory, dry=dry, skip_done=skip_done)
-        # Ritwik - use this to launch SLURM jobs
-        launch_slurm_jobs(root_dir=root_directory, dry=dry, skip_done=skip_done)
+        check_sucessful_jobs_sella(
+            root_dir=root_directory,
+        )
