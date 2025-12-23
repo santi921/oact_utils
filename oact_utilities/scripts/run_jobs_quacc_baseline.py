@@ -25,9 +25,7 @@ def base_config(n_workers: int = 128) -> Config:
         Config: A Parsl configuration object.
     """
     local_threads = Config(
-        executors=[
-            ThreadPoolExecutor(max_threads=n_workers, label="local_threads")
-        ]
+        executors=[ThreadPoolExecutor(max_threads=n_workers, label="local_threads")]
     )
 
     """
@@ -49,6 +47,7 @@ def base_config(n_workers: int = 128) -> Config:
     )"""
     return local_threads
 
+
 @python_app
 def jobs_wrapper_an66(
     actinide_basis: str,
@@ -63,13 +62,13 @@ def jobs_wrapper_an66(
     job: str,
     mult: int,
     atoms,
-    charge: int = 0, 
-    ):
+    charge: int = 0,
+):
 
-    #ind = random.randint(0, len(job_list) - 1)
-    #mult = spin_list[ind]
-    #job = job_list[ind]
-    #atoms = dict_geoms_ase[job]
+    # ind = random.randint(0, len(job_list) - 1)
+    # mult = spin_list[ind]
+    # job = job_list[ind]
+    # atoms = dict_geoms_ase[job]
 
     nbo_tf = False
     root_directory_job = os.path.join(root_directory, job)
@@ -144,8 +143,7 @@ def parsl_an66(
     ref_multiplicity_file: str = "/Users/santiagovargas/dev/oact_utils/data/data/ref_multiplicity.txt",
     root_directory: str = "./test_quacc_baseline/",
 ):
-    
-    
+
     ##################### Gather Configs for Parsl
     parsl_config = base_config(n_workers=concurrency)
     parsl.clear()
@@ -155,8 +153,8 @@ def parsl_an66(
     ####################
 
     os.environ["OMP_NUM_THREADS"] = "{}".format(nprocs)
-    #signal.signal(signal.SIGINT, handle_signal)
-    #signal.signal(signal.SIGTERM, handle_signal)
+    # signal.signal(signal.SIGINT, handle_signal)
+    # signal.signal(signal.SIGTERM, handle_signal)
 
     df_multiplicity_ase = process_multiplicity_file(ref_multiplicity_file)
     dict_geoms_ase = process_geometry_file(ref_geom_file, ase_format_tf=True)
@@ -180,22 +178,24 @@ def parsl_an66(
         charge = 0
         mult = spin_list[ind]
 
-        futures.append([
-            jobs_wrapper_an66(
-                actinide_basis=actinide_basis,
-                non_actinide_basis=non_actinide_basis,
-                actinide_ecp=actinide_ecp,
-                functional=functional,
-                simple_input=simple_input,
-                scf_MaxIter=scf_MaxIter,
-                nprocs=nprocs,
-                orca_cmd=orca_cmd,
-                root_directory=root_directory,
-                job=job,
-                mult=mult,
-                charge=0, 
-                atoms=atoms,
-            )]
+        futures.append(
+            [
+                jobs_wrapper_an66(
+                    actinide_basis=actinide_basis,
+                    non_actinide_basis=non_actinide_basis,
+                    actinide_ecp=actinide_ecp,
+                    functional=functional,
+                    simple_input=simple_input,
+                    scf_MaxIter=scf_MaxIter,
+                    nprocs=nprocs,
+                    orca_cmd=orca_cmd,
+                    root_directory=root_directory,
+                    job=job,
+                    mult=mult,
+                    charge=0,
+                    atoms=atoms,
+                )
+            ]
         )
 
     try:
@@ -221,17 +221,13 @@ def parsl_an66(
             pass
 
 
-
-
-
 if __name__ == "__main__":
     parsl_an66(
         scf_MaxIter=600,
         nprocs=4,
-        concurrency=4, 
+        concurrency=4,
         orca_cmd="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
         root_directory="/Users/santiagovargas/dev/oact_utils/data/an66_quacc",
         ref_geom_file="/Users/santiagovargas/dev/oact_utils/data/data/ref_geoms.txt",
         ref_multiplicity_file="/Users/santiagovargas/dev/oact_utils/data/data/ref_multiplicity.txt",
     )
-

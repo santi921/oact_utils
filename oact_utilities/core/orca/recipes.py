@@ -173,7 +173,7 @@ def ase_relaxation(
         actinide_ecp=actinide_ecp,
         non_actinide_basis=non_actinide_basis,
     )
-    
+
     with change_settings(
         {
             "ORCA_CMD": orca_cmd,

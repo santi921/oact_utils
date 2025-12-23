@@ -30,9 +30,7 @@ def base_config(n_workers: int = 128) -> Config:
         Config: A Parsl configuration object.
     """
     local_threads = Config(
-        executors=[
-            ThreadPoolExecutor(max_threads=n_workers, label="local_threads")
-        ]
+        executors=[ThreadPoolExecutor(max_threads=n_workers, label="local_threads")]
     )
 
     return local_threads
@@ -52,9 +50,8 @@ def jobs_wrapper_an66(
     job: str,
     mult: int,
     atoms,
-    charge: int = 0, 
-    ):
-
+    charge: int = 0,
+):
 
     nbo_tf = False
     root_directory_job = os.path.join(root_directory, job)
@@ -80,7 +77,6 @@ def jobs_wrapper_an66(
                     recent_modification = True
                     print(f"Job for {job} is currently running. Skipping.")
                     break
-
 
         time_start = time.time()
 
@@ -130,31 +126,29 @@ def parsl_wave2(
     dry_run: bool = False,
     overwrite: bool = False,
     concurrency: int = 2,
-    orca_cmd: str = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
+    orca_cmd: str = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
 ):
-    
-    
+
     ##################### Gather Configs for Parsl
-    
+
     parsl_config = base_config(n_workers=concurrency)
     parsl.clear()
     parsl.load(parsl_config)
     print("Parsl config loaded. Submitting jobs...")
     print(parsl_config)
-    
+
     ####################
 
     os.environ["OMP_NUM_THREADS"] = "{}".format(nprocs)
-    #signal.signal(signal.SIGINT, handle_signal)
-    #signal.signal(signal.SIGTERM, handle_signal)
-
+    # signal.signal(signal.SIGINT, handle_signal)
+    # signal.signal(signal.SIGTERM, handle_signal)
 
     hard_donors_dir = "Hard_Donors/"
     organic_dir = "Organic/"
     radical_dir = "Radical/"
     soft_donors_dir = "Soft_Donors/"
     count = 0
-    
+
     list_jobs = [hard_donors_dir, organic_dir, radical_dir, soft_donors_dir]
     dict_full_set = {}
 
@@ -200,7 +194,7 @@ def parsl_wave2(
                 folder_mol = os.path.join(folder_to_use, mol_name)
                 # add this to unified dict
                 dict_unified[mol_name]["dir_name"] = folder_mol
-                
+
                 if not os.path.exists(folder_mol):
                     os.mkdir(folder_mol)
                 error_code = check_job_termination(folder_mol)
@@ -223,7 +217,6 @@ def parsl_wave2(
     print(f"Found {count_subfolders} jobs to run in folder {folder_name}.")
     print(f"Total jobs to run: {len(dict_full_set)}")
 
-
     futures = []
 
     for job, vals in dict_full_set.items():
@@ -233,24 +226,26 @@ def parsl_wave2(
         root_directory_job = vals["dir_name"]
 
         count_subfolders += 1
-        futures.append([
-            jobs_wrapper_an66(
-                actinide_basis=actinide_basis,
-                non_actinide_basis=non_actinide_basis,
-                actinide_ecp=actinide_ecp,
-                functional=functional,
-                simple_input=simple_input,
-                scf_MaxIter=scf_MaxIter,
-                nprocs=nprocs,
-                orca_cmd=orca_cmd,
-                root_directory=root_directory_job,
-                job=job,
-                mult=mult,
-                charge=charge, 
-                atoms=atoms,
-            )]
+        futures.append(
+            [
+                jobs_wrapper_an66(
+                    actinide_basis=actinide_basis,
+                    non_actinide_basis=non_actinide_basis,
+                    actinide_ecp=actinide_ecp,
+                    functional=functional,
+                    simple_input=simple_input,
+                    scf_MaxIter=scf_MaxIter,
+                    nprocs=nprocs,
+                    orca_cmd=orca_cmd,
+                    root_directory=root_directory_job,
+                    job=job,
+                    mult=mult,
+                    charge=charge,
+                    atoms=atoms,
+                )
+            ]
         )
-    
+
     try:
         # block until all done
         for f in futures:
@@ -273,14 +268,13 @@ def parsl_wave2(
         except Exception:
             pass
 
--
+
 if __name__ == "__main__":
     parsl_wave2(
         scf_MaxIter=600,
         nprocs=4,
-        concurrency=4, 
+        concurrency=4,
         orca_cmd="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
         root_data_dir="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/",
         calc_root_dir="/Users/santiagovargas/dev/oact_utils/data/baselines/jobs/wave_2_quacc/",
     )
-

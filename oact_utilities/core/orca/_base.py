@@ -152,7 +152,7 @@ def run_and_summarize_opt(
         **calc_kwargs,
     )
     print("Calculator prepared.")
-    
+
     # if "trajectory" in opt_params["optimizer_kwargs"]:
     #    trajectory = opt_params["optimizer_kwargs"]["trajectory"]
     #    del opt_params["optimizer_kwargs"]["trajectory"]
