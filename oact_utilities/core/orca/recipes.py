@@ -173,7 +173,7 @@ def ase_relaxation(
         actinide_ecp=actinide_ecp,
         non_actinide_basis=non_actinide_basis,
     )
-
+    
     with change_settings(
         {
             "ORCA_CMD": orca_cmd,
@@ -198,6 +198,7 @@ def ase_relaxation(
 
 
 from ase.calculators.orca import ORCA, OrcaProfile
+
 
 def pure_ase_relaxation(
     atoms,
@@ -267,8 +268,8 @@ def pure_ase_relaxation(
         non_actinide_basis=non_actinide_basis,
     )
 
-    input_swaps=orcasimpleinput
-    block_swaps=orcablocks
+    input_swaps = orcasimpleinput
+    block_swaps = orcablocks
     orcasimpleinput = input_swaps
     orcablocks = "\n".join(block_swaps)
 
@@ -284,18 +285,14 @@ def pure_ase_relaxation(
     atoms.calc = orca_calculator
 
     opt = Sella(
-        atoms, 
-        trajectory=traj_file, 
-        logfile=os.path.join(outputdir, "sella.log"), 
+        atoms,
+        trajectory=traj_file,
+        logfile=os.path.join(outputdir, "sella.log"),
         append_trajectory=True,
         internal=True,
-        #fmax=0.05,
-        order=0, 
-        #**(opt_params or {})
+        # fmax=0.05,
+        order=0,
+        # **(opt_params or {})
     )
 
-    opt.run(fmax=0.05 )
-    
-
-
-
+    opt.run(fmax=0.05)

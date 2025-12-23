@@ -1,13 +1,18 @@
-import pickle as pkl
-from oact_utilities.core.orca.recipes import single_point_calculation
-from oact_utilities.utils.create import *
+import os
 import time
-import random
 import parsl
+import pickle as pkl
 
 from parsl.executors.threads import ThreadPoolExecutor
 from parsl.config import Config
 from parsl import python_app
+
+from oact_utilities.core.orca.recipes import single_point_calculation
+from oact_utilities.utils.baselines import (
+    process_multiplicity_file,
+    process_geometry_file,
+)
+from oact_utilities.utils.status import check_job_termination
 
 should_stop = False
 
@@ -30,24 +35,8 @@ def base_config(n_workers: int = 128) -> Config:
         ]
     )
 
-    """
-    local_threads = Config(
-        executors=[
-            HighThroughputExecutor(
-                label="htex_Local",
-                worker_debug=True,
-                cpu_affinity='alternating',
-                provider=LocalProvider(
-                    init_blocks=1,
-                    max_blocks=1,
-                ),
-                cores_per_worker=4, 
-                max_workers_per_node=n_workers,
-            )
-            ],
-            strategy='none',
-    )"""
     return local_threads
+
 
 @python_app
 def jobs_wrapper_an66(
@@ -66,10 +55,6 @@ def jobs_wrapper_an66(
     charge: int = 0, 
     ):
 
-    #ind = random.randint(0, len(job_list) - 1)
-    #mult = spin_list[ind]
-    #job = job_list[ind]
-    #atoms = dict_geoms_ase[job]
 
     nbo_tf = False
     root_directory_job = os.path.join(root_directory, job)
@@ -95,6 +80,7 @@ def jobs_wrapper_an66(
                     recent_modification = True
                     print(f"Job for {job} is currently running. Skipping.")
                     break
+
 
         time_start = time.time()
 
@@ -130,7 +116,9 @@ def jobs_wrapper_an66(
     return
 
 
-def parsl_an66(
+def parsl_wave2(
+    root_data_dir: str,
+    calc_root_dir: str,
     actinide_basis: str = "ma-def-TZVP",
     non_actinide_basis: str = "def2-TZVPD",
     actinide_ecp: str = "def-ECP",
@@ -138,48 +126,113 @@ def parsl_an66(
     simple_input: str = "omol",
     scf_MaxIter: int = 100,
     nprocs: int = 4,
+    skip_done: bool = True,
+    dry_run: bool = False,
+    overwrite: bool = False,
     concurrency: int = 2,
-    orca_cmd: str = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
-    ref_geom_file: str = "/Users/santiagovargas/dev/oact_utils/data/data/ref_geoms.txt",
-    ref_multiplicity_file: str = "/Users/santiagovargas/dev/oact_utils/data/data/ref_multiplicity.txt",
-    root_directory: str = "./test_quacc_baseline/",
+    orca_cmd: str = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
 ):
     
     
     ##################### Gather Configs for Parsl
+    
     parsl_config = base_config(n_workers=concurrency)
     parsl.clear()
     parsl.load(parsl_config)
     print("Parsl config loaded. Submitting jobs...")
     print(parsl_config)
+    
     ####################
 
     os.environ["OMP_NUM_THREADS"] = "{}".format(nprocs)
     #signal.signal(signal.SIGINT, handle_signal)
     #signal.signal(signal.SIGTERM, handle_signal)
 
-    df_multiplicity_ase = process_multiplicity_file(ref_multiplicity_file)
-    dict_geoms_ase = process_geometry_file(ref_geom_file, ase_format_tf=True)
 
-    job_list = df_multiplicity_ase["molecule"].tolist()
-    spin_list = df_multiplicity_ase["multiplicity"].tolist()
+    hard_donors_dir = "Hard_Donors/"
+    organic_dir = "Organic/"
+    radical_dir = "Radical/"
+    soft_donors_dir = "Soft_Donors/"
+    count = 0
+    
+    list_jobs = [hard_donors_dir, organic_dir, radical_dir, soft_donors_dir]
+    dict_full_set = {}
 
-    n_draws = len(job_list)
+    for base_dir in list_jobs:
+        # if base_dir does not exist in calc_root_dir, create it
+        if not os.path.exists(os.path.join(calc_root_dir, base_dir)):
+            os.makedirs(os.path.join(calc_root_dir, base_dir))
 
-    # create folder if it does not exist
-    if not os.path.exists(root_directory):
-        os.makedirs(root_directory)
+        subfolders = [
+            f.path for f in os.scandir(root_data_dir + base_dir) if f.is_dir()
+        ]
+
+        for folder_to_use in subfolders:
+            count_subfolders = 0
+            print(f"Processing folder: {folder_to_use}")
+            folder_name = folder_to_use.split("/")[-1]
+            folder_to_use = os.path.join(calc_root_dir, base_dir, folder_name)
+
+            if not os.path.exists(folder_to_use):
+                os.mkdir(
+                    os.path.join(calc_root_dir, base_dir, folder_to_use.split("/")[-1])
+                )
+
+            # open the data_geom.txt file in the original folder, also open data_charge_muilt.txt
+            orig_folder = os.path.join(root_data_dir, base_dir, folder_name)
+
+            geom_file = os.path.join(orig_folder, "data_geom.txt")
+            mult_file = os.path.join(orig_folder, "data_charge_mult.txt")
+            ase_format_tf = True
+            df_multiplicity = process_multiplicity_file(mult_file)
+            dict_geoms = process_geometry_file(geom_file, ase_format_tf=ase_format_tf)
+            # zip dict_geoms and df_multiplicity
+            dict_unified = {
+                k: {
+                    "geometry": dict_geoms[k],
+                    "multiplicity": df_multiplicity[k]["multiplicity"],
+                    "charge": df_multiplicity[k]["charge"],
+                }
+                for k in dict_geoms.keys()
+                if k in df_multiplicity.keys()
+            }
+            for mol_name, vals in dict_geoms.items():
+                folder_mol = os.path.join(folder_to_use, mol_name)
+                # add this to unified dict
+                dict_unified[mol_name]["dir_name"] = folder_mol
+                
+                if not os.path.exists(folder_mol):
+                    os.mkdir(folder_mol)
+                error_code = check_job_termination(folder_mol)
+
+                if skip_done:
+                    # check if folder has successful flux job
+                    if error_code == 1:
+                        print(f"Skipping {folder_mol} as it has a completed job.")
+                        continue
+                if not dry_run:
+                    # check if traj_file exists in folder_mol, also if so, traj_file = folder_mol/opt.traj
+                    traj_file = os.path.join(folder_mol, "opt.traj")
+                    if not os.path.exists(traj_file):
+                        traj_file = None
+                    if "orca.inp" not in os.listdir(folder_mol) and overwrite == False:
+                        # add to dict_full_set which will launch jobs
+                        dict_full_set[mol_name] = dict_unified[mol_name]
+                        count_subfolders += 1
+
+    print(f"Found {count_subfolders} jobs to run in folder {folder_name}.")
+    print(f"Total jobs to run: {len(dict_full_set)}")
+
 
     futures = []
-    for draw in range(n_draws):
-        # randomly select a job
-        ind = random.randint(0, len(job_list) - 1)
-        job = job_list[ind]
-        atoms = dict_geoms_ase[job]
-        nbo_tf = False
-        charge = 0
-        mult = spin_list[ind]
 
+    for job, vals in dict_full_set.items():
+        atoms = vals["geometry"]
+        mult = vals["multiplicity"]
+        charge = vals["charge"]
+        root_directory_job = vals["dir_name"]
+
+        count_subfolders += 1
         futures.append([
             jobs_wrapper_an66(
                 actinide_basis=actinide_basis,
@@ -190,14 +243,14 @@ def parsl_an66(
                 scf_MaxIter=scf_MaxIter,
                 nprocs=nprocs,
                 orca_cmd=orca_cmd,
-                root_directory=root_directory,
+                root_directory=root_directory_job,
                 job=job,
                 mult=mult,
-                charge=0, 
+                charge=charge, 
                 atoms=atoms,
             )]
         )
-
+    
     try:
         # block until all done
         for f in futures:
@@ -220,18 +273,14 @@ def parsl_an66(
         except Exception:
             pass
 
-
-
-
-
+-
 if __name__ == "__main__":
-    parsl_an66(
+    parsl_wave2(
         scf_MaxIter=600,
         nprocs=4,
         concurrency=4, 
         orca_cmd="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
-        root_directory="/Users/santiagovargas/dev/oact_utils/data/an66_quacc",
-        ref_geom_file="/Users/santiagovargas/dev/oact_utils/data/data/ref_geoms.txt",
-        ref_multiplicity_file="/Users/santiagovargas/dev/oact_utils/data/data/ref_multiplicity.txt",
+        root_data_dir="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/",
+        calc_root_dir="/Users/santiagovargas/dev/oact_utils/data/baselines/jobs/wave_2_quacc/",
     )
 

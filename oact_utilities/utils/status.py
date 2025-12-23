@@ -14,6 +14,7 @@ def check_file_termination(file_path: str) -> int:
             return -1
     return 0
 
+
 def done_geo_opt_ase(opt_log_file, fmax_cutoff=0.01):
     """
     Check if geometry optimization is done based on final forces using ASE.
@@ -30,7 +31,7 @@ def done_geo_opt_ase(opt_log_file, fmax_cutoff=0.01):
     forces = []
     for line in line:
         # check if it's a float
-        if line.split()[-1].replace('.','',1).isdigit():
+        if line.split()[-1].replace(".", "", 1).isdigit():
             forces.append(float(line.split()[3]))
     if len(forces) == 0:
         return False
@@ -39,7 +40,7 @@ def done_geo_opt_ase(opt_log_file, fmax_cutoff=0.01):
         return True
     else:
         return False
-    
+
 
 def check_job_termination(
     dir: str, check_many: bool = False, flux_tf: bool = False
@@ -264,6 +265,7 @@ def check_sucessful_jobs(
             f"Geometry optimization >1 step (running / fail): {count_geom_beyond_1} / {count_geom_beyond_1_then_fail}"
         )
 
+
 def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:
     """
     Utility function to check the termination status of jobs listed in a dataframe.
@@ -351,19 +353,17 @@ def check_sella_complete(root_dir: str, fmax=0.05) -> bool:
     forces = []
     for line in lines:
         # check if it's a float
-        if line.split()[4].replace('.','',1).replace('-','',1).isdigit():
+        if line.split()[4].replace(".", "", 1).replace("-", "", 1).isdigit():
             forces.append(float(line.split()[4]))
-    
+
     if len(forces) == 0:
         return 0
     force_check = forces[-1]
 
-    
     if force_check < fmax:
         return 1
     else:
         return 0
-
 
 
 def check_sucessful_jobs_sella(
@@ -394,25 +394,23 @@ def check_sucessful_jobs_sella(
         folder_to_use = os.path.join(root_dir, folder)
         if os.path.isdir(folder_to_use):
             count_folder += 1
-            sella_log_tf = check_sella_complete(
-                    folder_to_use, fmax=fmax
-            )
+            sella_log_tf = check_sella_complete(folder_to_use, fmax=fmax)
             dft_log_tf = check_job_termination(
-                    folder_to_use, check_many=False, flux_tf=False
+                folder_to_use, check_many=False, flux_tf=False
             )
 
             # check if folder has successful flux job
-            if (sella_log_tf == True):
+            if sella_log_tf == True:
                 if verbose:
                     print(f"Job in {folder_to_use} completed successfully.")
                 count_success += 1
 
-            elif dft_log_tf == 0: 
+            elif dft_log_tf == 0:
                 count_still_running += 1
                 if verbose:
                     print(f"Job in {folder_to_use} is still running or incomplete.")
-            
-            elif dft_log_tf == -1: 
+
+            elif dft_log_tf == -1:
 
                 if verbose:
                     print(f"Job in {folder_to_use} did not complete successfully.")
@@ -424,4 +422,3 @@ def check_sucessful_jobs_sella(
     print(
         f"Results in {root_final} (S / R / F): {tab_count} {count_success} / {count_still_running} / {count_folder - count_success - count_still_running}"
     )
-

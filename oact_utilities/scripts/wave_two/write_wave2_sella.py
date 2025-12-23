@@ -1,4 +1,3 @@
-
 import os
 import time
 
@@ -10,9 +9,10 @@ from oact_utilities.utils.create import write_flux_no_template_sella_ase
 from oact_utilities.utils.status import check_job_termination
 from oact_utilities.core.orca.calc import write_orca_inputs
 
-import time 
+import time
 
-os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ["JAX_PLATFORMS"] = "cpu"
+
 
 def write_inputs_ase(
     output_directory: str,
@@ -32,7 +32,7 @@ def write_inputs_ase(
     error_handle: bool = False,
     error_code: int = 0,
     tight_two_e_int: bool = False,
-    restart=True
+    restart=True,
 ):
     """
     Write ORCA input files for a given set of parameters.
@@ -66,7 +66,9 @@ def write_inputs_ase(
         f.write("def main():\n")
         f.write("    os.environ['JAX_PLATFORMS'] = 'cpu'\n")
         f.write(f"    inp_test = '{os.path.join(output_directory, 'orca.inp')}'\n")
-        f.write("    atoms_orca = read_geom_from_inp_file(inp_test, ase_format_tf=True)\n")
+        f.write(
+            "    atoms_orca = read_geom_from_inp_file(inp_test, ase_format_tf=True)\n"
+        )
         f.write(f"    charge = {charge}\n")
         f.write(f"    mult = {mult}\n")
         f.write(f"    output_directory = '{output_directory}'\n")
@@ -76,7 +78,7 @@ def write_inputs_ase(
         f.write(f"    actinide_basis = '{actinide_basis}'\n")
         if actinide_ecp is None:
             f.write(f"    actinide_ecp = None\n")
-        else: 
+        else:
             f.write(f"    actinide_ecp = '{actinide_ecp}'\n")
         f.write(f"    non_actinide_basis = '{non_actinide_basis}'\n")
         f.write("    time_start = time.time()\n")
@@ -106,7 +108,7 @@ def write_inputs_ase(
         f.write("    print('Total time (s): ', time_end - time_start)\n\n")
         f.write("if __name__ == '__main__':\n")
         f.write("    main()\n")
-    
+
 
 def write_sella_python_ase_job(
     actinide_basis: str,
@@ -227,16 +229,16 @@ def write_sella_python_ase_job(
                     if error_code == 1:
                         print(f"Skipping {folder_mol} as it has a completed job.")
                         continue
-                
+
                 if not dry_run:
                     # check if traj_file exists in folder_mol, also if so, traj_file = folder_mol/opt.traj
                     traj_file = os.path.join(folder_mol, "opt.traj")
                     if not os.path.exists(traj_file):
                         traj_file = None
 
-                    restart= False
-                    # check if there is no *inp file already there 
-                    if "orca.inp" not in os.listdir(folder_mol) and overwrite==False:
+                    restart = False
+                    # check if there is no *inp file already there
+                    if "orca.inp" not in os.listdir(folder_mol) and overwrite == False:
                         write_orca_inputs(
                             atoms=dict_unified[mol_name]["geometry"],
                             output_directory=folder_mol,
@@ -254,13 +256,14 @@ def write_sella_python_ase_job(
                             opt=opt,
                             error_handle=True,
                             error_code=error_code,
-                            tight_two_e_int=tight_two_e_int
+                            tight_two_e_int=tight_two_e_int,
                         )
-                        restart= True
+                        restart = True
                     else:
-                        print(f"Input file already exists in {folder_mol}, skipping input writing.")
-                    
-                    
+                        print(
+                            f"Input file already exists in {folder_mol}, skipping input writing."
+                        )
+
                     write_inputs_ase(
                         output_directory=os.path.join(folder_mol),
                         charge=dict_unified[mol_name]["charge"],
@@ -279,7 +282,7 @@ def write_sella_python_ase_job(
                         error_handle=True,
                         error_code=error_code,
                         tight_two_e_int=tight_two_e_int,
-                        traj_file=traj_file
+                        traj_file=traj_file,
                     )
                     count += 1
                     count_subfolders += 1
@@ -297,9 +300,7 @@ def write_sella_python_ase_job(
                     allocation=allocation,
                 )
 
-
     print(f"Total number of jobs prepared: {count}")
-
 
 
 if __name__ == "__main__":
@@ -311,8 +312,7 @@ if __name__ == "__main__":
     LD_LIBRARY_PATH = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
     n_hours = 10
     cores = 8
-    tight_two_e_int=True
-
+    tight_two_e_int = True
 
     root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
     calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out_sella/"
@@ -321,8 +321,6 @@ if __name__ == "__main__":
     actinide_basis = "ma-def-TZVP"
     actinide_ecp = "def-ECP"
     non_actinide_basis = "def2-TZVPD"
-    
-
 
     write_sella_python_ase_job(
         actinide_basis=actinide_basis,
@@ -348,8 +346,6 @@ if __name__ == "__main__":
         tight_two_e_int=tight_two_e_int,
     )
 
-
-
     job_handler = "flux"
     queue = "pbatch"
     allocation = "dnn-sim"
@@ -358,8 +354,7 @@ if __name__ == "__main__":
     LD_LIBRARY_PATH = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
     n_hours = 10
     cores = 8
-    tight_two_e_int=True
-
+    tight_two_e_int = True
 
     root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
     calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out_sella/"
