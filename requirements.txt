@@ -3,3 +3,6 @@ pandas
 sella==2.3.5
 periodictable==2.0.2
 quests[gpu]
+parsl==2025.12.22
+annotated-types==0.7.0
+quacc==1.0.6

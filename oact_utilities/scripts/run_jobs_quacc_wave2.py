@@ -14,6 +14,8 @@ from oact_utilities.utils.baselines import (
 )
 from oact_utilities.utils.status import check_job_termination
 
+import argparse
+
 should_stop = False
 
 
@@ -225,25 +227,22 @@ def parsl_wave2(
         charge = vals["charge"]
         root_directory_job = vals["dir_name"]
 
-        count_subfolders += 1
         futures.append(
-            [
-                jobs_wrapper_an66(
-                    actinide_basis=actinide_basis,
-                    non_actinide_basis=non_actinide_basis,
-                    actinide_ecp=actinide_ecp,
-                    functional=functional,
-                    simple_input=simple_input,
-                    scf_MaxIter=scf_MaxIter,
-                    nprocs=nprocs,
-                    orca_cmd=orca_cmd,
-                    root_directory=root_directory_job,
-                    job=job,
-                    mult=mult,
-                    charge=charge,
-                    atoms=atoms,
-                )
-            ]
+            jobs_wrapper_an66(
+                actinide_basis=actinide_basis,
+                non_actinide_basis=non_actinide_basis,
+                actinide_ecp=actinide_ecp,
+                functional=functional,
+                simple_input=simple_input,
+                scf_MaxIter=scf_MaxIter,
+                nprocs=nprocs,
+                orca_cmd=orca_cmd,
+                root_directory=root_directory_job,
+                job=job,
+                mult=mult,
+                charge=charge,
+                atoms=atoms,
+            )
         )
 
     try:
@@ -270,11 +269,24 @@ def parsl_wave2(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root_data_dir", type=str, default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/")
+    parser.add_argument("--calc_root_dir", type=str, default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/")
+    parser.add_argument("--orca_cmd", type=str, default="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca")
+    parser.add_argument("--scf_MaxIter", type=int, default=600)
+    parser.add_argument("--nprocs", type=int, default=4)
+    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args()
+
     parsl_wave2(
-        scf_MaxIter=600,
-        nprocs=4,
-        concurrency=4,
-        orca_cmd="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
-        root_data_dir="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/",
-        calc_root_dir="/Users/santiagovargas/dev/oact_utils/data/baselines/jobs/wave_2_quacc/",
+        scf_MaxIter=args.scf_MaxIter,
+        nprocs=args.nprocs,
+        concurrency=args.concurrency,
+        orca_cmd=args.orca_cmd,
+        root_data_dir=args.root_data_dir,
+        calc_root_dir=args.calc_root_dir,
+        dry_run=args.dry_run,
+        overwrite=args.overwrite,
     )
