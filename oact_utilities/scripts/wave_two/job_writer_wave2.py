@@ -9,6 +9,7 @@ from oact_utilities.core.orca.calc import write_orca_inputs
 from oact_utilities.utils.create import write_flux_no_template, write_slurm_no_template
 from oact_utilities.utils.status import check_job_termination
 
+import argparse
 
 def write_flux_orca_wave_two(
     actinide_basis: str,
@@ -226,37 +227,43 @@ def write_flux_orca_wave_two(
 
 if __name__ == "__main__":
 
-    two_step = None
-    ################################## OMOL BLOCK ##################################
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root_data_dir", type=str, default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/")
+    parser.add_argument("--calc_root_dir", type=str, default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/")
+    parser.add_argument("--orca_exe", type=str, default="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca")
+    parser.add_argument("--job_handler", type=str, default="flux")
+    parser.add_argument("--queue", type=str, default="pbatch")
+    parser.add_argument("--allocation", type=str, default="dnn-sim")
+    parser.add_argument("--source_bashrc", type=str, default="source ~/.bashrc")
+    parser.add_argument("--conda_env", type=str, default="py10mpi")
+    parser.add_argument("--LD_LIBRARY_PATH", type=str, default="/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib")
+    parser.add_argument("--n_hours", type=int, default=10)
+    parser.add_argument("--replicates", type=int, default=1)
+    parser.add_argument("--cores", type=int, default=20)
+    parser.add_argument("--tight_two_e_int", type=bool, default=True)
+    parser.add_argument("--two_step", type=bool, default=None)
+    parser.add_argument("--actinide_basis", type=str, default="ma-def-TZVP")
+    parser.add_argument("--actinide_ecp", type=str, default="def-ECP")
+    parser.add_argument("--non_actinide_basis", type=str, default="def2-TZVPD")
+    args = parser.parse_args()
 
-    # 1) baseline omol
-    actinide_basis = "ma-def-TZVP"
-    actinide_ecp = "def-ECP"
-    non_actinide_basis = "def2-TZVPD"
-
-    calc_root_dir = "/usr/workspace/vargas58/orca_test/an66_benchmarks/wave_2_omol_sp/"
-    root_data_dir = "UPDATE ON TUO"
-    orca_exe = (
-        "/usr/workspace/vargas58/orca_test/orca_6_2_1_linux_x86-64_openmpi411/orca"
-    )
-
-    root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
-    calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/"
-    orca_exe = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
-
-    ##############################################################################
-    # Ritwik - Things to modify for your system
-    job_handler = "flux"
-    queue = "pbatch"
-    allocation = "dnn-sim"
-    source_bashrc = "source ~/.bashrc"
-    conda_env = "py10mpi"
-    LD_LIBRARY_PATH = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
-    n_hours = 10
-    replicates = 1
-    cores = 20
-    tight_two_e_int = True
-    ##############################################################################
+    root_data_dir = args.root_data_dir
+    calc_root_dir = args.calc_root_dir
+    orca_exe = args.orca_exe
+    job_handler = args.job_handler
+    queue = args.queue
+    allocation = args.allocation
+    source_bashrc = args.source_bashrc
+    conda_env = args.conda_env
+    LD_LIBRARY_PATH = args.LD_LIBRARY_PATH
+    n_hours = args.n_hours
+    replicates = args.replicates
+    cores = args.cores
+    tight_two_e_int = args.tight_two_e_int
+    two_step = args.two_step
+    actinide_basis = args.actinide_basis
+    actinide_ecp = args.actinide_ecp
+    non_actinide_basis = args.non_actinide_basis
 
     write_flux_orca_wave_two(
         actinide_basis=actinide_basis,
