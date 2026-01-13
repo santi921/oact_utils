@@ -42,13 +42,17 @@ def _parse_npy_into_table(path: str, sella: bool = False) -> Optional[pd.DataFra
             coords_initial = None
             element_numbers_init = None
             elements_names_init = None
+        
         else:
             coords = val.get("coords_final", None)
             elems = val.get("elements_final", None)
             coords_initial = val.get("coords_init", None)
             elems_initial = val.get("elements_init", None)
+            status = val.get("status", None)
             
-            status = 1 if coords is not None else 0
+            if status is None:
+                status = 1 if coords is not None else 0
+
             delta_energy = None
             if status == 1:
                 energies = val.get("energies_opt", None)
@@ -64,6 +68,21 @@ def _parse_npy_into_table(path: str, sella: bool = False) -> Optional[pd.DataFra
             )
             elements_names_init = elems_initial
 
+        # if delta_energy is NaN or not finite, overwrite status to 0
+        if delta_energy is not None:
+            try:
+                if not np.isfinite(delta_energy):
+                    status = 0
+                if np.isnan(delta_energy):
+                    status = 0
+                # also if it's 0 
+                if delta_energy == 0:
+                    status = 0
+            except Exception:
+                status = 0
+        else: 
+            status = 0
+            
         table.append(
             {
                 "name": key,

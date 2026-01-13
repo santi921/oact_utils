@@ -6,109 +6,14 @@ from oact_utilities.utils.baselines import (
     process_multiplicity_file,
     process_geometry_file,
 )
-from oact_utilities.utils.create import write_flux_no_template_sella_ase
+from oact_utilities.utils.hpc import write_flux_no_template_sella_ase
+from oact_utilities.utils.create import write_inputs_ase
 from oact_utilities.utils.status import check_job_termination
 from oact_utilities.core.orca.calc import write_orca_inputs
 
 import time
 
 os.environ["JAX_PLATFORMS"] = "cpu"
-
-
-def write_inputs_ase(
-    output_directory: str,
-    charge: int,
-    mult: int,
-    nbo: bool,
-    cores: int,
-    functional: str,
-    scf_MaxIter: int,
-    simple_input: str,
-    orca_path: str,
-    actinide_basis: str,
-    actinide_ecp: str | None,
-    traj_file: str,
-    non_actinide_basis: str,
-    opt: bool = False,
-    error_handle: bool = False,
-    error_code: int = 0,
-    tight_two_e_int: bool = False,
-    restart=True,
-):
-    """
-    Write ORCA input files for a given set of parameters.
-
-    Takes:
-        - atoms(ase.Atoms): ASE Atoms object
-        - output_directory(str): Directory to write input files to
-        - charge(int): Charge of the system
-        - mult(int): Multiplicity of the system
-        - nbo(bool): Whether to include NBO analysis
-        - cores(int): Number of cores to use
-        - functional(str): Exchange-correlation functional
-        - scf_MaxIter(int): Maximum number of SCF iterations
-        - simple_input(str): Simple input type ("omol" or "x2c")
-        - orca_path(str): Path to ORCA executable
-        - actinide_basis(str): Basis set for actinides
-        - actinide_ecp(str|None): ECP for actinides
-        - non_actinide_basis(str): Basis set for non-actinides
-        - opt(bool): Whether to include optimization keywords
-        - error_handle(bool): Whether to include error handling keywords
-        - error_code(int): Error code from previous job (0 if no error)
-        - tight_two_e_int(bool): Whether to use tight two-electron integrals
-    """
-    # write the above template to output_directory
-
-    with open(os.path.join(output_directory, "orca.py"), "w") as f:
-        f.write(f"import time \n")
-        f.write(f"import os\n")
-        f.write("from oact_utilities.core.orca.recipes import pure_ase_relaxation\n")
-        f.write("from oact_utilities.utils.create import read_geom_from_inp_file\n\n")
-        f.write("def main():\n")
-        f.write("    os.environ['JAX_PLATFORMS'] = 'cpu'\n")
-        f.write(f"    inp_test = '{os.path.join(output_directory, 'orca.inp')}'\n")
-        f.write(
-            "    atoms_orca = read_geom_from_inp_file(inp_test, ase_format_tf=True)\n"
-        )
-        f.write(f"    charge = {charge}\n")
-        f.write(f"    mult = {mult}\n")
-        f.write(f"    output_directory = '{output_directory}'\n")
-        f.write(f"    orca_path = '{orca_path}'\n")
-        f.write(f"    nbo_tf = {nbo}\n")
-        f.write(f"    cores={cores}\n")
-        f.write(f"    actinide_basis = '{actinide_basis}'\n")
-        if actinide_ecp is None:
-            f.write(f"    actinide_ecp = None\n")
-        else:
-            f.write(f"    actinide_ecp = '{actinide_ecp}'\n")
-        f.write(f"    non_actinide_basis = '{non_actinide_basis}'\n")
-        f.write("    time_start = time.time()\n")
-        f.write("    res_dict = pure_ase_relaxation(\n")
-        f.write("        atoms=atoms_orca,\n")
-        f.write("        charge=charge,\n")
-        f.write("        spin_multiplicity=mult,\n")
-        f.write(f"        functional='{functional}',\n")
-        f.write(f"        simple_input='{simple_input}',\n")
-        if restart:
-            f.write("        restart=True,\n")
-        f.write(f"        scf_MaxIter={scf_MaxIter},\n")
-        f.write("        outputdir=output_directory,\n")
-        f.write("        orca_cmd=orca_path,\n")
-        f.write("        nbo=nbo_tf,\n")
-        f.write(f"        traj_file='{traj_file}',\n")
-        f.write("        nprocs=cores,\n")
-        f.write("        actinide_basis=actinide_basis,\n")
-        f.write("        actinide_ecp=actinide_ecp,\n")
-        f.write("        non_actinide_basis=non_actinide_basis,\n")
-        f.write(f"        opt={opt},\n")
-        f.write(f"        error_handle={error_handle},\n")
-        f.write(f"        error_code={error_code},\n")
-        f.write(f"        tight_two_e_int={tight_two_e_int}\n")
-        f.write("    )\n")
-        f.write("    time_end = time.time()\n")
-        f.write("    print('Total time (s): ', time_end - time_start)\n\n")
-        f.write("if __name__ == '__main__':\n")
-        f.write("    main()\n")
 
 
 def write_sella_python_ase_job(
@@ -313,7 +218,7 @@ if __name__ == "__main__":
     # conda_env = "py10mpi"
     # LD_LIBRARY_PATH = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
     # n_hours = 10
-    # cores = 8
+    # cores = 20
     # tight_two_e_int = True
     # root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
     # calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out_sella/"

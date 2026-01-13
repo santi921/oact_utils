@@ -4,7 +4,6 @@ from typing import Dict, Any
 from oact_utilities.utils.an66 import process_geometry_file, process_multiplicity_file
 from ase import Atoms
 
-
 def fetch_actinides():
     return [
         "Ac",
@@ -29,9 +28,11 @@ def elements_to_atomic_numbers(elements: list[str]) -> list[int]:
     atomic_numbers = [ptelements.symbol(e).number for e in elements]
     return atomic_numbers
 
+
 def atomic_numbers_to_elements(atomic_numbers: list[int]) -> list[str]:
     elements = [ptelements[n].symbol for n in atomic_numbers]
     return elements
+
 
 def read_geom_from_inp_file(
     inp_file: str, ase_format_tf: bool = False
@@ -225,319 +226,99 @@ def write_orca_input(
             f.write(line)
 
 
-def write_flux(template_file: str, root_dir: str, two_step: bool = False) -> None:
+def write_inputs_ase(
+    output_directory: str,
+    charge: int,
+    mult: int,
+    nbo: bool,
+    cores: int,
+    functional: str,
+    scf_MaxIter: int,
+    simple_input: str,
+    orca_path: str,
+    actinide_basis: str,
+    actinide_ecp: str | None,
+    traj_file: str,
+    non_actinide_basis: str,
+    opt: bool = False,
+    error_handle: bool = False,
+    error_code: int = 0,
+    tight_two_e_int: bool = False,
+    restart=True,
+):
+    """
+    Write ORCA input files for a given set of parameters.
 
-    with open(template_file, "r") as f:
-        lines = f.readlines()
+    Takes:
+        - output_directory(str): Directory to write input files to
+        - charge(int): Charge of the system
+        - mult(int): Multiplicity of the system
+        - nbo(bool): Whether to include NBO analysis
+        - cores(int): Number of cores to use
+        - functional(str): Exchange-correlation functional
+        - scf_MaxIter(int): Maximum number of SCF iterations
+        - simple_input(str): Simple input type ("omol" or "x2c")
+        - orca_path(str): Path to ORCA executable
+        - actinide_basis(str): Basis set for actinides
+        - actinide_ecp(str|None): ECP for actinides
+        - non_actinide_basis(str): Basis set for non-actinides
+        - opt(bool): Whether to include optimization keywords
+        - error_handle(bool): Whether to include error handling keywords
+        - error_code(int): Error code from previous job (0 if no error)
+        - tight_two_e_int(bool): Whether to use tight two-electron integrals
+    """
+    # write the above template to output_directory
 
-    # remove lines that start with #* and * and lines in between
-    lines_cleaned_template = []
-    for line in lines:
-        if not line.startswith("#") and not line.startswith("\n"):
-            lines_cleaned_template.append(line)
-
-    # create folder if it does not exist
-    if not os.path.exists(root_dir):
-        os.makedirs(root_dir)
-
-    # go through each subfolder in root_directory and write a flux job for each, scan for .inp files and add them to last line of template
-    for folder in os.listdir(root_dir):
-        folder_to_use = os.path.join(root_dir, folder)
-        if os.path.isdir(folder_to_use):
-            if two_step:
-                inp_files_loose = [
-                    f for f in os.listdir(folder_to_use) if f.endswith("omol_loose.inp")
-                ]
-                inp_files_tight = [
-                    f for f in os.listdir(folder_to_use) if f.endswith("omol_tight.inp")
-                ]
-                inp_files_loose_full_path = [
-                    os.path.join(folder_to_use, f) for f in inp_files_loose
-                ]
-                inp_files_tight_full_path = [
-                    os.path.join(folder_to_use, f) for f in inp_files_tight
-                ]
-                inp_files_loose_line = " ".join(inp_files_loose_full_path)
-                inp_files_tight_line = " ".join(inp_files_tight_full_path)
-                lines_cleaned_template_modified = lines_cleaned_template.copy()
-                # rm \n from last line if present
-                if lines_cleaned_template_modified[-1].endswith("\n"):
-                    lines_cleaned_template_modified[-1] = (
-                        lines_cleaned_template_modified[-1][:-1]
-                    )
-                lines_cleaned_template_modified_loose = (
-                    lines_cleaned_template_modified.copy()
-                )
-                lines_cleaned_template_modified_tight = (
-                    lines_cleaned_template_modified.copy()
-                )
-
-                lines_cleaned_template_modified_loose[-1] = (
-                    lines_cleaned_template_modified_loose[-1]
-                    + f" {inp_files_loose_line}\n"
-                )
-                lines_cleaned_template_modified_tight[-1] = (
-                    lines_cleaned_template_modified_tight[-1]
-                    + f" {inp_files_tight_line}\n"
-                )
-                file_name_loose = f"{folder_to_use}/flux_job_loose.flux"
-                file_name_tight = f"{folder_to_use}/flux_job_tight.flux"
-                with open(file_name_loose, "w") as f:
-                    for line in lines_cleaned_template_modified_loose:
-                        f.write(line)
-                with open(file_name_tight, "w") as f:
-                    for line in lines_cleaned_template_modified_tight:
-                        f.write(line)
-            else:
-
-                inp_files = [f for f in os.listdir(folder_to_use) if f.endswith(".inp")]
-                inp_files_full_path = [
-                    os.path.join(folder_to_use, f) for f in inp_files
-                ]
-                inp_files_line = " ".join(inp_files_full_path)
-                lines_cleaned_template_modified = lines_cleaned_template.copy()
-                # rm \n from last line if present
-                if lines_cleaned_template_modified[-1].endswith("\n"):
-                    lines_cleaned_template_modified[-1] = (
-                        lines_cleaned_template_modified[-1][:-1]
-                    )
-                lines_cleaned_template_modified[-1] = (
-                    lines_cleaned_template_modified[-1] + f" {inp_files_line}\n"
-                )
-
-                file_name = f"{folder_to_use}/flux_job.flux"
-                with open(file_name, "w") as f:
-                    for line in lines_cleaned_template_modified:
-                        f.write(line)
-
-
-"""flux format
-#!/bin/sh
-#flux: -N 1
-#flux: -n 8
-#flux: -q pbatch
-#flux: -B [allocation]
-#flux: -t 120m
-
-source ~/.bashrc
-conda activate py10mpi
-export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH
-/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca 
-"""
-
-
-def write_flux_no_template_sella_ase(
-    root_dir: str,
-    two_step: bool = False,
-    n_cores: int = 4,
-    n_hours: int = 2,
-    queue: str = "pbatch",
-    allocation: str = "dnn-sim",
-) -> None:
-
-    base_lines = [
-        "#!/bin/sh\n",
-        "#flux: -N 1\n",
-        f"#flux: -n {n_cores}\n",
-        f"#flux: -q {queue}\n",
-        f"#flux: -B {allocation}\n",
-        f"#flux: -t {n_hours*60}m\n",
-        "\n",
-        "source ~/.bashrc\n",
-        "conda activate py10mpi\n",
-        "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
-        "export JAX_PLATFORMS=cpu\n",
-        "python orca.py\n",
-    ]
-
-    # create folder if it does not exist
-    if not os.path.exists(root_dir):
-        os.makedirs(root_dir)
-
-    # go through each subfolder in root_directory and write a flux job for each, scan for .inp files and add them to last line of template
-    for folder in os.listdir(root_dir):
-        folder_to_use = os.path.join(root_dir, folder)
-        if not os.path.isdir(folder_to_use):
-            continue
-
-        inp_files = [
-            os.path.join(folder_to_use, f)
-            for f in os.listdir(folder_to_use)
-            if f.endswith(".inp")
-        ]
-        if not inp_files:
-            continue
-        out_lines = base_lines.copy()
-        # if out_lines[-1].endswith("\n"):
-        #    out_lines[-1] = out_lines[-1][:-1]
-        # out_lines[-1] = out_lines[-1] + " " + " ".join(inp_files) + "\n"
-        with open(os.path.join(folder_to_use, "flux_job.flux"), "w") as fh:
-            fh.writelines(out_lines)
-
-
-def write_flux_no_template(
-    root_dir: str,
-    two_step: bool = False,
-    n_cores: int = 4,
-    n_hours: int = 2,
-    queue: str = "pbatch",
-    allocation: str = "dnn-sim",
-) -> None:
-
-    base_lines = [
-        "#!/bin/sh\n",
-        "#flux: -N 1\n",
-        f"#flux: -n {n_cores}\n",
-        f"#flux: -q {queue}\n",
-        f"#flux: -B {allocation}\n",
-        f"#flux: -t {n_hours*60}m\n",
-        "\n",
-        "source ~/.bashrc\n",
-        "conda activate py10mpi\n",
-        "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
-        "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
-    ]
-
-    # create folder if it does not exist
-    if not os.path.exists(root_dir):
-        os.makedirs(root_dir)
-
-    # go through each subfolder in root_directory and write a flux job for each, scan for .inp files and add them to last line of template
-    for folder in os.listdir(root_dir):
-        folder_to_use = os.path.join(root_dir, folder)
-        if not os.path.isdir(folder_to_use):
-            continue
-
-        if two_step:
-            loose_files = [
-                os.path.join(folder_to_use, f)
-                for f in os.listdir(folder_to_use)
-                if f.endswith("omol_loose.inp")
-            ]
-            tight_files = [
-                os.path.join(folder_to_use, f)
-                for f in os.listdir(folder_to_use)
-                if f.endswith("omol_tight.inp")
-            ]
-
-            # skip writing if no files found for that step
-            if loose_files:
-                out_lines = base_lines.copy()
-                # ensure last line ends without newline so we can append input list
-                if out_lines[-1].endswith("\n"):
-                    out_lines[-1] = out_lines[-1][:-1]
-                out_lines[-1] = out_lines[-1] + " " + " ".join(loose_files) + "\n"
-                with open(
-                    os.path.join(folder_to_use, "flux_job_loose.flux"), "w"
-                ) as fh:
-                    fh.writelines(out_lines)
-
-            if tight_files:
-                out_lines = base_lines.copy()
-                if out_lines[-1].endswith("\n"):
-                    out_lines[-1] = out_lines[-1][:-1]
-                out_lines[-1] = out_lines[-1] + " " + " ".join(tight_files) + "\n"
-                with open(
-                    os.path.join(folder_to_use, "flux_job_tight.flux"), "w"
-                ) as fh:
-                    fh.writelines(out_lines)
+    with open(os.path.join(output_directory, "orca.py"), "w") as f:
+        f.write(f"import time \n")
+        f.write(f"import os\n")
+        f.write("from oact_utilities.core.orca.recipes import pure_ase_relaxation\n")
+        f.write("from oact_utilities.utils.create import read_geom_from_inp_file\n\n")
+        f.write("def main():\n")
+        f.write("    os.environ['JAX_PLATFORMS'] = 'cpu'\n")
+        f.write(f"    inp_test = '{os.path.join(output_directory, 'orca.inp')}'\n")
+        f.write(
+            "    atoms_orca = read_geom_from_inp_file(inp_test, ase_format_tf=True)\n"
+        )
+        f.write(f"    charge = {charge}\n")
+        f.write(f"    mult = {mult}\n")
+        f.write(f"    output_directory = '{output_directory}'\n")
+        f.write(f"    orca_path = '{orca_path}'\n")
+        f.write(f"    nbo_tf = {nbo}\n")
+        f.write(f"    cores={cores}\n")
+        f.write(f"    actinide_basis = '{actinide_basis}'\n")
+        if actinide_ecp is None:
+            f.write(f"    actinide_ecp = None\n")
         else:
-            inp_files = [
-                os.path.join(folder_to_use, f)
-                for f in os.listdir(folder_to_use)
-                if f.endswith(".inp")
-            ]
-            if not inp_files:
-                continue
-            out_lines = base_lines.copy()
-            if out_lines[-1].endswith("\n"):
-                out_lines[-1] = out_lines[-1][:-1]
-            out_lines[-1] = out_lines[-1] + " " + " ".join(inp_files) + "\n"
-            with open(os.path.join(folder_to_use, "flux_job.flux"), "w") as fh:
-                fh.writelines(out_lines)
-
-
-def write_slurm_no_template(
-    root_dir: str,
-    two_step: bool = False,
-    n_cores: int = 4,
-    n_hours: int = 2,
-    queue: str = "pbatch",
-    allocation: str = "dnn-sim",
-    source_bashrc: str = "source ~/.bashrc",
-    conda_env: str = "py10mpi",
-    LD_LIBRARY_PATH: str = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib",
-    orca_command: str = "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
-) -> None:
-
-    base_lines = [
-        "#!/bin/sh\n",
-        "#SBATCH -N 1\n",
-        # f"#SBATCH -n {n_cores}\n", # optional, remove with None
-        f"#SBATCH --constraint standard\n",
-        f"#SBATCH --qos {queue}\n",
-        f"#SBATCH --account {allocation}\n",
-        f"#SBATCH -t {n_hours}:00:00\n",
-        "\n",
-        f"{source_bashrc}\n",
-        f"conda activate {conda_env}\n",
-        f"export LD_LIBRARY_PATH={LD_LIBRARY_PATH}:$LD_LIBRARY_PATH\n",
-        orca_command,
-    ]
-
-    # create folder if it does not exist
-    if not os.path.exists(root_dir):
-        os.makedirs(root_dir)
-
-    # go through each subfolder in root_directory and write a flux job for each, scan for .inp files and add them to last line of template
-    for folder in os.listdir(root_dir):
-        folder_to_use = os.path.join(root_dir, folder)
-        if not os.path.isdir(folder_to_use):
-            continue
-
-        if two_step:
-            loose_files = [
-                os.path.join(folder_to_use, f)
-                for f in os.listdir(folder_to_use)
-                if f.endswith("omol_loose.inp")
-            ]
-            tight_files = [
-                os.path.join(folder_to_use, f)
-                for f in os.listdir(folder_to_use)
-                if f.endswith("omol_tight.inp")
-            ]
-
-            # skip writing if no files found for that step
-            if loose_files:
-                out_lines = base_lines.copy()
-                # ensure last line ends without newline so we can append input list
-                if out_lines[-1].endswith("\n"):
-                    out_lines[-1] = out_lines[-1][:-1]
-                out_lines[-1] = out_lines[-1] + " " + " ".join(loose_files) + "\n"
-                with open(os.path.join(folder_to_use, "slurm_job_loose.sh"), "w") as fh:
-                    fh.writelines(out_lines)
-
-            if tight_files:
-                out_lines = base_lines.copy()
-                if out_lines[-1].endswith("\n"):
-                    out_lines[-1] = out_lines[-1][:-1]
-                out_lines[-1] = out_lines[-1] + " " + " ".join(tight_files) + "\n"
-                with open(os.path.join(folder_to_use, "slurm_job_tight.sh"), "w") as fh:
-                    fh.writelines(out_lines)
-        else:
-            inp_files = [
-                os.path.join(folder_to_use, f)
-                for f in os.listdir(folder_to_use)
-                if f.endswith(".inp")
-            ]
-            if not inp_files:
-                continue
-            out_lines = base_lines.copy()
-            if out_lines[-1].endswith("\n"):
-                out_lines[-1] = out_lines[-1][:-1]
-            out_lines[-1] = out_lines[-1] + " " + " ".join(inp_files) + "\n"
-            with open(os.path.join(folder_to_use, "slurm_job.sh"), "w") as fh:
-                fh.writelines(out_lines)
+            f.write(f"    actinide_ecp = '{actinide_ecp}'\n")
+        f.write(f"    non_actinide_basis = '{non_actinide_basis}'\n")
+        f.write("    time_start = time.time()\n")
+        f.write("    res_dict = pure_ase_relaxation(\n")
+        f.write("        atoms=atoms_orca,\n")
+        f.write("        charge=charge,\n")
+        f.write("        spin_multiplicity=mult,\n")
+        f.write(f"        functional='{functional}',\n")
+        f.write(f"        simple_input='{simple_input}',\n")
+        if restart:
+            f.write("        restart=True,\n")
+        f.write(f"        scf_MaxIter={scf_MaxIter},\n")
+        f.write("        outputdir=output_directory,\n")
+        f.write("        orca_cmd=orca_path,\n")
+        f.write("        nbo=nbo_tf,\n")
+        f.write(f"        traj_file='{traj_file}',\n")
+        f.write("        nprocs=cores,\n")
+        f.write("        actinide_basis=actinide_basis,\n")
+        f.write("        actinide_ecp=actinide_ecp,\n")
+        f.write("        non_actinide_basis=non_actinide_basis,\n")
+        f.write(f"        opt={opt},\n")
+        f.write(f"        error_handle={error_handle},\n")
+        f.write(f"        error_code={error_code},\n")
+        f.write(f"        tight_two_e_int={tight_two_e_int}\n")
+        f.write("    )\n")
+        f.write("    time_end = time.time()\n")
+        f.write("    print('Total time (s): ', time_end - time_start)\n\n")
+        f.write("if __name__ == '__main__':\n")
+        f.write("    main()\n")
 
 
 def write_jobs(

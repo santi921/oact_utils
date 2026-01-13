@@ -6,7 +6,7 @@ from oact_utilities.utils.baselines import (
     process_geometry_file,
 )
 from oact_utilities.core.orca.calc import write_orca_inputs
-from oact_utilities.utils.create import write_flux_no_template, write_slurm_no_template
+from oact_utilities.utils.hpc import write_flux_no_template, write_slurm_no_template
 from oact_utilities.utils.status import check_job_termination
 
 import argparse

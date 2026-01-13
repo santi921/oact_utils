@@ -243,3 +243,4 @@ log
 *flux
 *pkl
 orca.py
+*.bak.*
