@@ -1,7 +1,4 @@
-UC58H52N2S4-ZORA_PBE0, charge=0, mult=4
-NpC58H52N2S4-ZORA_PBE0, charge=0, mult=5
 PuC58H52N2S4-ZORA_PBE0, charge=0, mult=6
 AmC58H52N2S4-ZORA_PBE0, charge=0, mult=7
-NpC58H52N2Se4-ZORA_PBE0, charge=0, mult=5
 PuC58H52N2Se4-ZORA_PBE0, charge=0, mult=6
 AmC58H52N2Se4-ZORA_PBE0, charge=0, mult=7

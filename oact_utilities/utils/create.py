@@ -29,6 +29,9 @@ def elements_to_atomic_numbers(elements: list[str]) -> list[int]:
     atomic_numbers = [ptelements.symbol(e).number for e in elements]
     return atomic_numbers
 
+def atomic_numbers_to_elements(atomic_numbers: list[int]) -> list[str]:
+    elements = [ptelements[n].symbol for n in atomic_numbers]
+    return elements
 
 def read_geom_from_inp_file(
     inp_file: str, ase_format_tf: bool = False

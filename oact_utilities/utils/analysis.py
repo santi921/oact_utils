@@ -87,6 +87,8 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
         "energies_frames": energies,
         "elements_final": elements,
         "coords_final": coords,
+        "elements_init": elements_ref,
+        "coords_init": coords_ref,
     }
     return dict_return
 
@@ -369,18 +371,15 @@ def get_full_info_all_jobs(
                 perf_info[name]["geo_forces"] = None
                 print(f"Could not extract geometry forces for job in {folder_to_use}.")
 
-            try:
-                geom_info = get_rmsd_start_final(folder_to_use)
-                perf_info[name]["rmsd_start_final"] = geom_info["rmsd"]
-                perf_info[name]["energies_opt"] = geom_info["energies_frames"]
-                perf_info[name]["elements_final"] = geom_info["elements_final"]
-                perf_info[name]["coords_final"] = geom_info["coords_final"]
-            except:
-                perf_info[name]["rmsd_start_final"] = None
-                perf_info[name]["energies_opt"] = None
-                perf_info[name]["elements_final"] = None
-                perf_info[name]["coords_final"] = None
-                print(f"Could not extract geometry info for job in {folder_to_use}.")
+        
+            geom_info = get_rmsd_start_final(folder_to_use)
+            perf_info[name]["rmsd_start_final"] = geom_info.get("rmsd", None)
+            perf_info[name]["energies_opt"] = geom_info.get("energies_frames", None)
+            perf_info[name]["elements_final"] = geom_info.get("elements_final", None)
+            perf_info[name]["coords_final"] = geom_info.get("coords_final", None)
+            perf_info[name]["elements_init"] = geom_info.get("elements_init", None)
+            perf_info[name]["coords_init"] = geom_info.get("coords_init", None)
+
 
     return perf_info
 
@@ -441,8 +440,6 @@ def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> List[Tuple[str, int, f
             # info block
             nprocs, total_time_seconds = find_timings_and_cores(log_file)
             engrad = get_engrad(engrad_file=engrad_file)
-
-            # geom_info = get_rmsd_start_final(folder_to_use)
 
             if nprocs is not None and total_time_seconds is not None:
                 perf_info[name] = {
