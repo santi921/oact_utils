@@ -39,9 +39,15 @@ def _parse_npy_into_table(path: str, sella: bool = False) -> Optional[pd.DataFra
                 if elements_numbers is not None
                 else None
             )
+            coords_initial = None
+            element_numbers_init = None
+            elements_names_init = None
         else:
             coords = val.get("coords_final", None)
             elems = val.get("elements_final", None)
+            coords_initial = val.get("coords_init", None)
+            elems_initial = val.get("elements_init", None)
+            
             status = 1 if coords is not None else 0
             delta_energy = None
             if status == 1:
@@ -53,12 +59,20 @@ def _parse_npy_into_table(path: str, sella: bool = False) -> Optional[pd.DataFra
             )
             elements_names = elems
 
+            element_numbers_init = (
+                elements_to_atomic_numbers(elems_initial) if elems_initial is not None else None
+            )
+            elements_names_init = elems_initial
+
         table.append(
             {
                 "name": key,
                 "elements_numbers": elements_numbers,
                 "elements_names": elements_names,
+                "elements_numbers_init": element_numbers_init,
+                "elements_names_init": elements_names_init,
                 "coords": coords,
+                "coords_init": coords_initial,
                 "status": int(status),
                 "delta_energy": float(delta_energy) if delta_energy is not None else None,
             }

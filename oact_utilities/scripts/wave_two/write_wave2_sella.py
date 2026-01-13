@@ -1,5 +1,6 @@
 import os
 import time
+import argparse
 
 from oact_utilities.utils.baselines import (
     process_multiplicity_file,
@@ -304,86 +305,62 @@ def write_sella_python_ase_job(
 
 
 if __name__ == "__main__":
-    job_handler = "flux"
-    queue = "pbatch"
-    allocation = "dnn-sim"
-    source_bashrc = "source ~/.bashrc"
-    conda_env = "py10mpi"
-    LD_LIBRARY_PATH = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
-    n_hours = 10
-    cores = 8
-    tight_two_e_int = True
+    # Example defaults (kept as comments for reference):
+    # job_handler = "flux"
+    # queue = "pbatch"
+    # allocation = "dnn-sim"
+    # source_bashrc = "source ~/.bashrc"
+    # conda_env = "py10mpi"
+    # LD_LIBRARY_PATH = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
+    # n_hours = 10
+    # cores = 8
+    # tight_two_e_int = True
+    # root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
+    # calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out_sella/"
+    # orca_exe = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
+    # actinide_basis = "ma-def-TZVP"
+    # actinide_ecp = "def-ECP"
+    # non_actinide_basis = "def2-TZVPD"
 
-    root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
-    calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out_sella/"
-    orca_exe = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
-
-    actinide_basis = "ma-def-TZVP"
-    actinide_ecp = "def-ECP"
-    non_actinide_basis = "def2-TZVPD"
-
-    write_sella_python_ase_job(
-        actinide_basis=actinide_basis,
-        actinide_ecp=actinide_ecp,
-        non_actinide_basis=non_actinide_basis,
-        cores=cores,
-        orca_exe=orca_exe,
-        safety=False,
-        max_scf_iterations=600,
-        n_hours=n_hours,
-        allocation=allocation,
-        queue=queue,
-        root_data_dir=root_data_dir,
-        calc_root_dir=calc_root_dir,
-        skip_done=True,
-        lot="omol",
-        functional="wB97M-V",
-        job_handler=job_handler,
-        opt=False,
-        source_bashrc=source_bashrc,
-        conda_env=conda_env,
-        LD_LIBRARY_PATH=LD_LIBRARY_PATH,
-        tight_two_e_int=tight_two_e_int,
-    )
-
-    job_handler = "flux"
-    queue = "pbatch"
-    allocation = "dnn-sim"
-    source_bashrc = "source ~/.bashrc"
-    conda_env = "py10mpi"
-    LD_LIBRARY_PATH = "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib"
-    n_hours = 10
-    cores = 8
-    tight_two_e_int = True
-
-    root_data_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark/"
-    calc_root_dir = "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out_sella/"
-    orca_exe = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca"
-
-    actinide_basis = "ma-def-TZVP"
-    actinide_ecp = "def-ECP"
-    non_actinide_basis = "def2-TZVPD"
+    parser = argparse.ArgumentParser(description="Prepare Sella/ORCA ASE jobs for Wave 2.")
+    parser.add_argument("--root-data-dir", default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/", help="Root data directory")
+    parser.add_argument("--calc-root-dir", default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out_sella/", help="Calculation root directory")
+    parser.add_argument("--orca-exe", default="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca", help="Path to ORCA executable")
+    parser.add_argument("--cores", type=int, default=8)
+    parser.add_argument("--n-hours", type=int, default=10)
+    parser.add_argument("--queue", default="pbatch")
+    parser.add_argument("--allocation", default="dnn-sim")
+    parser.add_argument("--lot", default="omol", choices=["omol", "x2c"])
+    parser.add_argument("--functional", default="wB97M-V")
+    parser.add_argument("--actinide-basis", default="ma-def-TZVP")
+    parser.add_argument("--actinide-ecp", default="def-ECP")
+    parser.add_argument("--non-actinide-basis", default="def2-TZVPD")
+    parser.add_argument("--tight-two-e-int", action="store_true")
+    parser.add_argument("--skip-done", action="store_true", help="Skip folders with completed jobs")
+    parser.add_argument("--opt", action="store_true", help="Run geometry optimizations")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args()
 
     write_sella_python_ase_job(
-        actinide_basis=actinide_basis,
-        actinide_ecp=actinide_ecp,
-        non_actinide_basis=non_actinide_basis,
-        cores=cores,
-        orca_exe=orca_exe,
+        actinide_basis=args.actinide_basis,
+        actinide_ecp=args.actinide_ecp,
+        non_actinide_basis=args.non_actinide_basis,
+        cores=args.cores,
+        orca_exe=args.orca_exe,
         safety=False,
         max_scf_iterations=600,
-        n_hours=n_hours,
-        allocation=allocation,
-        queue=queue,
-        root_data_dir=root_data_dir,
-        calc_root_dir=calc_root_dir,
-        skip_done=True,
-        lot="omol",
-        functional="wB97M-V",
-        job_handler=job_handler,
-        opt=False,
-        source_bashrc=source_bashrc,
-        conda_env=conda_env,
-        LD_LIBRARY_PATH=LD_LIBRARY_PATH,
-        tight_two_e_int=tight_two_e_int,
+        n_hours=args.n_hours,
+        allocation=args.allocation,
+        queue=args.queue,
+        root_data_dir=args.root_data_dir,
+        calc_root_dir=args.calc_root_dir,
+        skip_done=args.skip_done,
+        lot=args.lot,
+        functional=args.functional,
+        job_handler="flux",
+        opt=args.opt,
+        dry_run=args.dry_run,
+        overwrite=args.overwrite,
+        tight_two_e_int=args.tight_two_e_int,
     )

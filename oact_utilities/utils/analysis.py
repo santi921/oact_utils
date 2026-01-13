@@ -38,10 +38,10 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
     # find xyz folder, traj file, and .inp file
     folder_results = root_dir
     files_in = os.listdir(folder_results)
-    # find file with ".density" in name
-    file_density = [f for f in files_in if f.endswith(".densities")]
+    # find file with ".inp" in name
+    file_density = [f for f in files_in if f.endswith(".inp")]
     # get the shortest name
-    root_name = min(file_density, key=len).split(".densities")[0]
+    root_name = min(file_density, key=len).split(".inp")[0]
 
     xyz_output = os.path.join(folder_results, f"{root_name}.xyz")
     inp_file = os.path.join(folder_results, f"{root_name}.inp")
