@@ -2,6 +2,7 @@ import os
 import sqlite3
 from pathlib import Path
 import pytest
+import time
 
 from oact_utilities.scripts.multi_spin import check_multi_spin as cms
 
@@ -99,3 +100,86 @@ def test_find_and_get_status_prints_table(tmp_path, monkeypatch, capsys):
     assert "Full jobs table" in captured.out
     # category should be included in the summary line
     assert "Molecule: MolA (category: catA)" in captured.out
+    # legend should be present
+    assert "Status legend" in captured.out
+    # ensure legend appears before the table
+    assert captured.out.index("Full jobs table") < captured.out.index("Status legend")
+
+
+def test_find_and_get_status_detects_running(tmp_path, monkeypatch):
+    base = tmp_path
+    molA_spin1 = base / "lot1" / "catA" / "MolA" / "spin_1"
+    molA_spin1.mkdir(parents=True, exist_ok=True)
+    (molA_spin1 / "flux_job.flux").write_text("dummy")
+    # create a recent flux-1.out
+    out = molA_spin1 / "flux-1.out"
+    out.write_text("log")
+    now = time.time()
+    os.utime(out, (now, now))
+
+    def fake_check_sella_complete(path):
+        return False
+
+    def fake_check_job_termination(path):
+        return 0
+
+    monkeypatch.setattr(cms, "check_sella_complete", fake_check_sella_complete)
+    monkeypatch.setattr(cms, "check_job_termination", fake_check_job_termination)
+
+    processed = cms.find_and_get_status(str(base), max_depth=6, verbose=False)
+    assert processed == 1
+
+    db_path = base / "multi_spin_jobs.sqlite3"
+    conn = sqlite3.connect(str(db_path))
+    c = conn.cursor()
+    c.execute("SELECT name, spin, status, note FROM jobs")
+    rows = c.fetchall()
+    assert len(rows) == 1
+    name, spin, status, note = rows[0]
+    assert name == "MolA"
+    assert spin == "spin_1"
+    assert status == 2
+    assert note.startswith("running_recent")
+    conn.close()
+
+
+def test_running_age_threshold(tmp_path, monkeypatch):
+    base = tmp_path
+    mol = base / "lot1" / "catA" / "MolA" / "spin_1"
+    mol.mkdir(parents=True, exist_ok=True)
+    (mol / "flux_job.flux").write_text("dummy")
+    out = mol / "flux-1.out"
+    out.write_text("log")
+    now = time.time()
+    # set mtime to now - 10 seconds
+    os.utime(out, (now - 10, now - 10))
+
+    def fake_check_sella_complete(path):
+        return False
+
+    def fake_check_job_termination(path):
+        return 0
+
+    monkeypatch.setattr(cms, "check_sella_complete", fake_check_sella_complete)
+    monkeypatch.setattr(cms, "check_job_termination", fake_check_job_termination)
+
+    # running_age_seconds = 20 should mark it as running
+    processed = cms.find_and_get_status(str(base), max_depth=6, verbose=False, running_age_seconds=20)
+    assert processed == 1
+    conn = sqlite3.connect(str(base / "multi_spin_jobs.sqlite3"))
+    c = conn.cursor()
+    c.execute("SELECT status FROM jobs")
+    status = c.fetchone()[0]
+    assert status == 2
+    conn.close()
+
+    # remove DB and run with small threshold so it should NOT be running
+    os.remove(str(base / "multi_spin_jobs.sqlite3"))
+    processed = cms.find_and_get_status(str(base), max_depth=6, verbose=False, running_age_seconds=5)
+    assert processed == 1
+    conn = sqlite3.connect(str(base / "multi_spin_jobs.sqlite3"))
+    c = conn.cursor()
+    c.execute("SELECT status FROM jobs")
+    status = c.fetchone()[0]
+    assert status == 0
+    conn.close()

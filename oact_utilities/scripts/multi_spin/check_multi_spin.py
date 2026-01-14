@@ -115,6 +115,7 @@ def find_and_get_status(
     verbose: bool = False,
     *,
     print_table: bool = False,
+    running_age_seconds: int = 3600,
 ) -> int:
     """Traverse `root` up to `max_depth` and launch flux jobs when `flux_job.flux` is found.
 
@@ -131,14 +132,11 @@ def find_and_get_status(
         note = ""
         if os.path.exists(flux_file):
             processed += 1
-            # default is remaining (0). Check for completion/failure
-            if check_sella_complete(d):
-                if verbose:
-                    print(f"Skipping {d} because it has a completed job")
-                status = 1
-                note = "sella_complete"
-
+            # default is remaining (0). Determine status in order:
+            # 1) failed (-1) 2) completed (1) 3) running (2 if recent flux-*.out) 4) remaining (0)
+            
             term = check_job_termination(d)
+            
             if term == -1:
                 if verbose:
                     print(f"Found failed job at {d}")
@@ -149,6 +147,24 @@ def find_and_get_status(
                     print(f"Found completed job at {d}")
                 status = 1
                 note = "job_completed"
+            elif check_sella_complete(d):
+                if verbose:
+                    print(f"Skipping {d} because it has a completed job (sella) ")
+                status = 1
+                note = "sella_complete"
+            else:
+                # check for running indicator: recent flux-*.out read/write
+                import glob
+
+                out_files = glob.glob(os.path.join(d, "flux-*.out"))
+                if out_files:
+                    latest_out = max(out_files, key=os.path.getmtime)
+                    latest_mtime = os.path.getmtime(latest_out)
+                    if (time() - latest_mtime) < running_age_seconds:
+                        if verbose:
+                            print(f"Found recent flux output {latest_out}; marking as running")
+                        status = 2
+                        note = f"running_recent:{os.path.basename(latest_out)}"
 
             path_data = parse_info_from_path(d)
 
@@ -187,6 +203,7 @@ def find_and_get_status(
     c.execute(
         """
         SELECT name, category, spin,
+               SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS running,
                SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS remaining,
                SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS done,
                SUM(CASE WHEN status = -1 THEN 1 ELSE 0 END) AS failed
@@ -200,7 +217,7 @@ def find_and_get_status(
         print("\nSummary of multi-spin jobs:\n")
         current_name = None
         current_cat = None
-        for name, category, spin, remaining, done, failed in rows:
+        for name, category, spin, running, remaining, done, failed in rows:
             if name != current_name or category != current_cat:
                 if current_name is not None:
                     print("")
@@ -208,24 +225,46 @@ def find_and_get_status(
                 current_name = name
                 current_cat = category
             print(
-                f"  {spin:<10} -> remaining: {remaining:3d}  done: {done:3d}  failed: {failed:3d}"
+                f"  {spin:<10} -> running: {running:3d}  remaining: {remaining:3d}  done: {done:3d}  failed: {failed:3d}"
             )
     else:
         print("No job records found in DB.")
 
-    # Optionally print the entire jobs table for debugging
+    # Print legend for status codes
+    print("\nStatus legend:\n  running: 2 (recent flux-*.out)\n  remaining: 0 (no run detected)\n  done: 1 (completed)\n  failed: -1 (failed)\n")
+
+    # Optionally print the entire jobs table for debugging (pretty formatted)
     if print_table:
         print("\nFull jobs table:\n")
+        # print legend above the table for clarity
+        print("Status legend: running=2, remaining=0, done=1, failed=-1\n")
         c2 = conn.cursor()
         c2.execute(
             "SELECT id, path, lot, category, name, spin, status, note, checked_at FROM jobs ORDER BY name, spin"
         )
         all_rows = c2.fetchall()
+        headers = []
         if c2.description:
             headers = [d[0] for d in c2.description]
-            print("\t".join(headers))
-        for r in all_rows:
-            print("\t".join([str(x) for x in r]))
+
+        # prefer tabulate if available, otherwise do basic aligned columns
+        try:
+            from tabulate import tabulate
+
+            print(tabulate(all_rows, headers=headers, tablefmt="github"))
+        except Exception:
+            # fallback simple table
+            if headers:
+                widths = [max(len(str(h)), max((len(str(r[i])) for r in all_rows), default=0)) for i, h in enumerate(headers)]
+                header_line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+                sep = "-+-".join("".ljust(widths[i], "-") for i in range(len(widths)))
+                print(header_line)
+                print(sep)
+                for r in all_rows:
+                    print(" | ".join(str(r[i]).ljust(widths[i]) for i in range(len(r))))
+            else:
+                for r in all_rows:
+                    print("\t".join([str(x) for x in r]))
 
     conn.close()
     return processed
@@ -245,6 +284,12 @@ def main() -> None:
     )
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--print-table", action="store_true", help="Print the full jobs table for debugging")
+    parser.add_argument(
+        "--running-age-seconds",
+        type=int,
+        default=3600,
+        help="Seconds to treat a flux-*.out as 'running' (default: 3600)",
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.root):
@@ -255,6 +300,7 @@ def main() -> None:
         max_depth=args.max_depth,
         verbose=args.verbose,
         print_table=args.print_table,
+        running_age_seconds=args.running_age_seconds,
     )
     print(f"Total flux jobs launched/found: {n}")
 
