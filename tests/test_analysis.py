@@ -19,4 +19,3 @@ def test_get_rmsd_start_final():
     )
 
 
-test_get_rmsd_start_final()
