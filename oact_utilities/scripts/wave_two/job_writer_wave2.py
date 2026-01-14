@@ -11,6 +11,7 @@ from oact_utilities.utils.status import check_job_termination
 
 import argparse
 
+
 def write_flux_orca_wave_two(
     actinide_basis: str,
     actinide_ecp: str,
@@ -228,15 +229,31 @@ def write_flux_orca_wave_two(
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root_data_dir", type=str, default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/")
-    parser.add_argument("--calc_root_dir", type=str, default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/")
-    parser.add_argument("--orca_exe", type=str, default="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca")
+    parser.add_argument(
+        "--root_data_dir",
+        type=str,
+        default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/",
+    )
+    parser.add_argument(
+        "--calc_root_dir",
+        type=str,
+        default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/",
+    )
+    parser.add_argument(
+        "--orca_exe",
+        type=str,
+        default="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
+    )
     parser.add_argument("--job_handler", type=str, default="flux")
     parser.add_argument("--queue", type=str, default="pbatch")
     parser.add_argument("--allocation", type=str, default="dnn-sim")
     parser.add_argument("--source_bashrc", type=str, default="source ~/.bashrc")
     parser.add_argument("--conda_env", type=str, default="py10mpi")
-    parser.add_argument("--LD_LIBRARY_PATH", type=str, default="/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib")
+    parser.add_argument(
+        "--LD_LIBRARY_PATH",
+        type=str,
+        default="/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib",
+    )
     parser.add_argument("--n_hours", type=int, default=10)
     parser.add_argument("--replicates", type=int, default=1)
     parser.add_argument("--cores", type=int, default=20)

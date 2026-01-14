@@ -38,8 +38,7 @@ def base_config(
     conda_env: str = "py10mpi",
     conda_base: str = "/usr/WS1/vargas58/miniconda3",
 ) -> Config:
-    """Returns a Parsl config using SlurmProvider with HighThroughputExecutor.
-    """
+    """Returns a Parsl config using SlurmProvider with HighThroughputExecutor."""
 
     worker_init_commands = f"""{source_cmd}
 conda activate {conda_env}
@@ -58,8 +57,7 @@ export OMP_NUM_THREADS=1
         walltime=f"{walltime_hours:02d}:00:00",
         worker_init=worker_init_commands,
         scheduler_options=(
-            "#SBATCH --ntasks-per-node=64\n"
-            "#SBATCH --cpus-per-task=1\n"
+            "#SBATCH --ntasks-per-node=64\n" "#SBATCH --cpus-per-task=1\n"
         ),
         exclusive=True,
         launcher=SimpleLauncher(),  # Do not use SrunLauncher because of ORCA's internal mpirun
@@ -230,7 +228,9 @@ def parsl_wave2(
     for base_dir in list_jobs:
         os.makedirs(os.path.join(calc_root_dir, base_dir), exist_ok=True)
 
-        subfolders = [f.path for f in os.scandir(root_data_dir + base_dir) if f.is_dir()]
+        subfolders = [
+            f.path for f in os.scandir(root_data_dir + base_dir) if f.is_dir()
+        ]
 
         for folder_to_use in subfolders:
             print(f"Processing folder: {folder_to_use}")
@@ -320,21 +320,85 @@ def parsl_wave2(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root_data_dir", type=str, default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/")
-    parser.add_argument("--calc_root_dir", type=str, default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/")
-    parser.add_argument("--orca_cmd", type=str, required=False, help="Path to Orca executable on cluster (required unless --clean is used)")
+    parser.add_argument(
+        "--root_data_dir",
+        type=str,
+        default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/",
+    )
+    parser.add_argument(
+        "--calc_root_dir",
+        type=str,
+        default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out/",
+    )
+    parser.add_argument(
+        "--orca_cmd",
+        type=str,
+        required=False,
+        help="Path to Orca executable on cluster (required unless --clean is used)",
+    )
     parser.add_argument("--scf_MaxIter", type=int, default=600)
-    parser.add_argument("--nprocs", type=int, default=16, help="Number of cores per Orca process (should match cores_per_worker=16)")
-    parser.add_argument("--max_blocks", type=int, default=10, dest="max_blocks", help="Maximum number of Slurm nodes to provision")
-    parser.add_argument("--walltime_hours", type=int, default=2, dest="walltime_hours", help="Walltime in hours (converted to HH:00:00 format)")
-    parser.add_argument("--source_cmd", type=str, default="source ~/.bashrc", dest="source_cmd", help="Command to source bashrc/profile")
-    parser.add_argument("--conda_env", type=str, default="py10mpi", dest="conda_env", help="Conda environment name to activate")
-    parser.add_argument("--conda_base", type=str, default="/usr/WS1/vargas58/miniconda3", dest="conda_base", help="Base path for conda installation")
-    parser.add_argument("--qos", type=str, default="frontier", dest="qos", help="QOS for Slurm allocation")
-    parser.add_argument("--account", type=str, default="ODEFN5169CYFZ", dest="account", help="Account for Slurm allocation")
+    parser.add_argument(
+        "--nprocs",
+        type=int,
+        default=16,
+        help="Number of cores per Orca process (should match cores_per_worker=16)",
+    )
+    parser.add_argument(
+        "--max_blocks",
+        type=int,
+        default=10,
+        dest="max_blocks",
+        help="Maximum number of Slurm nodes to provision",
+    )
+    parser.add_argument(
+        "--walltime_hours",
+        type=int,
+        default=2,
+        dest="walltime_hours",
+        help="Walltime in hours (converted to HH:00:00 format)",
+    )
+    parser.add_argument(
+        "--source_cmd",
+        type=str,
+        default="source ~/.bashrc",
+        dest="source_cmd",
+        help="Command to source bashrc/profile",
+    )
+    parser.add_argument(
+        "--conda_env",
+        type=str,
+        default="py10mpi",
+        dest="conda_env",
+        help="Conda environment name to activate",
+    )
+    parser.add_argument(
+        "--conda_base",
+        type=str,
+        default="/usr/WS1/vargas58/miniconda3",
+        dest="conda_base",
+        help="Base path for conda installation",
+    )
+    parser.add_argument(
+        "--qos",
+        type=str,
+        default="frontier",
+        dest="qos",
+        help="QOS for Slurm allocation",
+    )
+    parser.add_argument(
+        "--account",
+        type=str,
+        default="ODEFN5169CYFZ",
+        dest="account",
+        help="Account for Slurm allocation",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--clean", action="store_true", help="Load Parsl config and run cleanup, then exit")
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Load Parsl config and run cleanup, then exit",
+    )
     args = parser.parse_args()
 
     if args.clean:

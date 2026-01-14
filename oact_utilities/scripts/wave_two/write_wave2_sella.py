@@ -227,10 +227,24 @@ if __name__ == "__main__":
     # actinide_ecp = "def-ECP"
     # non_actinide_basis = "def2-TZVPD"
 
-    parser = argparse.ArgumentParser(description="Prepare Sella/ORCA ASE jobs for Wave 2.")
-    parser.add_argument("--root-data-dir", default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/", help="Root data directory")
-    parser.add_argument("--calc-root-dir", default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out_sella/", help="Calculation root directory")
-    parser.add_argument("--orca-exe", default="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca", help="Path to ORCA executable")
+    parser = argparse.ArgumentParser(
+        description="Prepare Sella/ORCA ASE jobs for Wave 2."
+    )
+    parser.add_argument(
+        "--root-data-dir",
+        default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark/",
+        help="Root data directory",
+    )
+    parser.add_argument(
+        "--calc-root-dir",
+        default="/Users/santiagovargas/dev/oact_utils/data/big_benchmark_out_sella/",
+        help="Calculation root directory",
+    )
+    parser.add_argument(
+        "--orca-exe",
+        default="/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
+        help="Path to ORCA executable",
+    )
     parser.add_argument("--cores", type=int, default=8)
     parser.add_argument("--n-hours", type=int, default=10)
     parser.add_argument("--queue", default="pbatch")
@@ -241,7 +255,9 @@ if __name__ == "__main__":
     parser.add_argument("--actinide-ecp", default="def-ECP")
     parser.add_argument("--non-actinide-basis", default="def2-TZVPD")
     parser.add_argument("--tight-two-e-int", action="store_true")
-    parser.add_argument("--skip-done", action="store_true", help="Skip folders with completed jobs")
+    parser.add_argument(
+        "--skip-done", action="store_true", help="Skip folders with completed jobs"
+    )
     parser.add_argument("--opt", action="store_true", help="Run geometry optimizations")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")

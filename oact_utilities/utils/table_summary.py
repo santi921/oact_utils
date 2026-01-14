@@ -24,7 +24,7 @@ def _parse_npy_into_table(path: str, sella: bool = False) -> Optional[pd.DataFra
         if sella:
             status = 1 if val.get("status", None) is not None else 0
             coords_bohr = val.get("coords_final_bohr", None)
-            #print("coords bohr", coords_bohr)
+            # print("coords bohr", coords_bohr)
             if coords_bohr not in (None, []):
                 coords = np.array(coords_bohr) * BOHR_TO_ANGSTROM
             else:
@@ -32,7 +32,9 @@ def _parse_npy_into_table(path: str, sella: bool = False) -> Optional[pd.DataFra
             energy_list = val.get("sella_energy_frames", None)
             if energy_list == []:
                 energy_list = None
-            delta_energy = (energy_list[-1] - energy_list[0]) if energy_list is not None else None
+            delta_energy = (
+                (energy_list[-1] - energy_list[0]) if energy_list is not None else None
+            )
             elements_numbers = val.get("elements_engrad", None)
             elements_names = (
                 atomic_numbers_to_elements(elements_numbers)
@@ -42,14 +44,14 @@ def _parse_npy_into_table(path: str, sella: bool = False) -> Optional[pd.DataFra
             coords_initial = None
             element_numbers_init = None
             elements_names_init = None
-        
+
         else:
             coords = val.get("coords_final", None)
             elems = val.get("elements_final", None)
             coords_initial = val.get("coords_init", None)
             elems_initial = val.get("elements_init", None)
             status = val.get("status", None)
-            
+
             if status is None:
                 status = 1 if coords is not None else 0
 
@@ -64,7 +66,9 @@ def _parse_npy_into_table(path: str, sella: bool = False) -> Optional[pd.DataFra
             elements_names = elems
 
             element_numbers_init = (
-                elements_to_atomic_numbers(elems_initial) if elems_initial is not None else None
+                elements_to_atomic_numbers(elems_initial)
+                if elems_initial is not None
+                else None
             )
             elements_names_init = elems_initial
 
@@ -75,14 +79,14 @@ def _parse_npy_into_table(path: str, sella: bool = False) -> Optional[pd.DataFra
                     status = 0
                 if np.isnan(delta_energy):
                     status = 0
-                # also if it's 0 
+                # also if it's 0
                 if delta_energy == 0:
                     status = 0
             except Exception:
                 status = 0
-        else: 
+        else:
             status = 0
-            
+
         table.append(
             {
                 "name": key,
@@ -93,7 +97,9 @@ def _parse_npy_into_table(path: str, sella: bool = False) -> Optional[pd.DataFra
                 "coords": coords,
                 "coords_init": coords_initial,
                 "status": int(status),
-                "delta_energy": float(delta_energy) if delta_energy is not None else None,
+                "delta_energy": (
+                    float(delta_energy) if delta_energy is not None else None
+                ),
             }
         )
 
@@ -128,7 +134,7 @@ def summarize_category_status(
     def _series_from_table(df: Optional[pd.DataFrame], prefix: str):
         if df is None:
             return pd.DataFrame()
-        df2 = df.set_index("name")[ ["status", "delta_energy"] ].copy()
+        df2 = df.set_index("name")[["status", "delta_energy"]].copy()
         df2.columns = [f"{prefix}_status", f"{prefix}_delta"]
         return df2
 
@@ -167,7 +173,9 @@ def summarize_all_categories(
     """Summarize status for multiple categories and return concatenated DataFrame."""
     frames = []
     for cat in categories:
-        df = summarize_category_status(cat, omol_lot, x2c_lot, omol_sella_lot, x2c_sella_lot)
+        df = summarize_category_status(
+            cat, omol_lot, x2c_lot, omol_sella_lot, x2c_sella_lot
+        )
         if df is None or df.empty:
             continue
         frames.append(df)

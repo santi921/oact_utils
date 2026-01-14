@@ -1,4 +1,5 @@
-import os 
+import os
+
 
 def write_flux_no_template_sella_ase(
     root_dir: str,
@@ -295,4 +296,3 @@ def write_flux(template_file: str, root_dir: str, two_step: bool = False) -> Non
                 with open(file_name, "w") as f:
                     for line in lines_cleaned_template_modified:
                         f.write(line)
-

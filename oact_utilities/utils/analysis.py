@@ -371,7 +371,6 @@ def get_full_info_all_jobs(
                 perf_info[name]["geo_forces"] = None
                 print(f"Could not extract geometry forces for job in {folder_to_use}.")
 
-        
             geom_info = get_rmsd_start_final(folder_to_use)
             perf_info[name]["rmsd_start_final"] = geom_info.get("rmsd", None)
             perf_info[name]["energies_opt"] = geom_info.get("energies_frames", None)
@@ -379,7 +378,6 @@ def get_full_info_all_jobs(
             perf_info[name]["coords_final"] = geom_info.get("coords_final", None)
             perf_info[name]["elements_init"] = geom_info.get("elements_init", None)
             perf_info[name]["coords_init"] = geom_info.get("coords_init", None)
-
 
     return perf_info
 

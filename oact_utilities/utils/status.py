@@ -242,9 +242,11 @@ def check_sella_complete(root_dir: str, fmax=0.05) -> bool:
     else:
         return 0
 
+
 ################################################################
 # Aggregate functions to check all jobs in a root directory and report the status of each job
 ################################################################
+
 
 def check_sucessful_jobs_sella(
     root_dir: str,
@@ -425,5 +427,3 @@ def check_sucessful_jobs(
         print(
             f"Geometry optimization >1 step (running / fail): {count_geom_beyond_1} / {count_geom_beyond_1_then_fail}"
         )
-
-

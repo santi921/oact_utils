@@ -4,6 +4,7 @@ from typing import Dict, Any
 from oact_utilities.utils.an66 import process_geometry_file, process_multiplicity_file
 from ase import Atoms
 
+
 def fetch_actinides():
     return [
         "Ac",

@@ -17,5 +17,3 @@ def test_get_rmsd_start_final():
         decimal=5,
         err_msg="Energies from no_traj and traj do not match",
     )
-
-
