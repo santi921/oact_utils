@@ -70,3 +70,32 @@ def test_find_and_get_status_inserts_into_db(tmp_path, monkeypatch):
     assert status_map.get(("MolB", "spin_1"))[0] == -1
 
     conn.close()
+
+
+def test_find_and_get_status_prints_table(tmp_path, monkeypatch, capsys):
+    base = tmp_path
+    molA_spin1 = base / "lot1" / "catA" / "MolA" / "spin_1"
+    molA_spin2 = base / "lot1" / "catA" / "MolA" / "spin_2"
+    for p in (molA_spin1, molA_spin2):
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "flux_job.flux").write_text("dummy")
+
+    def fake_check_sella_complete(path):
+        return "spin_2" in path
+
+    def fake_check_job_termination(path):
+        if "spin_1" in path:
+            return 0
+        if "spin_2" in path:
+            return 1
+        return 0
+
+    monkeypatch.setattr(cms, "check_sella_complete", fake_check_sella_complete)
+    monkeypatch.setattr(cms, "check_job_termination", fake_check_job_termination)
+
+    processed = cms.find_and_get_status(str(base), max_depth=6, verbose=False, print_table=True)
+    assert processed == 2
+    captured = capsys.readouterr()
+    assert "Full jobs table" in captured.out
+    # category should be included in the summary line
+    assert "Molecule: MolA (category: catA)" in captured.out

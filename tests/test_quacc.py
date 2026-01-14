@@ -1,4 +1,7 @@
 import os
+import shutil
+import pytest
+from pathlib import Path
 import pickle as pkl
 from oact_utilities.core.orca.recipes import ase_relaxation
 from oact_utilities.utils.create import (
@@ -17,10 +20,12 @@ hartree_to_ev = 27.2114
 
 
 def test_H2(
+    tmp_path,
     orca_cmd: str = "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
 ):
     """QUACC baseline jobs for AN66 dataset"""
-    inp_test = "./files/H2O.inp"
+    HERE = Path(__file__).resolve().parent
+    inp_test = str(HERE / "files" / "H2O.inp")
     atoms = read_geom_from_inp_file(inp_test, ase_format_tf=True)
     charge = atoms.charge
     mult = atoms.spin
@@ -29,7 +34,12 @@ def test_H2(
     actinide_basis = "def2-TZVP"
     actinide_ecp = None
     non_actinide_basis = "def2-TZVP"
-    output_directory = "/Users/santiagovargas/dev/oact_utils/tests/files/quacc/"
+    output_directory = str(tmp_path / "quacc")
+    os.makedirs(output_directory, exist_ok=True)
+
+    # Skip this test if ORCA is not available on the system
+    if not (os.path.exists(orca_cmd) and os.access(orca_cmd, os.X_OK)) and shutil.which("orca") is None:
+        pytest.skip("ORCA executable not found; skipping ORCA-dependent test")
 
     res_dict = ase_relaxation(
         atoms=atoms,
@@ -59,16 +69,16 @@ def test_H2(
 
     """ Normal baseline jobs for AN66 dataset """
 
-    template_file = "./files/template.inp"
-    root_dir = "./files/test_orca/h2o/"
-    # clean root_dir
-    if not os.path.exists(root_dir):
-        os.makedirs(root_dir)
+    template_file = str(HERE / "files" / "template.inp")
+    root_dir = str(tmp_path / "test_orca" / "h2o")
+    # ensure root_dir exists and is empty
+    if os.path.exists(root_dir):
+        for f in os.listdir(root_dir):
+            fp = os.path.join(root_dir, f)
+            if os.path.isfile(fp):
+                os.remove(fp)
     else:
-        # remove all files in root_dir
-        files_in_root = os.listdir(root_dir)
-        for f in files_in_root:
-            os.remove(os.path.join(root_dir, f))
+        os.makedirs(root_dir, exist_ok=True)
 
     lines_cleaned_template = read_template(template_file)
     spin = 1
@@ -103,7 +113,7 @@ def test_H2(
     lines_to_write.append(f"end\n\n")
 
     lines_to_write.append(f"* xyz {charge} {spin}\n")
-    for atom in read_geom_from_inp_file(inp_test):
+    for atom in read_geom_from_inp_file(str(inp_test)):
         element = atom["element"]
         x = atom["x"]
         y = atom["y"]

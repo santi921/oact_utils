@@ -115,7 +115,11 @@ def _ensure_db(conn: sqlite3.Connection) -> None:
 
 
 def find_and_get_status(
-    root: str, max_depth: int = 5, verbose: bool = False, *, dry_run: bool = False
+    root: str,
+    max_depth: int = 5,
+    verbose: bool = False,
+    *,
+    print_table: bool = False,
 ) -> int:
     """Traverse `root` up to `max_depth` and launch flux jobs when `flux_job.flux` is found.
 
@@ -187,30 +191,46 @@ def find_and_get_status(
     c = conn.cursor()
     c.execute(
         """
-        SELECT name, spin,
+        SELECT name, category, spin,
                SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS remaining,
                SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS done,
                SUM(CASE WHEN status = -1 THEN 1 ELSE 0 END) AS failed
         FROM jobs
-        GROUP BY name, spin
-        ORDER BY name, spin
+        GROUP BY name, category, spin
+        ORDER BY name, category, spin
         """
     )
     rows = c.fetchall()
     if rows:
         print("\nSummary of multi-spin jobs:\n")
         current_name = None
-        for name, spin, remaining, done, failed in rows:
-            if name != current_name:
+        current_cat = None
+        for name, category, spin, remaining, done, failed in rows:
+            if name != current_name or category != current_cat:
                 if current_name is not None:
                     print("")
-                print(f"Molecule: {name}")
+                print(f"Molecule: {name} (category: {category})")
                 current_name = name
+                current_cat = category
             print(
                 f"  {spin:<10} -> remaining: {remaining:3d}  done: {done:3d}  failed: {failed:3d}"
             )
     else:
         print("No job records found in DB.")
+
+    # Optionally print the entire jobs table for debugging
+    if print_table:
+        print("\nFull jobs table:\n")
+        c2 = conn.cursor()
+        c2.execute(
+            "SELECT id, path, lot, category, name, spin, status, note, checked_at FROM jobs ORDER BY name, spin"
+        )
+        all_rows = c2.fetchall()
+        if c2.description:
+            headers = [d[0] for d in c2.description]
+            print("\t".join(headers))
+        for r in all_rows:
+            print("\t".join([str(x) for x in r]))
 
     conn.close()
     return processed
@@ -228,17 +248,18 @@ def main() -> None:
         default=5,
         help="Max subdirectory depth to traverse (default: 5)",
     )
-    parser.add_argument(
-        "--dry-run", action="store_true", help="Don't actually run flux, only print"
-    )
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--print-table", action="store_true", help="Print the full jobs table for debugging")
     args = parser.parse_args()
 
     if not os.path.isdir(args.root):
         parser.error(f"Root path does not exist or is not a directory: {args.root}")
 
     n = find_and_get_status(
-        args.root, max_depth=args.max_depth, dry_run=args.dry_run, verbose=args.verbose
+        args.root,
+        max_depth=args.max_depth,
+        verbose=args.verbose,
+        print_table=args.print_table,
     )
     print(f"Total flux jobs launched/found: {n}")
 
