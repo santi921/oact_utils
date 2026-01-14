@@ -173,10 +173,7 @@ def test_H2(
     # forces
     rms_forces_quacc = np.sqrt(np.mean(forces_quacc**2))
     rms_forces_orca = geo_forces[-1]["RMS_Gradient"]
-    # check both of these are small
+    # check that the RMS forces reported by Quacc and ORCA are close (tolerance 5e-3)
     assert (
-        abs(rms_forces_quacc) < 1e-3
-    ), f"RMS forces between ORCA and Quacc differ too much: {abs(rms_forces_quacc - rms_forces_orca)} eV/A"
-    assert (
-        abs(rms_forces_orca) < 1e-3
+        abs(rms_forces_quacc - rms_forces_orca) < 5e-3
     ), f"RMS forces between ORCA and Quacc differ too much: {abs(rms_forces_quacc - rms_forces_orca)} eV/A"

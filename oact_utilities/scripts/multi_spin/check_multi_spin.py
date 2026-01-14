@@ -15,17 +15,12 @@ from __future__ import annotations
 
 import argparse
 import os
-import shlex
 import sqlite3
-import subprocess
 from time import time
 from typing import Iterator, Dict, Any
 from datetime import datetime
 from oact_utilities.utils.status import (
-    done_geo_opt_ase,
-    check_file_termination,
     check_job_termination,
-    check_geometry_steps,
     check_sella_complete,
 )
 

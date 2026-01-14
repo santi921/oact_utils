@@ -17,13 +17,11 @@ import argparse
 import os
 import shlex
 import subprocess
-from time import time
+import glob
+import time
 from typing import Iterator
 from oact_utilities.utils.status import (
-    done_geo_opt_ase,
-    check_file_termination,
     check_job_termination,
-    check_geometry_steps,
     check_sella_complete,
 )
 
@@ -93,16 +91,19 @@ def find_and_launch_flux(
                     # check the most recently edited file in the directory to see if it is within the last hour
                     # skip if it's recently modified and skip_running is True
                     if skip_running:
-                        latest_file = max(
-                            (os.path.join(d, f) for f in os.listdir(d)),
-                            key=os.path.getmtime,
-                        )
-                        latest_mtime = os.path.getmtime(latest_file)
-                        if (time.time() - latest_mtime) < 3600:  #
-                            print(
-                                f"Skipping {d} because it was last modified within the last hour"
-                            )
-                            continue
+                        # only consider files of the form flux-*.out when deciding to skip
+
+
+                        out_files = glob.glob(os.path.join(d, "flux-*.out"))
+                        # if no matching files, do not skip based on recency
+                        if out_files:
+                            latest_file = max(out_files, key=os.path.getmtime)
+                            latest_mtime = os.path.getmtime(latest_file)
+                            if (time.time() - latest_mtime) < 3600:
+                                print(
+                                    f"Skipping {d} because a recent flux-*.out was modified within the last hour"
+                                )
+                                continue
                     ret = subprocess.run(cmd, shell=True)
                     if ret.returncode == 0:
                         print(f"Launched job in {d}")

@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from ase import Atoms
 import time 
+import glob
 
 from oact_utilities.utils.create import write_inputs_ase
 from oact_utilities.core.orca.calc import write_orca_inputs
@@ -163,21 +164,24 @@ def wrapper_write_job_folder(
     if skip_running:
         flux_file = os.path.join(output_folder, "flux_job.flux")
         if os.path.exists(flux_file):
-            # now check if the most recently edited file in the folder was modified within the last hour
-            latest_file = max((os.path.join(output_folder, f) for f in os.listdir(output_folder)), key=os.path.getmtime)
-            latest_mtime = os.path.getmtime(latest_file)
-            if (time.time() - latest_mtime) < 3600:  # 1 hour in seconds
-                print(f"Skipping {output_folder} because it was last modified within the last hour")
-                return
+            # only consider files matching flux-*.out when deciding to skip
+
+            out_files = glob.glob(os.path.join(output_folder, "flux-*.out"))
+            if out_files:
+                latest_file = max(out_files, key=os.path.getmtime)
+                latest_mtime = os.path.getmtime(latest_file)
+                if (time.time() - latest_mtime) < 3600:  # 1 hour in seconds
+                    print(
+                        f"Skipping {output_folder} because a recent flux-*.out was modified within the last hour"
+                    )
+                    return
 
 
     if tf_sella:
-        ret_tf = False
         if skip_done:
             # check if folder has successful flux job
             if check_sella_complete(output_folder):
                 print(f"Skipping {output_folder} - succcessful job found.")
-                ret_tf = True
                 return
 
             if check_job_termination(output_folder) == -1:
