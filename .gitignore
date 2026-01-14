@@ -244,3 +244,4 @@ log
 *pkl
 orca.py
 *.bak.*
+parsl.*
