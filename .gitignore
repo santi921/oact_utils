@@ -245,3 +245,8 @@ log
 orca.py
 *.bak.*
 parsl.*
+*.csv
+*.xlsx
+*.doc
+*.docx
+*.zip
