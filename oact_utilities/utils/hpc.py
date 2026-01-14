@@ -30,6 +30,14 @@ def write_flux_no_template_sella_ase(
         os.makedirs(root_dir)
 
     # go through each subfolder in root_directory and write a flux job for each, scan for .inp files and add them to last line of template
+    # First, if root_dir itself contains .inp files, write a flux job there
+    inp_files_root = [os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.endswith(".inp")]
+    if inp_files_root:
+        out_lines = base_lines.copy()
+        with open(os.path.join(root_dir, "flux_job.flux"), "w") as fh:
+            fh.writelines(out_lines)
+
+    # Then also check subdirectories (backwards compatible behaviour)
     for folder in os.listdir(root_dir):
         folder_to_use = os.path.join(root_dir, folder)
         if not os.path.isdir(folder_to_use):
@@ -75,6 +83,16 @@ def write_flux_no_template(
         os.makedirs(root_dir)
 
     # go through each subfolder in root_directory and write a flux job for each, scan for .inp files and add them to last line of template
+    # If root_dir itself contains .inp files, write a flux job directly there (useful when root_dir is a job folder)
+    inp_files_root = [os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.endswith(".inp")]
+    if inp_files_root and not two_step:
+        out_lines = base_lines.copy()
+        if out_lines[-1].endswith("\n"):
+            out_lines[-1] = out_lines[-1][:-1]
+        out_lines[-1] = out_lines[-1] + " " + " ".join(inp_files_root) + "\n"
+        with open(os.path.join(root_dir, "flux_job.flux"), "w") as fh:
+            fh.writelines(out_lines)
+
     for folder in os.listdir(root_dir):
         folder_to_use = os.path.join(root_dir, folder)
         if not os.path.isdir(folder_to_use):

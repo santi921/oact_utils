@@ -1,9 +1,8 @@
 import os
-from tabnanny import verbose
 import numpy as np
 import pandas as pd
-from pytest import skip
 from ase import Atoms
+import time 
 
 from oact_utilities.utils.create import write_inputs_ase
 from oact_utilities.core.orca.calc import write_orca_inputs
@@ -127,6 +126,7 @@ def wrapper_write_job_folder(
     error_code: int = 0,
     tight_two_e_int: bool = False,
     skip_done: bool = True,
+    skip_running: bool = True,
 ) -> None:
     """
     Create job folders and write input files for either Sella/ASE or ORCA jobs.
@@ -154,9 +154,22 @@ def wrapper_write_job_folder(
     Returns:
         None
     """
-
+    # make sure output folder exists, don't overwrite if it already exists
     if not os.path.exists(output_folder):
         os.makedirs(output_folder, exist_ok=True)
+
+
+    # if skip_running is True, check if there is already a flux job running in the folder
+    if skip_running:
+        flux_file = os.path.join(output_folder, "flux_job.flux")
+        if os.path.exists(flux_file):
+            # now check if the most recently edited file in the folder was modified within the last hour
+            latest_file = max((os.path.join(output_folder, f) for f in os.listdir(output_folder)), key=os.path.getmtime)
+            latest_mtime = os.path.getmtime(latest_file)
+            if (time.time() - latest_mtime) < 3600:  # 1 hour in seconds
+                print(f"Skipping {output_folder} because it was last modified within the last hour")
+                return
+
 
     if tf_sella:
         ret_tf = False
@@ -623,19 +636,20 @@ def main():
         "Dithiocarbamates-dithiophosphates-dithiolates",
     ]
 
-    omol_lot = "/Users/santiagovargas/dev/oact_utils/data/analysis/big_redo/omol/"
-    x2c_lot = "/Users/santiagovargas/dev/oact_utils/data/analysis/big_redo/x2c/"
+    omol_lot = "/usr/workspace/vargas58/multi_spin_data/omol/"
+    x2c_lot = "/usr/workspace/vargas58/multi_spin_data/x2c/"
     omol_sella_lot = (
-        "/Users/santiagovargas/dev/oact_utils/data/analysis/big/omol_sella/"
+        "/usr/workspace/vargas58/multi_spin_data/omol_sella/"
     )
-    x2c_sella_lot = "/Users/santiagovargas/dev/oact_utils/data/analysis/big/x2c_sella/"
+    x2c_sella_lot = "/usr/workspace/vargas58/multi_spin_data/x2c_sella/"
     data_file_spin_lists = (
-        "/Users/santiagovargas/dev/oact_utils/data/big_benchmark_filtered/dataset.xlsx"
+        "/usr/workspace/vargas58/multi_spin_data/dataset.xlsx"
     )
     orca_exe = (
         "/usr/workspace/vargas58/orca_test/orca_6_2_1_linux_x86-64_openmpi411/orca"
     )
-    output_dir = "/Users/santiagovargas/dev/oact_utils/data/new_runs/"
+    output_dir = "/p/lustre5/vargas58/maria_benchmarks/multi_spin/"
+
     for cat in list_cats[1:]:
         test_x2c = os.path.join(x2c_lot, "x2c_{}.npy".format(cat))
         test_omol = os.path.join(omol_lot, "omol_{}.npy".format(cat))

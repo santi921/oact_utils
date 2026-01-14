@@ -117,7 +117,7 @@ def find_and_launch_flux(
 
 
 def main() -> None:
-    # TODO: add folder checking
+    
     parser = argparse.ArgumentParser(
         description="Launch flux_job.flux files under a folder (depth-limited)"
     )
