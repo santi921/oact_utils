@@ -14,6 +14,29 @@
 
 ## Development Workflow
 
+### Installation
+```bash
+pip install -e .          # Basic install
+pip install -e ".[dev]"   # With dev dependencies (pytest, black, ruff, mypy, pre-commit)
+```
+
+### Pre-commit Hooks
+```bash
+pre-commit install        # Set up hooks (run once after cloning)
+pre-commit run --all-files  # Run all hooks manually
+```
+
+**Hooks that run on every commit:**
+- `black` - Code formatting
+- `ruff` - Linting (pycodestyle, pyflakes, isort, bugbear, pyupgrade)
+- `mypy` - Type checking
+- `trailing-whitespace`, `end-of-file-fixer`, `check-yaml` - File hygiene
+
+**Manual hooks (don't block commits):**
+```bash
+pre-commit run --hook-stage manual pytest  # Run pytest manually
+```
+
 ### Running Tests
 ```bash
 pytest tests/
@@ -21,12 +44,9 @@ pytest tests/
 
 ### Linting/Formatting
 ```bash
-black .
-```
-
-### Installation
-```bash
-pip install -e .
+black .                   # Format code
+ruff check . --fix        # Lint and auto-fix
+mypy oact_utilities/      # Type check
 ```
 
 ## Code Style Requirements
@@ -34,7 +54,8 @@ pip install -e .
 - **Type hints**: Always use type hints for function parameters and return values
 - **Docstrings**: All public functions must have docstrings (Google or NumPy style)
 - **No hardcoding**: Avoid hardcoded paths, HPC configs, or system-specific values. Use parameters with sensible defaults instead
-- **Black formatting**: Code must pass `black` formatting
+- **Formatting**: Code must pass `black` (formatting) and `ruff` (linting)
+- **Imports**: Use `ruff` for import sorting (isort-compatible, configured in pyproject.toml)
 
 ## Architecture
 
