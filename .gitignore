@@ -5,6 +5,10 @@ __pycache__/
 
 # C extensions
 *.so
+# Ignore generated per-dataset charge/mult files created during preprocessing
+# These can be regenerated and are noisy for commits
+**/data_charge_mult*.txt
+**/data_charge_multi*.txt
 
 # Distribution / packaging
 .Python

@@ -24,6 +24,7 @@ pip install -e ".[dev]"   # With dev dependencies (pytest, black, ruff, mypy, pr
 ```bash
 pre-commit install        # Set up hooks (run once after cloning)
 pre-commit run --all-files  # Run all hooks manually
+Run tests before committing: `pytest tests/` — ensure all tests pass locally before pushing or opening a PR. Consider adding a local hook or CI step that runs `pytest` as part of pre-commit.
 ```
 
 **Hooks that run on every commit:**
