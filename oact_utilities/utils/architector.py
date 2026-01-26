@@ -10,7 +10,6 @@ import csv
 import math
 import sqlite3
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -132,7 +131,10 @@ def chunk_architector_csv(
                     xyz_str = row.get(column)
                     if pd.isna(xyz_str):
                         continue
-                    frame = str(xyz_str).rstrip() + "\n\n"
+                    # Trim leading/trailing whitespace to avoid blank lines that
+                    # break ASE's XYZ reader, then ensure an extra blank line
+                    # separates frames.
+                    frame = str(xyz_str).strip() + "\n\n"
                     cf.write(frame)
 
                     elems = parse_xyz_elements(str(xyz_str))
