@@ -15,12 +15,14 @@
 ## Development Workflow
 
 ### Installation
+
 ```bash
 pip install -e .          # Basic install
 pip install -e ".[dev]"   # With dev dependencies (pytest, black, ruff, mypy, pre-commit)
 ```
 
 ### Pre-commit Hooks
+
 ```bash
 pre-commit install        # Set up hooks (run once after cloning)
 pre-commit run --all-files  # Run all hooks manually
@@ -28,22 +30,26 @@ Run tests before committing: `pytest tests/` — ensure all tests pass locally b
 ```
 
 **Hooks that run on every commit:**
+
 - `black` - Code formatting
 - `ruff` - Linting (pycodestyle, pyflakes, isort, bugbear, pyupgrade)
 - `mypy` - Type checking
 - `trailing-whitespace`, `end-of-file-fixer`, `check-yaml` - File hygiene
 
 **Manual hooks (don't block commits):**
+
 ```bash
 pre-commit run --hook-stage manual pytest  # Run pytest manually
 ```
 
 ### Running Tests
+
 ```bash
 pytest tests/
 ```
 
 ### Linting/Formatting
+
 ```bash
 black .                   # Format code
 ruff check . --fix        # Lint and auto-fix
@@ -89,11 +95,13 @@ oact_utilities/
 ## HPC Systems
 
 ### Primary: Tuolumne (LLNL)
+
 - Scheduler: **Flux**
 - Job files: `flux_job.flux`
 - Submit command: `flux batch <job_file>`
 
 ### Future: DoD Systems
+
 - Scheduler: **SLURM**
 - Job files: `slurm_job.sh`
 - Submit command: `sbatch <job_file>`
@@ -103,32 +111,42 @@ When writing HPC utilities, always support both Flux and SLURM with configurable
 ## Common Tasks for Claude
 
 ### 1. HPC Template Generation
+
 Creating job submission scripts from custom datasets. Key files:
+
 - `oact_utilities/utils/hpc.py` - Job file writers
 - `oact_utilities/utils/jobs.py` - Job launchers
 
 ### 2. Job Monitoring & Dashboards
+
 Status checking and visualization of running jobs:
+
 - `oact_utilities/utils/status.py` - Job termination/completion checks
 - `oact_utilities/utils/analysis.py` - Results parsing
 
 ### 3. Analysis Utilities
+
 Parsing ORCA outputs, extracting energies, gradients, timings:
+
 - `oact_utilities/utils/analysis.py`
 - `oact_utilities/scripts/wave_two/analysis_*.py`
 
 ### 4. Debugging Job Failures
+
 Check these locations for common issues:
+
 - ORCA `.out` files for calculation errors
 - `sella.log` for optimization failures
 - HPC scheduler output for resource issues
 
 ### 5. New ORCA Recipes
+
 Adding calculation types in `oact_utilities/core/orca/recipes.py`. Follow existing patterns like `single_point_calculation` and `ase_relaxation`.
 
 ## Testing Patterns
 
 Tests live in `tests/` with test data in `tests/files/`. When adding new functionality:
+
 1. Add corresponding test in `tests/test_<module>.py`
 2. Use fixtures for common test data
 3. Mock ORCA calls for unit tests (actual ORCA not available in CI)

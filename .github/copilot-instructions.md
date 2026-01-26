@@ -10,7 +10,7 @@ Quick actions
 - Install dev env: `pip install -e .` and `pip install -e "[dev]"`.
 - Run linters/formatters: `pre-commit install` then `pre-commit run --all-files` (or run `black .`, `ruff check . --fix`, `mypy oact_utilities/`).
 - Run tests: `pytest tests/` (ORCA is not available in CI—tests mock ORCA where needed).
- - Run tests before committing: always run `pytest tests/` and ensure all tests pass locally before creating a PR or committing changes. It's recommended to run `pre-commit run --all-files` (which can be configured to include `pytest`) as part of your commit workflow.
+- Run tests before committing: always run `pytest tests/` and ensure all tests pass locally before creating a PR or committing changes. It's recommended to run `pre-commit run --all-files` (which can be configured to include `pytest`) as part of your commit workflow.
 
 Where to look first (high value files)
 
