@@ -8,10 +8,77 @@ from __future__ import annotations
 
 import csv
 import math
+import pickle
 import sqlite3
 from pathlib import Path
 
 import pandas as pd
+
+
+def chunk_architector_to_lmdb(
+    csv_path: str | Path,
+    lmdb_path: str | Path,
+    chunk_size: int = 10000,
+    column: str = "aligned_csd_core",
+    status: str = "ready",
+    map_size: int = 1 << 40,
+) -> Path:
+    """Chunk an Architector CSV and store structures and metadata into an LMDB.
+
+    Each LMDB entry stores a pickled dict with keys: orig_index, chunk_file,
+    index_in_chunk, elements, natoms, status, geometry.
+
+    This function requires the `lmdb` package. If it is not installed,
+    ImportError is raised.
+    """
+    try:
+        import lmdb
+    except Exception as exc:  # pragma: no cover - depends on env
+        raise ImportError("lmdb package is required to write ASELMDB files") from exc
+
+    csv_path = Path(csv_path)
+    lmdb_path = Path(lmdb_path)
+    lmdb_path.parent.mkdir(parents=True, exist_ok=True)
+
+    env = lmdb.open(str(lmdb_path), map_size=map_size)
+
+    df = pd.read_csv(csv_path)
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in {csv_path}")
+
+    total = len(df)
+    n_chunks = math.ceil(total / float(chunk_size)) if total else 0
+
+    with env.begin(write=True) as txn:
+        for ci in range(n_chunks):
+            start = ci * chunk_size
+            end = min((ci + 1) * chunk_size, total)
+            chunk = df.iloc[start:end]
+            chunk_file = f"chunk_{ci}.xyz"
+            idx_in_chunk = 0
+            for orig_idx, row in chunk.iterrows():
+                xyz_str = row.get(column)
+                if pd.isna(xyz_str):
+                    continue
+                elems = parse_xyz_elements(str(xyz_str))
+                natoms = len(elems)
+
+                rec = {
+                    "orig_index": int(orig_idx),
+                    "chunk_file": chunk_file,
+                    "index_in_chunk": idx_in_chunk,
+                    "elements": ";".join(elems),
+                    "natoms": natoms,
+                    "status": status,
+                    "geometry": str(xyz_str),
+                }
+                key = f"{orig_idx}".encode()
+                txn.put(key, pickle.dumps(rec))
+                idx_in_chunk += 1
+
+    env.sync()
+    env.close()
+    return lmdb_path
 
 
 def parse_xyz_elements(xyz_str: str) -> list[str]:

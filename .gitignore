@@ -9,6 +9,8 @@ __pycache__/
 # These can be regenerated and are noisy for commits
 **/data_charge_mult*.txt
 **/data_charge_multi*.txt
+*ipynb_checkpoints
+*ipynb
 
 # Distribution / packaging
 .Python

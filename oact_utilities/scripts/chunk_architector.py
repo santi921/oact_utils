@@ -34,6 +34,10 @@ if __name__ == "__main__":
         "--db",
         help="Optional path to sqlite DB to log structures (default: <output_dir>/manifest.db)",
     )
+    ap.add_argument(
+        "--lmdb",
+        help="Optional path to LMDB directory to write ASELMDB-style records (disabled if omitted)",
+    )
     args = ap.parse_args()
 
     db_path = args.db if args.db is not None else Path(args.output_dir) / "manifest.db"
@@ -45,4 +49,13 @@ if __name__ == "__main__":
         column=args.column,
         db_path=db_path,
     )
+    if args.lmdb:
+        # Lazy import to keep CLI lightweight when lmdb is not needed.
+        from oact_utilities.utils.architector import chunk_architector_to_lmdb
+
+        lmdb_path = Path(args.lmdb)
+        lmdb_path = chunk_architector_to_lmdb(
+            args.csv_path, lmdb_path, chunk_size=args.chunk_size, column=args.column
+        )
+        print(f"Wrote LMDB to: {lmdb_path}")
     print(f"Wrote manifest to: {manifest}")
