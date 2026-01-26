@@ -132,9 +132,9 @@ def chunk_architector_csv(
                     if pd.isna(xyz_str):
                         continue
                     # Trim leading/trailing whitespace to avoid blank lines that
-                    # break ASE's XYZ reader, then ensure an extra blank line
-                    # separates frames.
-                    frame = str(xyz_str).strip() + "\n\n"
+                    # break ASE's XYZ reader, then write a single newline after
+                    # the frame (no trailing empty frame at EOF).
+                    frame = str(xyz_str).strip() + "\n"
                     cf.write(frame)
 
                     elems = parse_xyz_elements(str(xyz_str))
