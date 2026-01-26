@@ -6,7 +6,9 @@
 #SBATCH --job-name=parsl-coordinator
 
 source /p/home/ritwik/miniconda3/etc/profile.d/conda.sh
-conda activate omol-orca
+# Use the py10 conda environment by default (local standard for py10 users)
+CONDA_ENV="py10"
+conda activate "${CONDA_ENV}"
 
 cd /p/home/ritwik/dev/oact_utils/oact_utilities
 
@@ -17,5 +19,5 @@ python scripts/run_jobs_quacc_wave2.py \
     --nprocs 16 \
     --max_blocks 10 \
     --walltime_hours 160 \
-    --conda_env omol-orca \
+    --conda_env "${CONDA_ENV}" \
     --conda_base /p/home/ritwik/miniconda3
