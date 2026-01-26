@@ -34,7 +34,7 @@ def chunk_architector_to_lmdb(
     try:
         import lmdb
     except Exception as exc:  # pragma: no cover - depends on env
-        raise ImportError("lmdb package is required to write ASELMDB files") from exc
+        raise ImportError("lmdb package is required to write lmdb files") from exc
 
     csv_path = Path(csv_path)
     lmdb_path = Path(lmdb_path)
