@@ -1,7 +1,5 @@
 import os
 import sqlite3
-from pathlib import Path
-import pytest
 import time
 
 from oact_utilities.scripts.multi_spin import check_multi_spin as cms
@@ -94,7 +92,9 @@ def test_find_and_get_status_prints_table(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cms, "check_sella_complete", fake_check_sella_complete)
     monkeypatch.setattr(cms, "check_job_termination", fake_check_job_termination)
 
-    processed = cms.find_and_get_status(str(base), max_depth=6, verbose=False, print_table=True)
+    processed = cms.find_and_get_status(
+        str(base), max_depth=6, verbose=False, print_table=True
+    )
     assert processed == 2
     captured = capsys.readouterr()
     assert "Full jobs table" in captured.out
@@ -102,8 +102,9 @@ def test_find_and_get_status_prints_table(tmp_path, monkeypatch, capsys):
     assert "Molecule: MolA (category: catA)" in captured.out
     # legend should be present
     assert "Status legend" in captured.out
-    # ensure legend appears before the table
-    assert captured.out.index("Full jobs table") < captured.out.index("Status legend")
+    # ensure legend appears after the "Full jobs table" header (i.e., above the table)
+    full_idx = captured.out.index("Full jobs table")
+    assert captured.out.find("Status legend", full_idx) > full_idx
 
 
 def test_find_and_get_status_detects_running(tmp_path, monkeypatch):
@@ -164,7 +165,9 @@ def test_running_age_threshold(tmp_path, monkeypatch):
     monkeypatch.setattr(cms, "check_job_termination", fake_check_job_termination)
 
     # running_age_seconds = 20 should mark it as running
-    processed = cms.find_and_get_status(str(base), max_depth=6, verbose=False, running_age_seconds=20)
+    processed = cms.find_and_get_status(
+        str(base), max_depth=6, verbose=False, running_age_seconds=20
+    )
     assert processed == 1
     conn = sqlite3.connect(str(base / "multi_spin_jobs.sqlite3"))
     c = conn.cursor()
@@ -175,7 +178,9 @@ def test_running_age_threshold(tmp_path, monkeypatch):
 
     # remove DB and run with small threshold so it should NOT be running
     os.remove(str(base / "multi_spin_jobs.sqlite3"))
-    processed = cms.find_and_get_status(str(base), max_depth=6, verbose=False, running_age_seconds=5)
+    processed = cms.find_and_get_status(
+        str(base), max_depth=6, verbose=False, running_age_seconds=5
+    )
     assert processed == 1
     conn = sqlite3.connect(str(base / "multi_spin_jobs.sqlite3"))
     c = conn.cursor()

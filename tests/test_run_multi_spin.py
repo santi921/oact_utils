@@ -1,7 +1,6 @@
 import os
-import time
 import subprocess
-from pathlib import Path
+import time
 
 from oact_utilities.scripts.multi_spin import run_multi_spin as rms
 
@@ -26,12 +25,17 @@ def test_skip_running_respects_flux_out(tmp_path, monkeypatch):
 
     def fake_run(cmd, shell=True):
         called["ran"] = True
-        class R: returncode = 0
+
+        class R:
+            returncode = 0
+
         return R()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launched = rms.find_and_launch_flux(str(tmp_path), max_depth=1, dry_run=False, skip_running=True)
+    launched = rms.find_and_launch_flux(
+        str(tmp_path), max_depth=1, dry_run=False, skip_running=True
+    )
     # since flux-1.out is recent, it should skip and not launch
     assert launched == 0
     assert not called["ran"]
@@ -52,12 +56,17 @@ def test_skip_running_ignores_non_matching_files(tmp_path, monkeypatch):
 
     def fake_run(cmd, shell=True):
         called["ran"] = True
-        class R: returncode = 0
+
+        class R:
+            returncode = 0
+
         return R()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launched = rms.find_and_launch_flux(str(tmp_path), max_depth=1, dry_run=False, skip_running=True)
+    launched = rms.find_and_launch_flux(
+        str(tmp_path), max_depth=1, dry_run=False, skip_running=True
+    )
     # since no flux-*.out exists, it should NOT skip and should attempt launch
     assert launched == 1
     assert called["ran"]

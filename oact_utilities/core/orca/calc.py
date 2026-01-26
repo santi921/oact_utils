@@ -1,7 +1,7 @@
 # modified from om-data: https://github.com/Open-Catalyst-Project/om-data
 
-import re
 import os
+import re
 from enum import Enum
 from shutil import which
 
@@ -11,7 +11,6 @@ from ase.optimize import LBFGS
 from sella import Sella
 
 from oact_utilities.utils.create import read_xyz_from_orca
-
 
 # ECP sizes taken from Table 6.5 in the Orca 5.0.3 manual
 ECP_SIZE = {
@@ -369,7 +368,7 @@ def get_orca_blocks(
                 print("Using looser SCF settings due to previous SCF failure.")
                 # we know it's the first block we need to modify
                 orcablocks[0] = re.sub(
-                    r"Convergence Tight", f"Convergence Medium", orcablocks[0]
+                    r"Convergence Tight", "Convergence Medium", orcablocks[0]
                 )
 
     elif simple_input == "x2c":
@@ -433,8 +432,8 @@ def get_orca_blocks(
             else:
                 orcablocks.append(f'  NewGTO {elem} "{non_actinide_basis}" end')
 
-    orcablocks.append(f"end")
-    orcablocks.append(f"%pal\n nprocs " + str(cores) + "\nend")
+    orcablocks.append("end")
+    orcablocks.append("%pal\n nprocs " + str(cores) + "\nend")
 
     # Include estimate of memory needs
     mem_est = get_mem_estimate(atoms, vertical, mult)
@@ -464,7 +463,7 @@ def get_orca_blocks(
                 index = orcablocks.index(block_line)
                 orcablocks[index] = re.sub(
                     r"THRESH 1e-12\n  TCUT 1e-13\n",
-                    f"THRESH 1e-13\n  TCUT 1e-14\n",
+                    "THRESH 1e-13\n  TCUT 1e-14\n",
                     block_line,
                 )
                 break
@@ -530,7 +529,7 @@ def write_orca_inputs(
 
     # print(orcablocks)
 
-    mem_est = get_mem_estimate(atoms, vertical, mult)
+    # mem_est = get_mem_estimate(atoms, vertical, mult)
 
     if orca_path is not None:
         MyOrcaProfile = OrcaProfile(command=orca_path)

@@ -14,12 +14,13 @@ The script accepts a single positional argument (root folder). Optional flags:
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import shlex
 import subprocess
-import glob
 import time
-from typing import Iterator
+from collections.abc import Iterator
+
 from oact_utilities.utils.status import (
     check_job_termination,
     check_sella_complete,
@@ -35,7 +36,7 @@ def iter_dirs_limited(root: str, max_depth: int) -> Iterator[str]:
     if not os.path.isdir(root):
         return
 
-    for current_dir, dirs, files in os.walk(root):
+    for current_dir, dirs, _ in os.walk(root):
         # compute relative depth
         rel = os.path.relpath(current_dir, root)
         if rel == ".":
@@ -93,7 +94,6 @@ def find_and_launch_flux(
                     if skip_running:
                         # only consider files of the form flux-*.out when deciding to skip
 
-
                         out_files = glob.glob(os.path.join(d, "flux-*.out"))
                         # if no matching files, do not skip based on recency
                         if out_files:
@@ -118,7 +118,7 @@ def find_and_launch_flux(
 
 
 def main() -> None:
-    
+
     parser = argparse.ArgumentParser(
         description="Launch flux_job.flux files under a folder (depth-limited)"
     )

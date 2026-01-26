@@ -1,18 +1,15 @@
-from sympy import root
-from spyrmsd.rmsd import rmsd
-
 import os
-from typing import Any, List, Dict, Tuple
-from ase.io.trajectory import TrajectoryReader
+
 import numpy as np
+from ase.io.trajectory import TrajectoryReader
+from spyrmsd.rmsd import rmsd
 
 from oact_utilities.utils.an66 import dict_to_numpy
 from oact_utilities.utils.create import (
-    read_xyz_single_file,
     elements_to_atomic_numbers,
     read_geom_from_inp_file,
+    read_xyz_single_file,
 )
-
 from oact_utilities.utils.status import (
     check_file_termination,
     check_job_termination,
@@ -21,7 +18,7 @@ from oact_utilities.utils.status import (
 )
 
 
-def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
+def get_rmsd_start_final(root_dir: str) -> tuple:
     """
     Calculate RMSD between initial and final geometries from a trajectory file.
     Also extract energies from the trajectory or log file.
@@ -55,7 +52,7 @@ def get_rmsd_start_final(root_dir: str) -> Tuple[float, List[float]]:
 
         print(f"Reading trajectory from {traj_output} for RMSD calculation.")
 
-        with open(traj_output, "r") as f:
+        with open(traj_output) as f:
             lines = f.readlines()
         lines_coords = [
             i for i, line in enumerate(lines) if line.startswith("Coordinates")
@@ -98,7 +95,7 @@ def get_rmsd_between_traj_frames(traj_file: str) -> dict:
     traj = TrajectoryReader(traj_file)
     atoms_init_traj = traj[0]
     atoms_final_traj = traj[-1]
-    elements_init_traj = [atom.symbol for atom in atoms_init_traj]
+    # elements_init_traj = [atom.symbol for atom in atoms_init_traj]
     coords_init_traj = atoms_init_traj.get_positions()
     elements_final_traj = [atom.symbol for atom in atoms_final_traj]
     coords_final_traj = atoms_final_traj.get_positions()
@@ -114,7 +111,7 @@ def get_rmsd_between_traj_frames(traj_file: str) -> dict:
 
     energies_frames = []
     rms_forces_frames = []
-    for i, frame in enumerate(traj):
+    for _, frame in enumerate(traj):
         energy = frame.get_potential_energy()
         energies_frames.append(energy)
         force = frame.get_calculator().get_forces(frame)
@@ -133,7 +130,7 @@ def get_rmsd_between_traj_frames(traj_file: str) -> dict:
     return ret_dict
 
 
-def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
+def get_geo_forces(log_file: str) -> list:
     """
     Extract geometry optimization forces from log file.
     Args:
@@ -145,17 +142,17 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
     list_info = []
 
     # read output_file, find lines between
-    with open(log_file, "r") as f:
+    with open(log_file) as f:
         lines = f.readlines()
 
     trigger = "Geometry convergence"
-    trigger_end_a = (
-        "-------------------------------------------------------------------------"
-    )
-    trigger_end_b = "........................................................"
+    # trigger_end_a = (
+    #    "-------------------------------------------------------------------------"
+    # )
+    # trigger_end_b = "........................................................"
 
     info_block_tf = False
-    for i, line in enumerate(lines):
+    for _, line in enumerate(lines):
 
         if trigger in line.strip():
             info_dict = {}
@@ -181,7 +178,7 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
     return list_info
 
 
-""" Format  of orca.engrad file: 
+""" Format  of orca.engrad file:
 # Number of atoms
 #
  148
@@ -204,7 +201,7 @@ def get_geo_forces(log_file: str) -> List[Dict[str, float]]:
 """
 
 
-def get_engrad(engrad_file: str) -> Dict[str, Any]:
+def get_engrad(engrad_file: str) -> dict:
     """
     Extract energy and gradient information from orca.engrad file.
     Args:
@@ -214,7 +211,7 @@ def get_engrad(engrad_file: str) -> Dict[str, Any]:
     """
 
     dict_info = {}
-    with open(engrad_file, "r") as f:
+    with open(engrad_file) as f:
         lines = f.readlines()
     for i, line in enumerate(lines):
         if "The current total energy in Eh" in line:
@@ -244,7 +241,7 @@ def get_engrad(engrad_file: str) -> Dict[str, Any]:
     return dict_info
 
 
-def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
+def find_timings_and_cores(log_file: str) -> list:
     """
     Extract number of processors and timing information from log file.
     Args:
@@ -263,7 +260,7 @@ def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
         return None, None
 
     # iterate through files_out until you hit line with "nprocs" line
-    with open(log_file, "r") as f:
+    with open(log_file) as f:
         # don't read whole file into memory
         for line in f:
             if "nprocs" in line:
@@ -294,7 +291,7 @@ def find_timings_and_cores(log_file: str) -> Tuple[int, float]:
 
 def get_full_info_all_jobs(
     root_dir: str, flux_tf: bool, check_many: bool = False, verbose: bool = False
-) -> List[Tuple[str, int, float]]:
+) -> list:
     """
     Get full performance and geometry info for all jobs in a root directory.
     Args:
@@ -329,7 +326,7 @@ def get_full_info_all_jobs(
                 if not files_out:
                     files_out = [f for f in files if f.endswith("logs")]
 
-            if len(files_out) > 1 and type(files_out) is list:
+            if len(files_out) > 1 and isinstance(files_out, list):
                 files_out.sort(
                     key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)),
                     reverse=True,
@@ -357,19 +354,23 @@ def get_full_info_all_jobs(
                 nprocs, total_time_seconds = find_timings_and_cores(log_file)
                 perf_info[name]["nprocs"] = nprocs
                 perf_info[name]["total_time_seconds"] = total_time_seconds
-            except:
+
+            except (FileNotFoundError, ValueError, IndexError, KeyError) as e:
                 perf_info[name]["nprocs"] = None
                 perf_info[name]["total_time_seconds"] = None
                 print(
-                    f"Could not extract timings and cores for job in {folder_to_use}."
+                    f"Could not extract timings and cores for job in {folder_to_use}: {e}"
                 )
 
             try:
                 geo_forces = get_geo_forces(log_file=log_file)
                 perf_info[name]["geo_forces"] = geo_forces
-            except:
+
+            except (FileNotFoundError, ValueError, IndexError, KeyError) as e:
                 perf_info[name]["geo_forces"] = None
-                print(f"Could not extract geometry forces for job in {folder_to_use}.")
+                print(
+                    f"Could not extract geometry forces for job in {folder_to_use}: {e}"
+                )
 
             geom_info = get_rmsd_start_final(folder_to_use)
             perf_info[name]["rmsd_start_final"] = geom_info.get("rmsd", None)
@@ -382,7 +383,7 @@ def get_full_info_all_jobs(
     return perf_info
 
 
-def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> List[Tuple[str, int, float]]:
+def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> list:
     """
     Get full performance and geometry info for all jobs in a root directory.
     Args:
@@ -425,7 +426,7 @@ def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> List[Tuple[str, int, f
                 if not files_out:
                     files_out = [f for f in files if f.endswith("logs")]
 
-            if len(files_out) > 1 and type(files_out) is list:
+            if len(files_out) > 1 and isinstance(files_out, list):
                 files_out.sort(
                     key=lambda x: os.path.getmtime(os.path.join(folder_to_use, x)),
                     reverse=True,
@@ -470,7 +471,7 @@ def get_energy_from_log_file(log_file):
     """
     energy_arr = []
 
-    with open(log_file, "r") as f:
+    with open(log_file) as f:
         # don't load all into memory
         for line in f:
             if "Total Energy       :" in line:
@@ -495,7 +496,7 @@ def parse_sella_log(sella_log_file, filter: bool = False) -> dict:
     if not os.path.exists(sella_log_file):
         return False
     # read sella.log and check for final forces
-    with open(sella_log_file, "r") as f:
+    with open(sella_log_file) as f:
         lines = f.readlines()
     forces = []
     steps = []
@@ -515,49 +516,9 @@ def parse_sella_log(sella_log_file, filter: bool = False) -> dict:
     return dict_ret
 
 
-def get_rmsd_between_traj_frames(traj_file: str) -> dict:
-    # traj_file = root + "opt.traj"
-    traj = TrajectoryReader(traj_file)
-    atoms_init_traj = traj[0]
-    atoms_final_traj = traj[-1]
-    elements_init_traj = [atom.symbol for atom in atoms_init_traj]
-    coords_init_traj = atoms_init_traj.get_positions()
-    elements_final_traj = [atom.symbol for atom in atoms_final_traj]
-    coords_final_traj = atoms_final_traj.get_positions()
-
-    # get rmsd between first and last frame
-    from spyrmsd.rmsd import rmsd
-
-    atomic_numbers = elements_to_atomic_numbers(elements_final_traj)
-    rmsd_value = rmsd(
-        coords_final_traj, coords_init_traj, atomic_numbers, atomic_numbers
-    )
-    # print energy at each frame
-
-    energies_frames = []
-    rms_forces_frames = []
-    for i, frame in enumerate(traj):
-        energy = frame.get_potential_energy()
-        energies_frames.append(energy)
-        force = frame.get_calculator().get_forces(frame)
-        # compute rms force from numpy
-        mean_squared_force = np.mean(force**2)
-        rms_force = float(np.sqrt(mean_squared_force))
-        rms_forces_frames.append(rms_force)
-
-    ret_dict = {
-        "rmsd_value": rmsd_value,
-        "elements_final": elements_final_traj,
-        "coords_final": coords_final_traj,
-        "energies_frames": energies_frames,
-        "rms_forces_frames": rms_forces_frames,
-    }
-    return ret_dict
-
-
 def get_full_info_all_jobs_sella(
     root_dir: str, verbose: bool = False, fmax: float = 0.05
-) -> List[Tuple[str, int, float]]:
+) -> list:
     """
     Get full performance and geometry info for all jobs in a root directory.
     Args:
@@ -592,7 +553,7 @@ def get_full_info_all_jobs_sella(
                 status = -1
 
             # check if the files "opt.traj", "sella.log", "orca.engrad" exist
-            files = os.listdir(folder_to_use)
+            # files = os.listdir(folder_to_use)
             traj_file = os.path.join(folder_to_use, "opt.traj")
             sella_log = os.path.join(folder_to_use, "sella.log")
             engrad_file = os.path.join(folder_to_use, "orca.engrad")
@@ -608,7 +569,7 @@ def get_full_info_all_jobs_sella(
                 perf_info[name]["coords_final"] = rmsd_traj["coords_final"]
                 perf_info[name]["energies_opt"] = rmsd_traj["energies_frames"]
                 perf_info[name]["rms_forces_frames"] = rmsd_traj["rms_forces_frames"]
-            except:
+            except (FileNotFoundError, ValueError, IndexError, KeyError, OSError) as e:
                 perf_info[name]["rmsd_start_final"] = None
                 perf_info[name]["elements_final"] = None
                 perf_info[name]["coords_final"] = None
@@ -616,7 +577,7 @@ def get_full_info_all_jobs_sella(
                 perf_info[name]["rms_forces_frames"] = None
                 if verbose:
                     print(
-                        f"Could not extract RMSD from traj for job in {folder_to_use}."
+                        f"Could not extract RMSD from traj for job in {folder_to_use}: {e}"
                     )
 
             try:
@@ -626,13 +587,13 @@ def get_full_info_all_jobs_sella(
                 perf_info[name]["sella_energy_frames"] = dict_sella.get(
                     "energy_frames", []
                 )
-            except:
+            except (FileNotFoundError, ValueError, IndexError, KeyError) as e:
                 perf_info[name]["sella_steps"] = None
                 perf_info[name]["sella_forces"] = None
                 perf_info[name]["sella_energy_frames"] = None
                 if verbose:
                     print(
-                        f"Could not extract Sella log info for job in {folder_to_use}."
+                        f"Could not extract Sella log info for job in {folder_to_use}: {e}"
                     )
 
             try:
@@ -647,13 +608,13 @@ def get_full_info_all_jobs_sella(
                 perf_info[name]["coords_final_bohr"] = dict_engrad.get(
                     "coords_bohr", None
                 )
-            except:
+            except (FileNotFoundError, ValueError, IndexError, KeyError) as e:
                 perf_info[name]["energy_final_Eh"] = None
                 perf_info[name]["gradient_final_Eh_per_bohr"] = None
                 perf_info[name]["elements_engrad"] = None
                 perf_info[name]["coords_final_bohr"] = None
                 if verbose:
                     print(
-                        f"Could not extract orca.engrad info for job in {folder_to_use}."
+                        f"Could not extract orca.engrad info for job in {folder_to_use}: {e}"
                     )
     return perf_info

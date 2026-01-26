@@ -1,13 +1,15 @@
+import os
 import pickle as pkl
-from oact_utilities.core.orca.recipes import single_point_calculation
-from oact_utilities.utils.create import *
-import time
 import random
-import parsl
+import time
 
-from parsl.executors.threads import ThreadPoolExecutor
-from parsl.config import Config
+import parsl
 from parsl import python_app
+from parsl.config import Config
+from parsl.executors.threads import ThreadPoolExecutor
+
+from oact_utilities.core.orca.recipes import single_point_calculation
+from oact_utilities.utils.create import process_geometry_file, process_multiplicity_file
 
 should_stop = False
 
@@ -39,7 +41,7 @@ def base_config(n_workers: int = 128) -> Config:
                     init_blocks=1,
                     max_blocks=1,
                 ),
-                cores_per_worker=4, 
+                cores_per_worker=4,
                 max_workers_per_node=n_workers,
             )
             ],
@@ -87,11 +89,11 @@ def jobs_wrapper_an66(
                 return
             # check if the folder has recently modified files, if so skip
             files_in_job = os.listdir(root_directory_job)
-            recent_modification = False
+            # recent_modification = False
             for f in files_in_job:
                 file_path = os.path.join(root_directory_job, f)
                 if os.path.getmtime(file_path) > time.time() - 900:  # 15 mins
-                    recent_modification = True
+                    # recent_modification = True
                     print(f"Job for {job} is currently running. Skipping.")
                     break
 
@@ -152,7 +154,7 @@ def parsl_an66(
     print(parsl_config)
     ####################
 
-    os.environ["OMP_NUM_THREADS"] = "{}".format(nprocs)
+    os.environ["OMP_NUM_THREADS"] = f"{nprocs}"
     # signal.signal(signal.SIGINT, handle_signal)
     # signal.signal(signal.SIGTERM, handle_signal)
 
@@ -169,13 +171,13 @@ def parsl_an66(
         os.makedirs(root_directory)
 
     futures = []
-    for draw in range(n_draws):
+    for _ in range(n_draws):
         # randomly select a job
         ind = random.randint(0, len(job_list) - 1)
         job = job_list[ind]
         atoms = dict_geoms_ase[job]
-        nbo_tf = False
-        charge = 0
+        # nbo_tf = False
+        # charge = 0
         mult = spin_list[ind]
 
         futures.append(

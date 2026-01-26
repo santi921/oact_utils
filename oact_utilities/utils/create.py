@@ -1,8 +1,9 @@
 import os
-from periodictable import elements as ptelements
-from typing import Dict, Any
-from oact_utilities.utils.an66 import process_geometry_file, process_multiplicity_file
+
 from ase import Atoms
+from periodictable import elements as ptelements
+
+from oact_utilities.utils.an66 import process_geometry_file, process_multiplicity_file
 
 
 def fetch_actinides():
@@ -38,7 +39,7 @@ def atomic_numbers_to_elements(atomic_numbers: list[int]) -> list[str]:
 def read_geom_from_inp_file(
     inp_file: str, ase_format_tf: bool = False
 ) -> list[dict[str, float | str]]:
-    with open(inp_file, "r") as f:
+    with open(inp_file) as f:
         lines = f.readlines()
 
     geom_start = False
@@ -86,7 +87,7 @@ def read_geom_from_inp_file(
 
 
 def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], str]:
-    with open(xyz_file, "r") as f:
+    with open(xyz_file) as f:
         lines = f.readlines()
 
     num_atoms = int(lines[0].strip())
@@ -103,7 +104,7 @@ def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], s
 
 
 def read_xyz_from_orca(xyz_file: str) -> Atoms:
-    with open(xyz_file, "r") as f:
+    with open(xyz_file) as f:
         lines = f.readlines()
     # find first non-empty line
     index_first_non_empty = 0
@@ -132,12 +133,12 @@ def read_xyz_from_orca(xyz_file: str) -> Atoms:
 
 
 def read_template(template_file: str) -> list[str]:
-    with open(template_file, "r") as f:
+    with open(template_file) as f:
         lines = f.readlines()
 
     # remove lines that start with #* and * and lines in between
     lines_cleaned_template = []
-    in_block = False
+    # in_block = False
     for line in lines:
         if not line.startswith("#") and not line.startswith("\n"):
             lines_cleaned_template.append(line)
@@ -168,7 +169,7 @@ def write_orca_input(
 
     lines_to_write.append(f"%pal\n nprocs {cores} \nend\n\n")
 
-    lines_to_write.append(f"%basis\n")
+    lines_to_write.append("%basis\n")
     for element in element_set:
         if element in actinide_list:
             if os.path.isfile(actinide_basis):
@@ -190,7 +191,7 @@ def write_orca_input(
                     f'  NewGTO {element} "{non_actinide_basis}" end\n'
                 )
 
-    lines_to_write.append(f"end\n\n")
+    lines_to_write.append("end\n\n")
 
     lines_to_write.append(f"* xyz {charge} {spin}\n")
     for atom in dict_geoms[name]:
@@ -271,8 +272,8 @@ def write_inputs_ase(
     # write the above template to output_directory
 
     with open(os.path.join(output_directory, "orca.py"), "w") as f:
-        f.write(f"import time \n")
-        f.write(f"import os\n")
+        f.write("import time \n")
+        f.write("import os\n")
         f.write("from oact_utilities.core.orca.recipes import pure_ase_relaxation\n")
         f.write("from oact_utilities.utils.create import read_geom_from_inp_file\n\n")
         f.write("def main():\n")
@@ -289,7 +290,7 @@ def write_inputs_ase(
         f.write(f"    cores={cores}\n")
         f.write(f"    actinide_basis = '{actinide_basis}'\n")
         if actinide_ecp is None:
-            f.write(f"    actinide_ecp = None\n")
+            f.write("    actinide_ecp = None\n")
         else:
             f.write(f"    actinide_ecp = '{actinide_ecp}'\n")
         f.write(f"    non_actinide_basis = '{non_actinide_basis}'\n")

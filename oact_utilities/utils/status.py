@@ -1,10 +1,9 @@
 import os
-from typing import List, Optional
 
 
 def check_file_termination(file_path: str) -> int:
     # read last line of file_path
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         lines = f.readlines()
     # if last line contains "ORCA TERMINATED NORMALLY", then return 1
     for line in lines[-5:]:
@@ -26,10 +25,11 @@ def done_geo_opt_ase(opt_log_file, fmax_cutoff=0.01):
     """
 
     # iterate thgouth lines to find final forces
-    with open(opt_log_file, "r") as f:
-        line = f.readlines()
+    with open(opt_log_file) as f:
+        lines = f.readlines()
+
     forces = []
-    for line in line:
+    for line in lines:
         # check if it's a float
         if line.split()[-1].replace(".", "", 1).isdigit():
             forces.append(float(line.split()[3]))
@@ -93,7 +93,7 @@ def check_job_termination(
         output_file = dir + "/" + files_out[0]
 
         # read last line of output_file
-        with open(output_file, "r") as f:
+        with open(output_file) as f:
             lines = f.readlines()
         # if last line contains "ORCA TERMINATED NORMALLY", then get geometry forces
         # ORCA TERMINATED NORMALLY
@@ -159,7 +159,7 @@ def check_geometry_steps(
 
         # read last line of output_file
         # scan through backwards to find geometry optimization cycles
-        with open(output_file, "r") as f:
+        with open(output_file) as f:
             lines = f.readlines()
         # reverse lines and traverse to find "GEOMETRY OPTIMIZATION CYCLE"
         # example line: *                GEOMETRY OPTIMIZATION CYCLE   1            *
@@ -181,33 +181,39 @@ def pull_log_file(root_dir: str) -> str:
         root_dir (str): The directory to search for log files.
     Returns:
         str: The path to the most recent log file.
+    Raises:
+        FileNotFoundError: If no log files are found in the directory.
     """
     try:
-        log_file = [f for f in os.listdir(root_dir) if f.endswith("logs")]
+        files = os.listdir(root_dir)
+    except (FileNotFoundError, PermissionError) as e:
+        # raise .. from err
+        raise FileNotFoundError(f"Could not access directory {root_dir}: {e}") from e
+    # Try to find .logs files first
+    log_file = [f for f in files if f.endswith("logs")]
 
-        if len(log_file) == 0:
-            log_file = [f for f in os.listdir(root_dir) if f.endswith(".out")]
+    # If none, try .out files
+    if len(log_file) == 0:
+        log_file = [f for f in files if f.endswith(".out")]
 
-        if len(log_file) > 1:
-            log_file.sort(
-                key=lambda x: os.path.getmtime(os.path.join(root_dir, x)),
-                reverse=True,
-            )
-        log_file = os.path.join(root_dir, log_file[0])
+    # If still none, try flux files
+    if len(log_file) == 0:
+        log_file = [f for f in files if "flux-" in f]
 
-    except:
-        # check for "flux-"
-        # get all files that contains  flux-
-        files_flux = [f for f in os.listdir(root_dir) if "flux-" in f]
-        files_flux.sort(
+    # If we still have no log files, raise an error
+    if len(log_file) == 0:
+        raise FileNotFoundError(
+            f"No log files (.logs, .out, or flux-*) found in {root_dir}"
+        )
+
+    # If multiple files, sort by modification time (most recent first)
+    if len(log_file) > 1:
+        log_file.sort(
             key=lambda x: os.path.getmtime(os.path.join(root_dir, x)),
             reverse=True,
         )
-        log_file = os.path.join(root_dir, files_flux[0])
-    # if type(log_file) is list:
-    #    log_file = log_file[0]
 
-    return log_file
+    return os.path.join(root_dir, log_file[0])
 
 
 def check_sella_complete(root_dir: str, fmax=0.05) -> bool:
@@ -225,7 +231,7 @@ def check_sella_complete(root_dir: str, fmax=0.05) -> bool:
     if not os.path.exists(sella_log):
         return 0
     # read sella.log and check for final forces
-    with open(sella_log, "r") as f:
+    with open(sella_log) as f:
         lines = f.readlines()
     forces = []
     for line in lines:
@@ -268,8 +274,8 @@ def check_sucessful_jobs_sella(
     count_folder = 0
     count_success = 0
     count_still_running = 0
-    count_geom_beyond_1_then_fail = 0
-    count_geom_beyond_1 = 0
+    # count_geom_beyond_1_then_fail = 0
+    # count_geom_beyond_1 = 0
     # iterate through every subfolder in root_dir
 
     for folder in os.listdir(root_dir):
@@ -282,7 +288,7 @@ def check_sucessful_jobs_sella(
             )
 
             # check if folder has successful flux job
-            if sella_log_tf == True:
+            if sella_log_tf:
                 if verbose:
                     print(f"Job in {folder_to_use} completed successfully.")
                 count_success += 1
@@ -329,7 +335,7 @@ def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:
                     break
 
             # read last line of output_file
-            with open(output_file, "r") as f:
+            with open(output_file) as f:
                 lines = f.readlines()
             # if last line contains "ORCA TERMINATED NORMALLY", then get geometry forces
             if "ORCA TERMINATED NORMALLY" not in lines[-2]:

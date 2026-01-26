@@ -1,17 +1,14 @@
-from typing import Any, List, Dict, Tuple
 import pandas as pd
 from ase import Atoms
 
 
-def process_geometry_file(
-    file: str, ase_format_tf: bool = False
-) -> Dict[str, List[Dict[str, Any]]]:
+def process_geometry_file(file: str, ase_format_tf: bool = False) -> dict:
 
     if ase_format_tf:
         syms_list = []
         coords_list = []
 
-    with open(file, "r") as f:
+    with open(file) as f:
         lines = f.readlines()
 
     dict_geoms = {}
@@ -45,7 +42,7 @@ def process_geometry_file(
 
 
 def process_multiplicity_file(file: str) -> pd.DataFrame:
-    with open(file, "r") as f:
+    with open(file) as f:
         lines = f.readlines()
 
     # if a line starts with a letter, if it starts with an integer it it is part of the previous line and should be merged
@@ -69,7 +66,7 @@ def process_multiplicity_file(file: str) -> pd.DataFrame:
     return df_multiplicity
 
 
-def dict_to_numpy(atoms: List[Dict[str, Any]]) -> Tuple[List[str], Any]:
+def dict_to_numpy(atoms: list) -> tuple:
     import numpy as np
 
     elements = [atom["element"] for atom in atoms]

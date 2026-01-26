@@ -1,6 +1,5 @@
 from oact_utilities.utils.status import check_sucessful_jobs
 
-
 if __name__ == "__main__":
 
     flux_tf = True

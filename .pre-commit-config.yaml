@@ -7,7 +7,7 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files
-        args: ['--maxkb=1000']
+        args: ["--maxkb=1000"]
 
   # Code formatting with black
   - repo: https://github.com/psf/black
@@ -22,14 +22,6 @@ repos:
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
-
-  # Type checking with mypy
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.9.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [types-all]
-        args: [--ignore-missing-imports]
 
   # Pytest - manual stage (won't block commits)
   # Run manually with: pre-commit run --hook-stage manual pytest

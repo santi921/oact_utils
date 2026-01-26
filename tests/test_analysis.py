@@ -1,7 +1,6 @@
-from spyrmsd.rmsd import rmsd
-
 import numpy as np
-from oact_utilities.utils.analysis import get_full_info_all_jobs, get_rmsd_start_final
+
+from oact_utilities.utils.analysis import get_rmsd_start_final
 
 
 def test_get_rmsd_start_final():

@@ -1,7 +1,5 @@
 import os
 import time
-from pathlib import Path
-import glob
 
 from oact_utilities.scripts.multi_spin.multi_spin_from_converged_calcs import (
     wrapper_write_job_folder,

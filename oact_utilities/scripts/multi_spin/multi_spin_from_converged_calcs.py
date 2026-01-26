@@ -1,19 +1,19 @@
+import glob
 import os
+import time
+
 import numpy as np
 import pandas as pd
 from ase import Atoms
-import time 
-import glob
 
-from oact_utilities.utils.create import write_inputs_ase
 from oact_utilities.core.orca.calc import write_orca_inputs
+from oact_utilities.utils.create import write_inputs_ase
 from oact_utilities.utils.hpc import (
-    write_flux_no_template_sella_ase,
     write_flux_no_template,
+    write_flux_no_template_sella_ase,
 )
-from oact_utilities.utils.table_summary import _parse_npy_into_table
 from oact_utilities.utils.status import check_job_termination, check_sella_complete
-
+from oact_utilities.utils.table_summary import _parse_npy_into_table
 
 actinides_list = [
     "Ac",
@@ -159,7 +159,6 @@ def wrapper_write_job_folder(
     if not os.path.exists(output_folder):
         os.makedirs(output_folder, exist_ok=True)
 
-
     # if skip_running is True, check if there is already a flux job running in the folder
     if skip_running:
         flux_file = os.path.join(output_folder, "flux_job.flux")
@@ -175,7 +174,6 @@ def wrapper_write_job_folder(
                         f"Skipping {output_folder} because a recent flux-*.out was modified within the last hour"
                     )
                     return
-
 
     if tf_sella:
         if skip_done:
@@ -642,23 +640,19 @@ def main():
 
     omol_lot = "/usr/workspace/vargas58/multi_spin_data/omol/"
     x2c_lot = "/usr/workspace/vargas58/multi_spin_data/x2c/"
-    omol_sella_lot = (
-        "/usr/workspace/vargas58/multi_spin_data/omol_sella/"
-    )
+    omol_sella_lot = "/usr/workspace/vargas58/multi_spin_data/omol_sella/"
     x2c_sella_lot = "/usr/workspace/vargas58/multi_spin_data/x2c_sella/"
-    data_file_spin_lists = (
-        "/usr/workspace/vargas58/multi_spin_data/dataset.xlsx"
-    )
+    data_file_spin_lists = "/usr/workspace/vargas58/multi_spin_data/dataset.xlsx"
     orca_exe = (
         "/usr/workspace/vargas58/orca_test/orca_6_2_1_linux_x86-64_openmpi411/orca"
     )
     output_dir = "/p/lustre5/vargas58/maria_benchmarks/multi_spin/"
 
     for cat in list_cats[1:]:
-        test_x2c = os.path.join(x2c_lot, "x2c_{}.npy".format(cat))
-        test_omol = os.path.join(omol_lot, "omol_{}.npy".format(cat))
-        test_x2c_sella = os.path.join(x2c_sella_lot, "{}x2c_sella_.npy".format(cat))
-        test_omol_sella = os.path.join(omol_sella_lot, "{}omol_sella_.npy".format(cat))
+        test_x2c = os.path.join(x2c_lot, f"x2c_{cat}.npy")
+        test_omol = os.path.join(omol_lot, f"omol_{cat}.npy")
+        test_x2c_sella = os.path.join(x2c_sella_lot, f"{cat}x2c_sella_.npy")
+        test_omol_sella = os.path.join(omol_sella_lot, f"{cat}omol_sella_.npy")
 
         reopt_for_different_spins(
             path_omol=test_omol,

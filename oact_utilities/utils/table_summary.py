@@ -1,11 +1,11 @@
 import os
-from typing import Iterable, Optional
+from collections.abc import Iterable
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 from .create import atomic_numbers_to_elements, elements_to_atomic_numbers
-
 
 BOHR_TO_ANGSTROM = 0.529177210903
 

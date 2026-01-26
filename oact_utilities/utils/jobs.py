@@ -1,5 +1,4 @@
 import os
-from typing import Any, List, Dict, Optional
 
 from oact_utilities.utils.status import check_job_termination, check_sella_complete
 

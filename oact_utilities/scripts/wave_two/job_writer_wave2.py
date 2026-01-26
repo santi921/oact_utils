@@ -1,15 +1,13 @@
+import argparse
 import os
-import time
 
-from oact_utilities.utils.baselines import (
-    process_multiplicity_file,
-    process_geometry_file,
-)
 from oact_utilities.core.orca.calc import write_orca_inputs
+from oact_utilities.utils.baselines import (
+    process_geometry_file,
+    process_multiplicity_file,
+)
 from oact_utilities.utils.hpc import write_flux_no_template, write_slurm_no_template
 from oact_utilities.utils.status import check_job_termination
-
-import argparse
 
 
 def write_flux_orca_wave_two(
@@ -115,7 +113,7 @@ def write_flux_orca_wave_two(
                 if k in df_multiplicity.keys()
             }
 
-            for mol_name, vals in dict_geoms.items():
+            for mol_name, _ in dict_geoms.items():
                 # print(f"Processing molecule: {mol_name}, geometry with {len(vals)} atoms")
                 # if orca.inp already exists in folder_to_use/mol_name, delete
                 if replicates > 1:
