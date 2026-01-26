@@ -3,30 +3,17 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from enum import Enum
-import os
 
 from ase.calculators.orca import ORCA, OrcaProfile, OrcaTemplate
-
-from oact_utilities.core.orca import calc
 from quacc import get_settings
 from quacc.runners.ase import Runner
 from quacc.schemas.ase import Summarize
 from quacc.utils.dicts import recursive_dict_merge
 
-from oact_utilities.core.orca.calc import (
-    read_xyz_from_orca,
-    get_mem_estimate,
-    get_orca_blocks,
-    Vertical,
-)
-
-
 if TYPE_CHECKING:
     from typing import Any
 
     from ase.atoms import Atoms
-
     from quacc.types import Filenames, OptParams, OptSchema, RunSchema, SourceDirectory
 
 _LABEL = OrcaTemplate()._label  # skipcq: PYL-W0212

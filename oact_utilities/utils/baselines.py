@@ -1,17 +1,14 @@
-from typing import Any, List, Dict, Tuple
+import numpy as np
 import pandas as pd
 from ase import Atoms
-import numpy as np
 
 
-def process_geometry_file(
-    file: str, ase_format_tf: bool = False
-) -> Dict[str, List[Dict[str, Any]]]:
+def process_geometry_file(file: str, ase_format_tf: bool = False) -> dict:
     if ase_format_tf:
         syms_list = []
         coords_list = []
 
-    with open(file, "r") as f:
+    with open(file) as f:
         lines = f.readlines()
 
     dict_geoms = {}
@@ -25,12 +22,12 @@ def process_geometry_file(
             if line.strip() == "":
                 continue
 
+            molecule = line.split()[-1]
+
             if ase_format_tf and ind != 0:
                 dict_geoms[molecule] = Atoms(symbols=syms_list, positions=coords_list)
                 syms_list = []
                 coords_list = []
-
-            molecule = line.split()[-1]
 
             if not ase_format_tf:
                 dict_geoms[molecule] = []
@@ -55,7 +52,7 @@ def process_geometry_file(
 
 
 def process_multiplicity_file(file: str) -> pd.DataFrame:
-    with open(file, "r") as f:
+    with open(file) as f:
         lines = f.readlines()
 
     # iterate through lines_cleaned, first word is molecule, second is zpve, third is multiplicity
@@ -75,7 +72,7 @@ def process_multiplicity_file(file: str) -> pd.DataFrame:
     return data
 
 
-def dict_to_numpy(atoms: List[Dict[str, Any]]) -> Tuple[List[str], Any]:
+def dict_to_numpy(atoms: list) -> tuple:
 
     elements = [atom["element"] for atom in atoms]
     coords = np.array([[atom["x"], atom["y"], atom["z"]] for atom in atoms])

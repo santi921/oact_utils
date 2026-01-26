@@ -1,6 +1,6 @@
 import os
-from oact_utilities.utils.jobs import launch_flux_jobs, launch_slurm_jobs
 
+from oact_utilities.utils.jobs import launch_slurm_jobs
 
 if __name__ == "__main__":
 

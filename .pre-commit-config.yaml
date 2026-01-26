@@ -1,0 +1,36 @@
+repos:
+  # General file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+
+  # Code formatting with black
+  - repo: https://github.com/psf/black
+    rev: 24.3.0
+    hooks:
+      - id: black
+        language_version: python3
+
+  # Fast linting with ruff (replaces flake8, isort, etc.)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.4
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+
+  # Pytest - manual stage (won't block commits)
+  # Run manually with: pre-commit run --hook-stage manual pytest
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: pytest tests/ -v --tb=short
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [manual]

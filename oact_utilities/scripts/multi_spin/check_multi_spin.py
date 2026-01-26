@@ -16,9 +16,10 @@ from __future__ import annotations
 import argparse
 import os
 import sqlite3
+from collections.abc import Iterator
 from time import time
-from typing import Iterator, Dict, Any
-from datetime import datetime
+from typing import Any
+
 from oact_utilities.utils.status import (
     check_job_termination,
     check_sella_complete,
@@ -34,7 +35,7 @@ def iter_dirs_limited(root: str, max_depth: int) -> Iterator[str]:
     if not os.path.isdir(root):
         return
 
-    for current_dir, dirs, files in os.walk(root):
+    for current_dir, dirs, _ in os.walk(root):
         # compute relative depth
         rel = os.path.relpath(current_dir, root)
         if rel == ".":
@@ -48,7 +49,7 @@ def iter_dirs_limited(root: str, max_depth: int) -> Iterator[str]:
         yield current_dir
 
 
-def parse_info_from_path(path: str) -> Dict[str, Any]:
+def parse_info_from_path(path: str) -> dict[str, Any]:
     """Parse information from the path string in a robust way.
 
     Attempts to locate a part beginning with 'spin' and extracts the spin
@@ -57,7 +58,7 @@ def parse_info_from_path(path: str) -> Dict[str, Any]:
     Returns keys: 'lot', 'cat', 'name', 'spin'. Missing values are ''.
     """
     parts = [p for p in path.split(os.sep) if p]
-    info: Dict[str, Any] = {"lot": "", "cat": "", "name": "", "spin": ""}
+    info: dict[str, Any] = {"lot": "", "cat": "", "name": "", "spin": ""}
 
     # find index of element that starts with 'spin'
     spin_idx = None
@@ -134,9 +135,9 @@ def find_and_get_status(
             processed += 1
             # default is remaining (0). Determine status in order:
             # 1) failed (-1) 2) completed (1) 3) running (2 if recent flux-*.out) 4) remaining (0)
-            
+
             term = check_job_termination(d)
-            
+
             if term == -1:
                 if verbose:
                     print(f"Found failed job at {d}")
@@ -162,7 +163,9 @@ def find_and_get_status(
                     latest_mtime = os.path.getmtime(latest_out)
                     if (time() - latest_mtime) < running_age_seconds:
                         if verbose:
-                            print(f"Found recent flux output {latest_out}; marking as running")
+                            print(
+                                f"Found recent flux output {latest_out}; marking as running"
+                            )
                         status = 2
                         note = f"running_recent:{os.path.basename(latest_out)}"
 
@@ -231,7 +234,9 @@ def find_and_get_status(
         print("No job records found in DB.")
 
     # Print legend for status codes
-    print("\nStatus legend:\n  running: 2 (recent flux-*.out)\n  remaining: 0 (no run detected)\n  done: 1 (completed)\n  failed: -1 (failed)\n")
+    print(
+        "\nStatus legend:\n  running: 2 (recent flux-*.out)\n  remaining: 0 (no run detected)\n  done: 1 (completed)\n  failed: -1 (failed)\n"
+    )
 
     # Optionally print the entire jobs table for debugging (pretty formatted)
     if print_table:
@@ -255,8 +260,13 @@ def find_and_get_status(
         except Exception:
             # fallback simple table
             if headers:
-                widths = [max(len(str(h)), max((len(str(r[i])) for r in all_rows), default=0)) for i, h in enumerate(headers)]
-                header_line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+                widths = [
+                    max(len(str(h)), max((len(str(r[i])) for r in all_rows), default=0))
+                    for i, h in enumerate(headers)
+                ]
+                header_line = " | ".join(
+                    h.ljust(widths[i]) for i, h in enumerate(headers)
+                )
                 sep = "-+-".join("".ljust(widths[i], "-") for i in range(len(widths)))
                 print(header_line)
                 print(sep)
@@ -283,7 +293,11 @@ def main() -> None:
         help="Max subdirectory depth to traverse (default: 5)",
     )
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("--print-table", action="store_true", help="Print the full jobs table for debugging")
+    parser.add_argument(
+        "--print-table",
+        action="store_true",
+        help="Print the full jobs table for debugging",
+    )
     parser.add_argument(
         "--running-age-seconds",
         type=int,

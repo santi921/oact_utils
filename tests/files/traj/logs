@@ -3,31 +3,31 @@
                                  * O   R   C   A *
                                  *****************
 
-                                            #,                                       
-                                            ###                                      
-                                            ####                                     
-                                            #####                                    
-                                            ######                                   
-                                           ########,                                 
-                                     ,,################,,,,,                         
-                               ,,#################################,,                 
-                          ,,##########################################,,             
-                       ,#########################################, ''#####,          
-                    ,#############################################,,   '####,        
-                  ,##################################################,,,,####,       
-                ,###########''''           ''''###############################       
-              ,#####''   ,,,,##########,,,,          '''####'''          '####       
-            ,##' ,,,,###########################,,,                        '##       
-           ' ,,###''''                  '''############,,,                           
+                                            #,
+                                            ###
+                                            ####
+                                            #####
+                                            ######
+                                           ########,
+                                     ,,################,,,,,
+                               ,,#################################,,
+                          ,,##########################################,,
+                       ,#########################################, ''#####,
+                    ,#############################################,,   '####,
+                  ,##################################################,,,,####,
+                ,###########''''           ''''###############################
+              ,#####''   ,,,,##########,,,,          '''####'''          '####
+            ,##' ,,,,###########################,,,                        '##
+           ' ,,###''''                  '''############,,,
          ,,##''                                '''############,,,,        ,,,,,,###''
-      ,#''                                            '''#######################'''  
-     '                                                          ''''####''''         
-             ,#######,   #######,   ,#######,      ##                                
-            ,#'     '#,  ##    ##  ,#'     '#,    #''#        ,####,    ,#,          
-            ##       ##  ##   ,#'  ##            #'  '#       #'       ,# #          
-            ##       ##  #######   ##           ,######,      #####,      #          
-            '#,     ,#'  ##    ##  '#,     ,#' ,#      #,     #,   #      #          
-             '#######'   ##     ##  '#######'  #'      '#     '####' #    #          
+      ,#''                                            '''#######################'''
+     '                                                          ''''####''''
+             ,#######,   #######,   ,#######,      ##
+            ,#'     '#,  ##    ##  ,#'     '#,    #''#        ,####,    ,#,
+            ##       ##  ##   ,#'  ##            #'  '#       #'       ,# #
+            ##       ##  #######   ##           ,######,      #####,      #
+            '#,     ,#'  ##    ##  '#,     ,#' ,#      #,     #,   #      #
+             '#######'   ##     ##  '#######'  #'      '#     '####' #    #
 
 
 
@@ -57,101 +57,101 @@
 
 
  With contributions from (in alphabetic order):
-[Max-Planck-Institut fuer Kohlenforschung]                               
-  Daniel Aravena         : Magnetic Suceptibility                        
+[Max-Planck-Institut fuer Kohlenforschung]
+  Daniel Aravena         : Magnetic Suceptibility
   Michael Atanasov       : Ab Initio Ligand Field Theory (pilot matlab implementation)
-  Alexander A. Auer      : GIAO ZORA, VPT2 properties, NMR spectrum      
-  Ute Becker             : All parallelization in ORCA, NUMFREQ, NUMCALC 
-  Giovanni Bistoni       : ED, misc. LED, open-shell LED, HFLD           
-  Dmytro Bykov           : pre 5.0 version of the SCF Hessian            
-  Marcos Casanova-Páez   : Triplet and SCS-CIS(D). UHF-(DLPNO)-IP/EA/STEOM-CCSD. UHF-CVS-IP/STEOM-CCSD   
-  Vijay G. Chilkuri      : MRCI spin determinant printing, contributions to CSF-ICE 
-  Pauline Colinet        : FMM embedding                                 
-  Dipayan Datta          : RHF DLPNO-CCSD density                        
-  Achintya Kumar Dutta   : EOM-CC, STEOM-CC                              
-  Nicolas Foglia         : Exact transition moments, OPA infrastructure, MCD improvements    
-  Dmitry Ganyushin       : Spin-Orbit,Spin-Spin,Magnetic field MRCI      
-  Miquel Garcia-Rates    : C-PCM and meta-GGA Hessian, CCSD/C-PCM, Gaussian charge scheme 
-  Tiago L. C. Gouveia    : GS-ROHF, GS-ROCIS                             
-  Yang Guo               : DLPNO-NEVPT2, F12-NEVPT2, CIM, IAO-localization        
-  Andreas Hansen         : Spin unrestricted coupled pair/coupled cluster methods 
-  Ingolf Harden          : AUTO-CI MPn and infrastructure                
-  Benjamin Helmich-Paris : MC-RPA, TRAH-(SCF,CASSCF), AVAS, COSX integrals, SCF dyn. polar., MC-PDFT, srDFT 
-  Lee Huntington         : MR-EOM, pCC                                   
-  Robert Izsak           : Overlap fitted RIJCOSX, COSX-SCS-MP3, EOM     
-  Riya Kayal             : Wick's Theorem for AUTO-CI, AUTO-CI UHF-CCSDT 
+  Alexander A. Auer      : GIAO ZORA, VPT2 properties, NMR spectrum
+  Ute Becker             : All parallelization in ORCA, NUMFREQ, NUMCALC
+  Giovanni Bistoni       : ED, misc. LED, open-shell LED, HFLD
+  Dmytro Bykov           : pre 5.0 version of the SCF Hessian
+  Marcos Casanova-Páez   : Triplet and SCS-CIS(D). UHF-(DLPNO)-IP/EA/STEOM-CCSD. UHF-CVS-IP/STEOM-CCSD
+  Vijay G. Chilkuri      : MRCI spin determinant printing, contributions to CSF-ICE
+  Pauline Colinet        : FMM embedding
+  Dipayan Datta          : RHF DLPNO-CCSD density
+  Achintya Kumar Dutta   : EOM-CC, STEOM-CC
+  Nicolas Foglia         : Exact transition moments, OPA infrastructure, MCD improvements
+  Dmitry Ganyushin       : Spin-Orbit,Spin-Spin,Magnetic field MRCI
+  Miquel Garcia-Rates    : C-PCM and meta-GGA Hessian, CCSD/C-PCM, Gaussian charge scheme
+  Tiago L. C. Gouveia    : GS-ROHF, GS-ROCIS
+  Yang Guo               : DLPNO-NEVPT2, F12-NEVPT2, CIM, IAO-localization
+  Andreas Hansen         : Spin unrestricted coupled pair/coupled cluster methods
+  Ingolf Harden          : AUTO-CI MPn and infrastructure
+  Benjamin Helmich-Paris : MC-RPA, TRAH-(SCF,CASSCF), AVAS, COSX integrals, SCF dyn. polar., MC-PDFT, srDFT
+  Lee Huntington         : MR-EOM, pCC
+  Robert Izsak           : Overlap fitted RIJCOSX, COSX-SCS-MP3, EOM
+  Riya Kayal             : Wick's Theorem for AUTO-CI, AUTO-CI UHF-CCSDT
   Emily Kempfer          : AUTO-CI RHF CISDT and CCSDT, approximate NEVPT4
-  Christian Kollmar      : KDIIS, OOCD, Brueckner-CCSD(T), CCSD density, CASPT2, CASPT2-K, improved NEVPT2 
-  Axel Koslowski         : Symmetry handling                             
-  Simone Kossmann        : meta-GGA functionals, TD-DFT gradient, OOMP2, (MP2 Hessian; deprecated post 5.0) 
+  Christian Kollmar      : KDIIS, OOCD, Brueckner-CCSD(T), CCSD density, CASPT2, CASPT2-K, improved NEVPT2
+  Axel Koslowski         : Symmetry handling
+  Simone Kossmann        : meta-GGA functionals, TD-DFT gradient, OOMP2, (MP2 Hessian; deprecated post 5.0)
   Lucas Lang             : DCDCAS, Hyperfine gauge corrections, ICE-SOC+SSC
-  Marvin Lechner         : AUTO-CI (C++ implementation), FIC-MRCC        
-  Spencer Leger          : CASSCF response                               
-  Dagmar Lenk            : GEPOL surface, SMD, ORCA-2-JSON               
+  Marvin Lechner         : AUTO-CI (C++ implementation), FIC-MRCC
+  Spencer Leger          : CASSCF response
+  Dagmar Lenk            : GEPOL surface, SMD, ORCA-2-JSON
   Dimitrios Liakos       : Extrapolation schemes; Compound Job, Property file
-  Dimitrios Manganas     : Further ROCIS development; embedding schemes. LFT, Crystal Embedding 
-  Dimitrios Pantazis     : SARC Basis sets                               
-  Anastasios Papadopoulos: AUTO-CI, single reference methods and gradients 
-  Taras Petrenko         : pre 6.0 DFT Hessian and TD-DFT gradient,  ECA, NRVS 
-  Petra Pikulova         : Analytic Raman intensities                    
-  Peter Pinski           : DLPNO-MP2, DLPNO-MP2 Gradient                 
-  Shashank Vittal Rao    : ES-AILFT, MagRelax                            
-  Christoph Reimann      : Effective Core Potentials                     
-  Marius Retegan         : Local ZFS, SOC                                
-  Christoph Riplinger    : Optimizer, TS searches, QM/MM, DLPNO-CCSD(T), (RO)-DLPNO pert. Triples 
+  Dimitrios Manganas     : Further ROCIS development; embedding schemes. LFT, Crystal Embedding
+  Dimitrios Pantazis     : SARC Basis sets
+  Anastasios Papadopoulos: AUTO-CI, single reference methods and gradients
+  Taras Petrenko         : pre 6.0 DFT Hessian and TD-DFT gradient,  ECA, NRVS
+  Petra Pikulova         : Analytic Raman intensities
+  Peter Pinski           : DLPNO-MP2, DLPNO-MP2 Gradient
+  Shashank Vittal Rao    : ES-AILFT, MagRelax
+  Christoph Reimann      : Effective Core Potentials
+  Marius Retegan         : Local ZFS, SOC
+  Christoph Riplinger    : Optimizer, TS searches, QM/MM, DLPNO-CCSD(T), (RO)-DLPNO pert. Triples
   Michael Roemelt        : Original ROCIS implementation, recursive CI coupling coefficients
-  Masaaki Saitow         : Open-shell DLPNO-CCSD energy and density      
-  Barbara Sandhoefer     : DKH picture change effects                    
-  Yorick L. A. Schmerwitz: GMF and freeze-and-release deltaSCF, NEB S-IDPP initial path                    
+  Masaaki Saitow         : Open-shell DLPNO-CCSD energy and density
+  Barbara Sandhoefer     : DKH picture change effects
+  Yorick L. A. Schmerwitz: GMF and freeze-and-release deltaSCF, NEB S-IDPP initial path
   Kantharuban Sivalingam : CASSCF convergence/infrastructure, NEVPT2, NEVPT3, NEVPT4(SD), FIC-MRCI and CEPA variants
-  Bernardo de Souza      : ESD, SOC TD-DFT                               
-  Georgi L. Stoychev     : AutoAux, RI-MP2 NMR, DLPNO-MP2 response, X2C  
-  Van Anh Tran           : RI-MP2 g-tensors                              
-  Willem Van den Heuvel  : Paramagnetic NMR                              
-  Zikuan Wang            : NOTCH, Electric field optimization            
-  Frank Wennmohs         : Technical directorship and infrastructure     
-  Hang Xu                : AUTO-CI-Response properties                   
-                                                                         
-[FACCTs GmbH]                                                            
-  Markus Bursch, Nicolas Foglia, Miquel Garcia-Rates, Ingolf Harden, Hagen Neugebauer, Anastasios Papadopoulos, 
-  Christoph Riplinger, Bernardo de Souza, Georgi L. Stoychev                                                    
-                                                                 
-  APM, various basis sets, CI-OPT, improved COSX, DLPNO-Multilevel,           
-  DOCKER, DRACO, updates on ESD, Fragmentator, GOAT, IRC, LR-CPCM, L-BFGS, MBIS, meta-GGA TD-DFT gradient, ML-optimized integration grids, 
-  MM, NACMEs, nearIR, NEB, NEB-TS, NL-DFT gradient (VV10), 2- and 3-layer-ONIOM, interface openCOSMO-RS, QMMM,   
-  Crystal-QMMM, RESP, rigid body optimization, SF, symmetry and pop. for TD-DFT, various functionals, SOLVATOR                                   
-                                                                         
-[Other institutions]                                                     
-  V. Asgeirsson          : NEB                                           
-  Christoph Bannwarth    : sTDA-DFT, sTD-DFT, PBEh-3c, B97-3c, D3        
-  Giovanni Bistoni       : ETS/NOCV, ADLD/ADEX, COVALED                  
-  Martin Brehm           : Molecular dynamics                            
-  Ronald Cardenas        : ETS/NOCV                                      
-  Martina Colucci        : COVALED                                       
-  Sebastian Ehlert       : rSCAN, r2SCAN, r2SCAN-3c, D4, dhf basis sets  
-  Marvin Friede          : D4 for Fr, Ra, Ac-Lr                          
-  Lars Goerigk           : TD-DFT with DH, B97 family of functionals     
-  Stefan Grimme          : VdW corrections, initial TS optimization, DFT functionals, gCP, sTDA/sTD-DF 
-  Waldemar Hujo          : DFT-NL                                        
-  H. Jonsson             : NEB                                           
-  Holger Kruse           : gCP                                           
-  Marcel Mueller         : wB97X-3c, vDZP basis set                      
-  Hagen Neugebauer       : wr2SCAN, Native XTB                           
-  Gianluca Regni         : ADLD/ADEX                                     
+  Bernardo de Souza      : ESD, SOC TD-DFT
+  Georgi L. Stoychev     : AutoAux, RI-MP2 NMR, DLPNO-MP2 response, X2C
+  Van Anh Tran           : RI-MP2 g-tensors
+  Willem Van den Heuvel  : Paramagnetic NMR
+  Zikuan Wang            : NOTCH, Electric field optimization
+  Frank Wennmohs         : Technical directorship and infrastructure
+  Hang Xu                : AUTO-CI-Response properties
+
+[FACCTs GmbH]
+  Markus Bursch, Nicolas Foglia, Miquel Garcia-Rates, Ingolf Harden, Hagen Neugebauer, Anastasios Papadopoulos,
+  Christoph Riplinger, Bernardo de Souza, Georgi L. Stoychev
+
+  APM, various basis sets, CI-OPT, improved COSX, DLPNO-Multilevel,
+  DOCKER, DRACO, updates on ESD, Fragmentator, GOAT, IRC, LR-CPCM, L-BFGS, MBIS, meta-GGA TD-DFT gradient, ML-optimized integration grids,
+  MM, NACMEs, nearIR, NEB, NEB-TS, NL-DFT gradient (VV10), 2- and 3-layer-ONIOM, interface openCOSMO-RS, QMMM,
+  Crystal-QMMM, RESP, rigid body optimization, SF, symmetry and pop. for TD-DFT, various functionals, SOLVATOR
+
+[Other institutions]
+  V. Asgeirsson          : NEB
+  Christoph Bannwarth    : sTDA-DFT, sTD-DFT, PBEh-3c, B97-3c, D3
+  Giovanni Bistoni       : ETS/NOCV, ADLD/ADEX, COVALED
+  Martin Brehm           : Molecular dynamics
+  Ronald Cardenas        : ETS/NOCV
+  Martina Colucci        : COVALED
+  Sebastian Ehlert       : rSCAN, r2SCAN, r2SCAN-3c, D4, dhf basis sets
+  Marvin Friede          : D4 for Fr, Ra, Ac-Lr
+  Lars Goerigk           : TD-DFT with DH, B97 family of functionals
+  Stefan Grimme          : VdW corrections, initial TS optimization, DFT functionals, gCP, sTDA/sTD-DF
+  Waldemar Hujo          : DFT-NL
+  H. Jonsson             : NEB
+  Holger Kruse           : gCP
+  Marcel Mueller         : wB97X-3c, vDZP basis set
+  Hagen Neugebauer       : wr2SCAN, Native XTB
+  Gianluca Regni         : ADLD/ADEX
   Tobias Risthaus        : pre 6.0 range-separated hybrid DFT and stability analysis
-  Lukas Wittmann         : regularized MP2, r2SCAN double-hybrids, wr2SCAN        
-                                                                         
-We gratefully acknowledge several colleagues who have allowed us to      
-interface, adapt or use parts of their codes:                            
-  Ed Valeev, F. Pavosevic, A. Kumar             : LibInt (2-el integral package), F12 methods 
-  Garnet Chan, S. Sharma, J. Yang, R. Olivares  : DMRG                   
-  Ulf Ekstrom                                   : XCFun DFT Library      
+  Lukas Wittmann         : regularized MP2, r2SCAN double-hybrids, wr2SCAN
+
+We gratefully acknowledge several colleagues who have allowed us to
+interface, adapt or use parts of their codes:
+  Ed Valeev, F. Pavosevic, A. Kumar             : LibInt (2-el integral package), F12 methods
+  Garnet Chan, S. Sharma, J. Yang, R. Olivares  : DMRG
+  Ulf Ekstrom                                   : XCFun DFT Library
   Mihaly Kallay                                 : mrcc  (arbitrary order and MRCC methods)
-  Frank Weinhold                                : gennbo (NPA and NBO analysis)           
-  Simon Mueller                                 : openCOSMO-RS                            
-  Christopher J. Cramer and Donald G. Truhlar   : smd solvation model                     
-  S Lehtola, MJT Oliveira, MAL Marques          : LibXC Library                           
-  Liviu Ungur et al                             : ANISO software                          
+  Frank Weinhold                                : gennbo (NPA and NBO analysis)
+  Simon Mueller                                 : openCOSMO-RS
+  Christopher J. Cramer and Donald G. Truhlar   : smd solvation model
+  S Lehtola, MJT Oliveira, MAL Marques          : LibXC Library
+  Liviu Ungur et al                             : ANISO software
 
 
  Your calculation uses the libint2 library for the computation of 2-el integrals
@@ -177,14 +177,14 @@ interface, adapt or use parts of their codes:
 Your calculation utilizes the DFT-NL dispersion correction.
 Cite in your paper:
 Vydrov, O. A.; Van Voorhis, T. J. Chem. Phys. 2010, 133, 244103
-Hujo, W.; Grimme, S. J. Chem. Theory Comput. 2011, 7, 3866 
-   
+Hujo, W.; Grimme, S. J. Chem. Theory Comput. 2011, 7, 3866
+
 
 Warning: RI is on but no J-basis has been assigned. Assigning Def2/J (nothing to worry about!)
 ================================================================================
 
 cite the ECPs for U  [Def-ECP] as follows:
- 
+
 
 ECP parameters for U  [Def-ECP] have been obtained from:
 TURBOMOLE (7.0.2)
@@ -217,8 +217,8 @@ Your calculation utilizes the auxiliary basis: def2/J
 ================================================================================
 
 WARNING: Old DensityContainer found on disk!
-         Will remove this file - 
-         If you want to keep old densities, please start your calculation with a different basename. 
+         Will remove this file -
+         If you want to keep old densities, please start your calculation with a different basename.
 
 
 WARNING: B97M-V or wB97M-V functional requested.
@@ -242,23 +242,23 @@ WARNING: Self-consistent DFT-NL dispersion not compatible with AutoTRAH.
 ================================================================================
 NAME = UO2.inp
 |  1> ! wB97M-V RIJCOSX NoUseSym DIIS NOSOSCF NormalConv DEFGRID2 OPT
-|  2> 
+|  2>
 |  3> %scf
 |  4>   MaxIter 300
 |  5>   Convergence Tight
 |  6> end
-|  7> 
+|  7>
 |  8> %pal
 |  9>   nprocs 4
 | 10> end
-| 11> 
+| 11>
 | 12> %basis
 | 13>   NewGTO U "ma-def-TZVP" end #/ other option "ma-def-TZVPP"
 | 14>   NewECP U "def-ECP" end
 | 15>   # Oxygen: diffuse-augmented triple-zeta with polarization
 | 16>   NewGTO O "def2-TZVPD" end
 | 17> end
-| 18> 
+| 18>
 | 19> # Geometry: linear O=U=O starting guess (Å). Adjust bond lengths as needed.
 | 20> # CHARGE & MULTIPLICITY:
 | 21> #  - Uranyl dication UO2^2+ (common molecular target): charge=+2, singlet => "2 1"
@@ -308,10 +308,10 @@ The number of degrees of freedom        ....    4
     -----------------------------------------------------------------
          Definition                    Initial Value    Approx d2E/dq
     -----------------------------------------------------------------
-      1. B(O   1,U   0)                  2.0000         0.200057   
-      2. B(O   2,U   0)                  2.0000         0.200057   
-      3. L(O   1,U   0,O   2, 2)       180.0000         0.329138   
-      4. L(O   1,U   0,O   2, 1)       180.0000         0.329138   
+      1. B(O   1,U   0)                  2.0000         0.200057
+      2. B(O   2,U   0)                  2.0000         0.200057
+      3. L(O   1,U   0,O   2, 2)       180.0000         0.329138
+      4. L(O   1,U   0,O   2, 1)       180.0000         0.329138
     -----------------------------------------------------------------
 
 Number of atoms                         .... 3
@@ -392,23 +392,23 @@ Atom   0U    ECP group =>   1
                            -- RI-GTO INTEGRALS CHOSEN --
 ------------------------------------------------------------------------------
 ------------------------------------------------------------------------------
-                   ___                                                        
-                  /   \      - P O W E R E D   B Y -                         
-                 /     \                                                     
-                 |  |  |   _    _      __       _____    __    __             
-                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |          
-                  \  \/   | |  | |   /    \    | | | |  |  | /  /          
-                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /          
-                |  |  |   |  __  | /  /__\  \  |    /   |      \           
-                |  |  |   | |  | | |   __   |  |    \   |  |\   \          
-                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \       
-                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/        
-                                                                              
-                      - O R C A' S   B I G   F R I E N D -                    
-                                      &                                       
-                       - I N T E G R A L  F E E D E R -                       
-                                                                              
- v1 FN, 2020, v2 2021, v3 2022-2024                                           
+                   ___
+                  /   \      - P O W E R E D   B Y -
+                 /     \
+                 |  |  |   _    _      __       _____    __    __
+                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |
+                  \  \/   | |  | |   /    \    | | | |  |  | /  /
+                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /
+                |  |  |   |  __  | /  /__\  \  |    /   |      \
+                |  |  |   | |  | | |   __   |  |    \   |  |\   \
+                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \
+                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/
+
+                      - O R C A' S   B I G   F R I E N D -
+                                      &
+                       - I N T E G R A L  F E E D E R -
+
+ v1 FN, 2020, v2 2021, v3 2022-2024
 ------------------------------------------------------------------------------
 
 
@@ -427,7 +427,7 @@ Contraction scheme used                     ... SEGMENTED contraction
 Prescreening option                         ... SCHWARTZ
    Thresh                                   ... 2.500e-11
    Tcut                                     ... 2.500e-12
-   Tpresel                                  ... 2.500e-12 
+   Tpresel                                  ... 2.500e-12
 Coulomb Range Separation                    ... NOT USED
 Exchange Range Separation                   ... Long Range
    Mu parameter                             ... 3.000e-01
@@ -633,7 +633,7 @@ Hamiltonian:
   Functional kind                       .... Exchange-Correlation
   Functional name                       .... wB97M-V exchange-correlation functional
   Functional family                     .... Hybrid MGGA
-  Functional refs                              
+  Functional refs
     [ 0] N. Mardirossian and M. Head-Gordon.,  J. Chem. Phys. 144, 214110 (2016), doi: 10.1063/1.4952647
   Fraction of HF Exchange (short range) .... 0.1500
   Fraction of HF Exchange ( int64 range )  .... 1.0000
@@ -716,7 +716,7 @@ INITIAL GUESS: MODEL POTENTIAL
 Loading Hartree-Fock densities                     ... done
 Atomic calculation to generate a density for atom 0 (U  with ECP)
   Multiplicity assumed   :    5
-  Atomic configuration   : 1s2 2s2 2p6 3s2 3p6 4s2 3d10 4p6 5s2 4d10 5p6 6s2 4f14 5d10 6p6 7s2 5f4 
+  Atomic configuration   : 1s2 2s2 2p6 3s2 3p6 4s2 3d10 4p6 5s2 4d10 5p6 6s2 4f14 5d10 6p6 7s2 5f4
   Number of open shells  : 2
   Command: /Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca UO2_atom92.inp "" > UO2_atom92.out
 Returned from the atomic calculation with res=0
@@ -832,8 +832,8 @@ DFT components:
 N(Alpha)           :       22.999983269394 electrons
 N(Beta)            :       22.999983269394 electrons
 N(Total)           :       45.999966538789 electrons
-NL Energy, E(C,NL) :        0.179100877488 Eh       
-E(XC)              :      -32.292773717201 Eh       
+NL Energy, E(C,NL) :        0.179100877488 Eh
+E(XC)              :      -32.292773717201 Eh
 
 ---------------
 SCF CONVERGENCE
@@ -849,41 +849,41 @@ SCF CONVERGENCE
 ORBITAL ENERGIES
 ----------------
 
-  NO   OCC          E(Eh)            E(eV) 
-   0   2.0000     -19.867344      -540.6179 
-   1   2.0000     -19.867341      -540.6178 
-   2   2.0000     -12.840014      -349.3946 
-   3   2.0000      -8.276008      -225.2016 
-   4   2.0000      -8.276008      -225.2016 
-   5   2.0000      -8.212597      -223.4761 
-   6   2.0000      -4.642189      -126.3204 
-   7   2.0000      -4.642188      -126.3204 
-   8   2.0000      -4.603087      -125.2564 
-   9   2.0000      -4.603087      -125.2564 
-  10   2.0000      -4.587824      -124.8410 
-  11   2.0000      -2.597854       -70.6912 
-  12   2.0000      -1.702026       -46.3145 
-  13   2.0000      -1.634507       -44.4772 
-  14   2.0000      -1.634507       -44.4772 
-  15   2.0000      -1.522186       -41.4208 
-  16   2.0000      -1.387203       -37.7477 
-  17   2.0000      -0.930402       -25.3175 
-  18   2.0000      -0.928458       -25.2646 
-  19   2.0000      -0.924653       -25.1611 
-  20   2.0000      -0.924653       -25.1611 
-  21   2.0000      -0.915959       -24.9245 
-  22   2.0000      -0.915959       -24.9245 
-  23   0.0000      -0.606316       -16.4987 
-  24   0.0000      -0.606316       -16.4987 
-  25   0.0000      -0.578589       -15.7442 
-  26   0.0000      -0.578574       -15.7438 
-  27   0.0000      -0.536974       -14.6118 
-  28   0.0000      -0.536974       -14.6118 
-  29   0.0000      -0.483927       -13.1683 
-  30   0.0000      -0.480707       -13.0807 
-  31   0.0000      -0.480706       -13.0807 
-  32   0.0000      -0.466781       -12.7018 
-  33   0.0000      -0.366874        -9.9831 
+  NO   OCC          E(Eh)            E(eV)
+   0   2.0000     -19.867344      -540.6179
+   1   2.0000     -19.867341      -540.6178
+   2   2.0000     -12.840014      -349.3946
+   3   2.0000      -8.276008      -225.2016
+   4   2.0000      -8.276008      -225.2016
+   5   2.0000      -8.212597      -223.4761
+   6   2.0000      -4.642189      -126.3204
+   7   2.0000      -4.642188      -126.3204
+   8   2.0000      -4.603087      -125.2564
+   9   2.0000      -4.603087      -125.2564
+  10   2.0000      -4.587824      -124.8410
+  11   2.0000      -2.597854       -70.6912
+  12   2.0000      -1.702026       -46.3145
+  13   2.0000      -1.634507       -44.4772
+  14   2.0000      -1.634507       -44.4772
+  15   2.0000      -1.522186       -41.4208
+  16   2.0000      -1.387203       -37.7477
+  17   2.0000      -0.930402       -25.3175
+  18   2.0000      -0.928458       -25.2646
+  19   2.0000      -0.924653       -25.1611
+  20   2.0000      -0.924653       -25.1611
+  21   2.0000      -0.915959       -24.9245
+  22   2.0000      -0.915959       -24.9245
+  23   0.0000      -0.606316       -16.4987
+  24   0.0000      -0.606316       -16.4987
+  25   0.0000      -0.578589       -15.7442
+  26   0.0000      -0.578574       -15.7438
+  27   0.0000      -0.536974       -14.6118
+  28   0.0000      -0.536974       -14.6118
+  29   0.0000      -0.483927       -13.1683
+  30   0.0000      -0.480707       -13.0807
+  31   0.0000      -0.480706       -13.0807
+  32   0.0000      -0.466781       -12.7018
+  33   0.0000      -0.366874        -9.9831
 *Only the first 10 virtual orbitals were printed.
 
                     ********************************
@@ -1056,14 +1056,14 @@ LOEWDIN REDUCED ORBITAL CHARGES
   2 O      8.1882     8.0000    -0.1882     2.4702     2.4702     0.0000
 
   Mayer bond orders larger than 0.100000
-B(  0-U ,  1-O ) :   2.3620 B(  0-U ,  2-O ) :   2.3620 B(  1-O ,  2-O ) :   0.1082 
+B(  0-U ,  1-O ) :   2.3620 B(  0-U ,  2-O ) :   2.3620 B(  1-O ,  2-O ) :   0.1082
 
 
 -------
 TIMINGS
 -------
 
-Total SCF time: 0 days 0 hours 0 min 28 sec 
+Total SCF time: 0 days 0 hours 0 min 28 sec
 
 Total time                  ....      28.559 sec
 Sum of individual times     ....      27.699 sec  ( 97.0%)
@@ -1210,10 +1210,10 @@ The optimization has not yet converged - more geometry cycles are needed
 
         Definition                    Value    dE/dq     Step     New-Value
     ----------------------------------------------------------------------------
-     1. B(O   1,U   0)                2.0000  0.207247 -0.1123    1.8877   
-     2. B(O   2,U   0)                2.0000  0.207247 -0.1123    1.8877   
-     3. L(O   1,U   0,O   2, 2)       180.00 -0.000000    0.00    180.00   
-     4. L(O   1,U   0,O   2, 1)       180.00 -0.000000    0.00    180.00   
+     1. B(O   1,U   0)                2.0000  0.207247 -0.1123    1.8877
+     2. B(O   2,U   0)                2.0000  0.207247 -0.1123    1.8877
+     3. L(O   1,U   0,O   2, 2)       180.00 -0.000000    0.00    180.00
+     4. L(O   1,U   0,O   2, 1)       180.00 -0.000000    0.00    180.00
     ----------------------------------------------------------------------------
 
 Geometry step timings:
@@ -1271,23 +1271,23 @@ INTERNAL COORDINATES (A.U.)
            *              working on a common directory               *
            ************************************************************
 ------------------------------------------------------------------------------
-                   ___                                                        
-                  /   \      - P O W E R E D   B Y -                         
-                 /     \                                                     
-                 |  |  |   _    _      __       _____    __    __             
-                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |          
-                  \  \/   | |  | |   /    \    | | | |  |  | /  /          
-                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /          
-                |  |  |   |  __  | /  /__\  \  |    /   |      \           
-                |  |  |   | |  | | |   __   |  |    \   |  |\   \          
-                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \       
-                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/        
-                                                                              
-                      - O R C A' S   B I G   F R I E N D -                    
-                                      &                                       
-                       - I N T E G R A L  F E E D E R -                       
-                                                                              
- v1 FN, 2020, v2 2021, v3 2022-2024                                           
+                   ___
+                  /   \      - P O W E R E D   B Y -
+                 /     \
+                 |  |  |   _    _      __       _____    __    __
+                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |
+                  \  \/   | |  | |   /    \    | | | |  |  | /  /
+                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /
+                |  |  |   |  __  | /  /__\  \  |    /   |      \
+                |  |  |   | |  | | |   __   |  |    \   |  |\   \
+                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \
+                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/
+
+                      - O R C A' S   B I G   F R I E N D -
+                                      &
+                       - I N T E G R A L  F E E D E R -
+
+ v1 FN, 2020, v2 2021, v3 2022-2024
 ------------------------------------------------------------------------------
 
 
@@ -1306,7 +1306,7 @@ Contraction scheme used                     ... SEGMENTED contraction
 Prescreening option                         ... SCHWARTZ
    Thresh                                   ... 2.500e-11
    Tcut                                     ... 2.500e-12
-   Tpresel                                  ... 2.500e-12 
+   Tpresel                                  ... 2.500e-12
 Coulomb Range Separation                    ... NOT USED
 Exchange Range Separation                   ... Long Range
    Mu parameter                             ... 3.000e-01
@@ -1565,8 +1565,8 @@ DFT components:
 N(Alpha)           :       22.999979257598 electrons
 N(Beta)            :       22.999979257598 electrons
 N(Total)           :       45.999958515197 electrons
-NL Energy, E(C,NL) :        0.178508653331 Eh       
-E(XC)              :      -32.384111436466 Eh       
+NL Energy, E(C,NL) :        0.178508653331 Eh
+E(XC)              :      -32.384111436466 Eh
 
 ---------------
 SCF CONVERGENCE
@@ -1578,7 +1578,7 @@ SCF CONVERGENCE
   Last DIIS Error            ...    9.5006e-06  Tolerance :   5.0000e-07
 
 
-Total SCF time: 0 days 0 hours 0 min 14 sec 
+Total SCF time: 0 days 0 hours 0 min 14 sec
 Finished LeanSCF after  14.2 sec
 
 Maximum memory used throughout the entire LEANSCF-calculation: 21.2 MB
@@ -1707,10 +1707,10 @@ The optimization has not yet converged - more geometry cycles are needed
 
         Definition                    Value    dE/dq     Step     New-Value
     ----------------------------------------------------------------------------
-     1. B(O   1,U   0)                1.8877  0.174522 -0.1123    1.7755   
-     2. B(O   2,U   0)                1.8877  0.174523 -0.1123    1.7755   
-     3. L(O   1,U   0,O   2, 2)       180.00  0.000000   -0.00    180.00   
-     4. L(O   1,U   0,O   2, 1)       180.00  0.000000   -0.00    180.00   
+     1. B(O   1,U   0)                1.8877  0.174522 -0.1123    1.7755
+     2. B(O   2,U   0)                1.8877  0.174523 -0.1123    1.7755
+     3. L(O   1,U   0,O   2, 2)       180.00  0.000000   -0.00    180.00
+     4. L(O   1,U   0,O   2, 1)       180.00  0.000000   -0.00    180.00
     ----------------------------------------------------------------------------
 
 Geometry step timings:
@@ -1768,23 +1768,23 @@ INTERNAL COORDINATES (A.U.)
            *              working on a common directory               *
            ************************************************************
 ------------------------------------------------------------------------------
-                   ___                                                        
-                  /   \      - P O W E R E D   B Y -                         
-                 /     \                                                     
-                 |  |  |   _    _      __       _____    __    __             
-                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |          
-                  \  \/   | |  | |   /    \    | | | |  |  | /  /          
-                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /          
-                |  |  |   |  __  | /  /__\  \  |    /   |      \           
-                |  |  |   | |  | | |   __   |  |    \   |  |\   \          
-                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \       
-                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/        
-                                                                              
-                      - O R C A' S   B I G   F R I E N D -                    
-                                      &                                       
-                       - I N T E G R A L  F E E D E R -                       
-                                                                              
- v1 FN, 2020, v2 2021, v3 2022-2024                                           
+                   ___
+                  /   \      - P O W E R E D   B Y -
+                 /     \
+                 |  |  |   _    _      __       _____    __    __
+                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |
+                  \  \/   | |  | |   /    \    | | | |  |  | /  /
+                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /
+                |  |  |   |  __  | /  /__\  \  |    /   |      \
+                |  |  |   | |  | | |   __   |  |    \   |  |\   \
+                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \
+                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/
+
+                      - O R C A' S   B I G   F R I E N D -
+                                      &
+                       - I N T E G R A L  F E E D E R -
+
+ v1 FN, 2020, v2 2021, v3 2022-2024
 ------------------------------------------------------------------------------
 
 
@@ -1803,7 +1803,7 @@ Contraction scheme used                     ... SEGMENTED contraction
 Prescreening option                         ... SCHWARTZ
    Thresh                                   ... 2.500e-11
    Tcut                                     ... 2.500e-12
-   Tpresel                                  ... 2.500e-12 
+   Tpresel                                  ... 2.500e-12
 Coulomb Range Separation                    ... NOT USED
 Exchange Range Separation                   ... Long Range
    Mu parameter                             ... 3.000e-01
@@ -2083,8 +2083,8 @@ DFT components:
 N(Alpha)           :       22.999983951356 electrons
 N(Beta)            :       22.999983951356 electrons
 N(Total)           :       45.999967902711 electrons
-NL Energy, E(C,NL) :        0.177907972828 Eh       
-E(XC)              :      -32.506809101184 Eh       
+NL Energy, E(C,NL) :        0.177907972828 Eh
+E(XC)              :      -32.506809101184 Eh
 
 ---------------
 SCF CONVERGENCE
@@ -2096,7 +2096,7 @@ SCF CONVERGENCE
   Last DIIS Error            ...    2.0397e-05  Tolerance :   5.0000e-07
 
 
-Total SCF time: 0 days 0 hours 0 min 31 sec 
+Total SCF time: 0 days 0 hours 0 min 31 sec
 Finished LeanSCF after  31.8 sec
 
 Maximum memory used throughout the entire LEANSCF-calculation: 21.3 MB
@@ -2218,10 +2218,10 @@ The optimization has not yet converged - more geometry cycles are needed
 
         Definition                    Value    dE/dq     Step     New-Value
     ----------------------------------------------------------------------------
-     1. B(O   1,U   0)                1.7755  0.106420 -0.1480    1.6275   
-     2. B(O   2,U   0)                1.7755  0.106418 -0.1480    1.6275   
-     3. L(O   1,U   0,O   2, 2)       180.00 -0.000000    0.00    180.00   
-     4. L(O   1,U   0,O   2, 1)       180.00  0.000000   -0.00    180.00   
+     1. B(O   1,U   0)                1.7755  0.106420 -0.1480    1.6275
+     2. B(O   2,U   0)                1.7755  0.106418 -0.1480    1.6275
+     3. L(O   1,U   0,O   2, 2)       180.00 -0.000000    0.00    180.00
+     4. L(O   1,U   0,O   2, 1)       180.00  0.000000   -0.00    180.00
     ----------------------------------------------------------------------------
 
 Geometry step timings:
@@ -2279,23 +2279,23 @@ INTERNAL COORDINATES (A.U.)
            *              working on a common directory               *
            ************************************************************
 ------------------------------------------------------------------------------
-                   ___                                                        
-                  /   \      - P O W E R E D   B Y -                         
-                 /     \                                                     
-                 |  |  |   _    _      __       _____    __    __             
-                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |          
-                  \  \/   | |  | |   /    \    | | | |  |  | /  /          
-                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /          
-                |  |  |   |  __  | /  /__\  \  |    /   |      \           
-                |  |  |   | |  | | |   __   |  |    \   |  |\   \          
-                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \       
-                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/        
-                                                                              
-                      - O R C A' S   B I G   F R I E N D -                    
-                                      &                                       
-                       - I N T E G R A L  F E E D E R -                       
-                                                                              
- v1 FN, 2020, v2 2021, v3 2022-2024                                           
+                   ___
+                  /   \      - P O W E R E D   B Y -
+                 /     \
+                 |  |  |   _    _      __       _____    __    __
+                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |
+                  \  \/   | |  | |   /    \    | | | |  |  | /  /
+                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /
+                |  |  |   |  __  | /  /__\  \  |    /   |      \
+                |  |  |   | |  | | |   __   |  |    \   |  |\   \
+                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \
+                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/
+
+                      - O R C A' S   B I G   F R I E N D -
+                                      &
+                       - I N T E G R A L  F E E D E R -
+
+ v1 FN, 2020, v2 2021, v3 2022-2024
 ------------------------------------------------------------------------------
 
 
@@ -2314,7 +2314,7 @@ Contraction scheme used                     ... SEGMENTED contraction
 Prescreening option                         ... SCHWARTZ
    Thresh                                   ... 2.500e-11
    Tcut                                     ... 2.500e-12
-   Tpresel                                  ... 2.500e-12 
+   Tpresel                                  ... 2.500e-12
 Coulomb Range Separation                    ... NOT USED
 Exchange Range Separation                   ... Long Range
    Mu parameter                             ... 3.000e-01
@@ -2574,8 +2574,8 @@ DFT components:
 N(Alpha)           :       23.000003956135 electrons
 N(Beta)            :       23.000003956135 electrons
 N(Total)           :       46.000007912269 electrons
-NL Energy, E(C,NL) :        0.177110976733 Eh       
-E(XC)              :      -32.728322761893 Eh       
+NL Energy, E(C,NL) :        0.177110976733 Eh
+E(XC)              :      -32.728322761893 Eh
 
 ---------------
 SCF CONVERGENCE
@@ -2587,7 +2587,7 @@ SCF CONVERGENCE
   Last DIIS Error            ...    1.3159e-06  Tolerance :   5.0000e-07
 
 
-Total SCF time: 0 days 0 hours 0 min 15 sec 
+Total SCF time: 0 days 0 hours 0 min 15 sec
 Finished LeanSCF after  15.3 sec
 
 Maximum memory used throughout the entire LEANSCF-calculation: 21.4 MB
@@ -2709,10 +2709,10 @@ The optimization has not yet converged - more geometry cycles are needed
 
         Definition                    Value    dE/dq     Step     New-Value
     ----------------------------------------------------------------------------
-     1. B(O   1,U   0)                1.6275 -0.080931  0.0622    1.6897   
-     2. B(O   2,U   0)                1.6275 -0.080916  0.0621    1.6897   
-     3. L(O   1,U   0,O   2, 2)       180.00  0.000000   -0.00    180.00   
-     4. L(O   1,U   0,O   2, 1)       180.00 -0.000000    0.00    180.00   
+     1. B(O   1,U   0)                1.6275 -0.080931  0.0622    1.6897
+     2. B(O   2,U   0)                1.6275 -0.080916  0.0621    1.6897
+     3. L(O   1,U   0,O   2, 2)       180.00  0.000000   -0.00    180.00
+     4. L(O   1,U   0,O   2, 1)       180.00 -0.000000    0.00    180.00
     ----------------------------------------------------------------------------
 
 Geometry step timings:
@@ -2770,23 +2770,23 @@ INTERNAL COORDINATES (A.U.)
            *              working on a common directory               *
            ************************************************************
 ------------------------------------------------------------------------------
-                   ___                                                        
-                  /   \      - P O W E R E D   B Y -                         
-                 /     \                                                     
-                 |  |  |   _    _      __       _____    __    __             
-                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |          
-                  \  \/   | |  | |   /    \    | | | |  |  | /  /          
-                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /          
-                |  |  |   |  __  | /  /__\  \  |    /   |      \           
-                |  |  |   | |  | | |   __   |  |    \   |  |\   \          
-                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \       
-                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/        
-                                                                              
-                      - O R C A' S   B I G   F R I E N D -                    
-                                      &                                       
-                       - I N T E G R A L  F E E D E R -                       
-                                                                              
- v1 FN, 2020, v2 2021, v3 2022-2024                                           
+                   ___
+                  /   \      - P O W E R E D   B Y -
+                 /     \
+                 |  |  |   _    _      __       _____    __    __
+                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |
+                  \  \/   | |  | |   /    \    | | | |  |  | /  /
+                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /
+                |  |  |   |  __  | /  /__\  \  |    /   |      \
+                |  |  |   | |  | | |   __   |  |    \   |  |\   \
+                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \
+                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/
+
+                      - O R C A' S   B I G   F R I E N D -
+                                      &
+                       - I N T E G R A L  F E E D E R -
+
+ v1 FN, 2020, v2 2021, v3 2022-2024
 ------------------------------------------------------------------------------
 
 
@@ -2805,7 +2805,7 @@ Contraction scheme used                     ... SEGMENTED contraction
 Prescreening option                         ... SCHWARTZ
    Thresh                                   ... 2.500e-11
    Tcut                                     ... 2.500e-12
-   Tpresel                                  ... 2.500e-12 
+   Tpresel                                  ... 2.500e-12
 Coulomb Range Separation                    ... NOT USED
 Exchange Range Separation                   ... Long Range
    Mu parameter                             ... 3.000e-01
@@ -3063,8 +3063,8 @@ DFT components:
 N(Alpha)           :       22.999994409260 electrons
 N(Beta)            :       22.999994409260 electrons
 N(Total)           :       45.999988818520 electrons
-NL Energy, E(C,NL) :        0.177445625938 Eh       
-E(XC)              :      -32.626013833600 Eh       
+NL Energy, E(C,NL) :        0.177445625938 Eh
+E(XC)              :      -32.626013833600 Eh
 
 ---------------
 SCF CONVERGENCE
@@ -3076,7 +3076,7 @@ SCF CONVERGENCE
   Last DIIS Error            ...    6.1533e-06  Tolerance :   5.0000e-07
 
 
-Total SCF time: 0 days 0 hours 0 min 13 sec 
+Total SCF time: 0 days 0 hours 0 min 13 sec
 Finished LeanSCF after  13.6 sec
 
 Maximum memory used throughout the entire LEANSCF-calculation: 21.5 MB
@@ -3198,10 +3198,10 @@ The optimization has not yet converged - more geometry cycles are needed
 
         Definition                    Value    dE/dq     Step     New-Value
     ----------------------------------------------------------------------------
-     1. B(O   1,U   0)                1.6897  0.016164 -0.0104    1.6793   
-     2. B(O   2,U   0)                1.6897  0.016144 -0.0103    1.6793   
-     3. L(O   1,U   0,O   2, 2)       180.00 -0.000000    0.00    180.00   
-     4. L(O   1,U   0,O   2, 1)       180.00 -0.000000    0.00    180.00   
+     1. B(O   1,U   0)                1.6897  0.016164 -0.0104    1.6793
+     2. B(O   2,U   0)                1.6897  0.016144 -0.0103    1.6793
+     3. L(O   1,U   0,O   2, 2)       180.00 -0.000000    0.00    180.00
+     4. L(O   1,U   0,O   2, 1)       180.00 -0.000000    0.00    180.00
     ----------------------------------------------------------------------------
 
 Geometry step timings:
@@ -3259,23 +3259,23 @@ INTERNAL COORDINATES (A.U.)
            *              working on a common directory               *
            ************************************************************
 ------------------------------------------------------------------------------
-                   ___                                                        
-                  /   \      - P O W E R E D   B Y -                         
-                 /     \                                                     
-                 |  |  |   _    _      __       _____    __    __             
-                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |          
-                  \  \/   | |  | |   /    \    | | | |  |  | /  /          
-                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /          
-                |  |  |   |  __  | /  /__\  \  |    /   |      \           
-                |  |  |   | |  | | |   __   |  |    \   |  |\   \          
-                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \       
-                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/        
-                                                                              
-                      - O R C A' S   B I G   F R I E N D -                    
-                                      &                                       
-                       - I N T E G R A L  F E E D E R -                       
-                                                                              
- v1 FN, 2020, v2 2021, v3 2022-2024                                           
+                   ___
+                  /   \      - P O W E R E D   B Y -
+                 /     \
+                 |  |  |   _    _      __       _____    __    __
+                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |
+                  \  \/   | |  | |   /    \    | | | |  |  | /  /
+                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /
+                |  |  |   |  __  | /  /__\  \  |    /   |      \
+                |  |  |   | |  | | |   __   |  |    \   |  |\   \
+                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \
+                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/
+
+                      - O R C A' S   B I G   F R I E N D -
+                                      &
+                       - I N T E G R A L  F E E D E R -
+
+ v1 FN, 2020, v2 2021, v3 2022-2024
 ------------------------------------------------------------------------------
 
 
@@ -3294,7 +3294,7 @@ Contraction scheme used                     ... SEGMENTED contraction
 Prescreening option                         ... SCHWARTZ
    Thresh                                   ... 2.500e-11
    Tcut                                     ... 2.500e-12
-   Tpresel                                  ... 2.500e-12 
+   Tpresel                                  ... 2.500e-12
 Coulomb Range Separation                    ... NOT USED
 Exchange Range Separation                   ... Long Range
    Mu parameter                             ... 3.000e-01
@@ -3549,8 +3549,8 @@ DFT components:
 N(Alpha)           :       22.999996062361 electrons
 N(Beta)            :       22.999996062361 electrons
 N(Total)           :       45.999992124723 electrons
-NL Energy, E(C,NL) :        0.177389946078 Eh       
-E(XC)              :      -32.642045909599 Eh       
+NL Energy, E(C,NL) :        0.177389946078 Eh
+E(XC)              :      -32.642045909599 Eh
 
 ---------------
 SCF CONVERGENCE
@@ -3562,7 +3562,7 @@ SCF CONVERGENCE
   Last DIIS Error            ...    8.0250e-06  Tolerance :   5.0000e-07
 
 
-Total SCF time: 0 days 0 hours 0 min 11 sec 
+Total SCF time: 0 days 0 hours 0 min 11 sec
 Finished LeanSCF after  11.2 sec
 
 Maximum memory used throughout the entire LEANSCF-calculation: 21.4 MB
@@ -3684,10 +3684,10 @@ The optimization has not yet converged - more geometry cycles are needed
 
         Definition                    Value    dE/dq     Step     New-Value
     ----------------------------------------------------------------------------
-     1. B(O   1,U   0)                1.6793  0.002159 -0.0016    1.6778   
-     2. B(O   2,U   0)                1.6793  0.002197 -0.0017    1.6777   
-     3. L(O   1,U   0,O   2, 2)       180.00 -0.000000    0.00    180.00   
-     4. L(O   1,U   0,O   2, 1)       180.00 -0.000000    0.00    180.00   
+     1. B(O   1,U   0)                1.6793  0.002159 -0.0016    1.6778
+     2. B(O   2,U   0)                1.6793  0.002197 -0.0017    1.6777
+     3. L(O   1,U   0,O   2, 2)       180.00 -0.000000    0.00    180.00
+     4. L(O   1,U   0,O   2, 1)       180.00 -0.000000    0.00    180.00
     ----------------------------------------------------------------------------
 
 Geometry step timings:
@@ -3745,23 +3745,23 @@ INTERNAL COORDINATES (A.U.)
            *              working on a common directory               *
            ************************************************************
 ------------------------------------------------------------------------------
-                   ___                                                        
-                  /   \      - P O W E R E D   B Y -                         
-                 /     \                                                     
-                 |  |  |   _    _      __       _____    __    __             
-                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |          
-                  \  \/   | |  | |   /    \    | | | |  |  | /  /          
-                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /          
-                |  |  |   |  __  | /  /__\  \  |    /   |      \           
-                |  |  |   | |  | | |   __   |  |    \   |  |\   \          
-                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \       
-                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/        
-                                                                              
-                      - O R C A' S   B I G   F R I E N D -                    
-                                      &                                       
-                       - I N T E G R A L  F E E D E R -                       
-                                                                              
- v1 FN, 2020, v2 2021, v3 2022-2024                                           
+                   ___
+                  /   \      - P O W E R E D   B Y -
+                 /     \
+                 |  |  |   _    _      __       _____    __    __
+                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |
+                  \  \/   | |  | |   /    \    | | | |  |  | /  /
+                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /
+                |  |  |   |  __  | /  /__\  \  |    /   |      \
+                |  |  |   | |  | | |   __   |  |    \   |  |\   \
+                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \
+                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/
+
+                      - O R C A' S   B I G   F R I E N D -
+                                      &
+                       - I N T E G R A L  F E E D E R -
+
+ v1 FN, 2020, v2 2021, v3 2022-2024
 ------------------------------------------------------------------------------
 
 
@@ -3780,7 +3780,7 @@ Contraction scheme used                     ... SEGMENTED contraction
 Prescreening option                         ... SCHWARTZ
    Thresh                                   ... 2.500e-11
    Tcut                                     ... 2.500e-12
-   Tpresel                                  ... 2.500e-12 
+   Tpresel                                  ... 2.500e-12
 Coulomb Range Separation                    ... NOT USED
 Exchange Range Separation                   ... Long Range
    Mu parameter                             ... 3.000e-01
@@ -4034,8 +4034,8 @@ DFT components:
 N(Alpha)           :       22.999996320965 electrons
 N(Beta)            :       22.999996320965 electrons
 N(Total)           :       45.999992641929 electrons
-NL Energy, E(C,NL) :        0.177381257726 Eh       
-E(XC)              :      -32.644575092230 Eh       
+NL Energy, E(C,NL) :        0.177381257726 Eh
+E(XC)              :      -32.644575092230 Eh
 
 ---------------
 SCF CONVERGENCE
@@ -4047,7 +4047,7 @@ SCF CONVERGENCE
   Last DIIS Error            ...    3.1253e-06  Tolerance :   5.0000e-07
 
 
-Total SCF time: 0 days 0 hours 0 min 10 sec 
+Total SCF time: 0 days 0 hours 0 min 10 sec
 Finished LeanSCF after  10.1 sec
 
 Maximum memory used throughout the entire LEANSCF-calculation: 21.4 MB
@@ -4174,15 +4174,15 @@ New trust radius                        ....     0.675000000
     ---------------------------------------------------------------------------
                          Redundant Internal Coordinates
 
-                          --- Optimized Parameters ---  
+                          --- Optimized Parameters ---
                             (Angstroem and degrees)
 
         Definition                    OldVal   dE/dq     Step     FinalVal
     ----------------------------------------------------------------------------
-     1. B(O   1,U   0)                1.6778 -0.000007 -0.0001    1.6776   
-     2. B(O   2,U   0)                1.6777 -0.000137  0.0002    1.6779   
-     3. L(O   1,U   0,O   2, 2)       180.00  0.000000   -0.00    180.00   
-     4. L(O   1,U   0,O   2, 1)       180.00  0.000000   -0.00    180.00   
+     1. B(O   1,U   0)                1.6778 -0.000007 -0.0001    1.6776
+     2. B(O   2,U   0)                1.6777 -0.000137  0.0002    1.6779
+     3. L(O   1,U   0,O   2, 2)       180.00  0.000000   -0.00    180.00
+     4. L(O   1,U   0,O   2, 1)       180.00  0.000000   -0.00    180.00
     ----------------------------------------------------------------------------
 
 Geometry step timings:
@@ -4271,23 +4271,23 @@ Atom   0U    ECP group =>   1
                            -- RI-GTO INTEGRALS CHOSEN --
 ------------------------------------------------------------------------------
 ------------------------------------------------------------------------------
-                   ___                                                        
-                  /   \      - P O W E R E D   B Y -                         
-                 /     \                                                     
-                 |  |  |   _    _      __       _____    __    __             
-                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |          
-                  \  \/   | |  | |   /    \    | | | |  |  | /  /          
-                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /          
-                |  |  |   |  __  | /  /__\  \  |    /   |      \           
-                |  |  |   | |  | | |   __   |  |    \   |  |\   \          
-                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \       
-                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/        
-                                                                              
-                      - O R C A' S   B I G   F R I E N D -                    
-                                      &                                       
-                       - I N T E G R A L  F E E D E R -                       
-                                                                              
- v1 FN, 2020, v2 2021, v3 2022-2024                                           
+                   ___
+                  /   \      - P O W E R E D   B Y -
+                 /     \
+                 |  |  |   _    _      __       _____    __    __
+                 |  |  |  | |  | |    /  \     |  _  \  |  |  /  |
+                  \  \/   | |  | |   /    \    | | | |  |  | /  /
+                 / \  \   | |__| |  /  /\  \   | |_| |  |  |/  /
+                |  |  |   |  __  | /  /__\  \  |    /   |      \
+                |  |  |   | |  | | |   __   |  |    \   |  |\   \
+                \     /   | |  | | |  |  |  |  | |\  \  |  | \   \
+                 \___/    |_|  |_| |__|  |__|  |_| \__\ |__|  \__/
+
+                      - O R C A' S   B I G   F R I E N D -
+                                      &
+                       - I N T E G R A L  F E E D E R -
+
+ v1 FN, 2020, v2 2021, v3 2022-2024
 ------------------------------------------------------------------------------
 
 
@@ -4306,7 +4306,7 @@ Contraction scheme used                     ... SEGMENTED contraction
 Prescreening option                         ... SCHWARTZ
    Thresh                                   ... 2.500e-11
    Tcut                                     ... 2.500e-12
-   Tpresel                                  ... 2.500e-12 
+   Tpresel                                  ... 2.500e-12
 Coulomb Range Separation                    ... NOT USED
 Exchange Range Separation                   ... Long Range
    Mu parameter                             ... 3.000e-01
@@ -4512,7 +4512,7 @@ Hamiltonian:
   Functional kind                       .... Exchange-Correlation
   Functional name                       .... wB97M-V exchange-correlation functional
   Functional family                     .... Hybrid MGGA
-  Functional refs                              
+  Functional refs
     [ 0] N. Mardirossian and M. Head-Gordon.,  J. Chem. Phys. 144, 214110 (2016), doi: 10.1063/1.4952647
   Fraction of HF Exchange (short range) .... 0.1500
   Fraction of HF Exchange ( int64 range )  .... 1.0000
@@ -4660,8 +4660,8 @@ DFT components:
 N(Alpha)           :       22.999996312641 electrons
 N(Beta)            :       22.999996312641 electrons
 N(Total)           :       45.999992625283 electrons
-NL Energy, E(C,NL) :        0.177381527900 Eh       
-E(XC)              :      -32.644505186190 Eh       
+NL Energy, E(C,NL) :        0.177381527900 Eh
+E(XC)              :      -32.644505186190 Eh
 
 ---------------
 SCF CONVERGENCE
@@ -4677,41 +4677,41 @@ SCF CONVERGENCE
 ORBITAL ENERGIES
 ----------------
 
-  NO   OCC          E(Eh)            E(eV) 
-   0   2.0000     -19.885452      -541.1107 
-   1   2.0000     -19.885355      -541.1080 
-   2   2.0000     -12.787070      -347.9539 
-   3   2.0000      -8.221759      -223.7254 
-   4   2.0000      -8.221759      -223.7254 
-   5   2.0000      -8.165007      -222.1811 
-   6   2.0000      -4.586789      -124.8129 
-   7   2.0000      -4.586788      -124.8128 
-   8   2.0000      -4.555141      -123.9517 
-   9   2.0000      -4.555141      -123.9517 
-  10   2.0000      -4.545037      -123.6767 
-  11   2.0000      -2.580920       -70.2304 
-  12   2.0000      -1.875982       -51.0481 
-  13   2.0000      -1.604476       -43.6600 
-  14   2.0000      -1.604476       -43.6600 
-  15   2.0000      -1.591060       -43.2950 
-  16   2.0000      -1.299522       -35.3618 
-  17   2.0000      -1.023580       -27.8530 
-  18   2.0000      -1.023580       -27.8530 
-  19   2.0000      -1.010420       -27.4949 
-  20   2.0000      -1.010420       -27.4949 
-  21   2.0000      -0.989561       -26.9273 
-  22   2.0000      -0.976831       -26.5809 
-  23   0.0000      -0.554888       -15.0993 
-  24   0.0000      -0.554888       -15.0993 
-  25   0.0000      -0.541061       -14.7230 
-  26   0.0000      -0.541023       -14.7220 
-  27   0.0000      -0.458878       -12.4867 
-  28   0.0000      -0.455021       -12.3818 
-  29   0.0000      -0.455020       -12.3817 
-  30   0.0000      -0.454876       -12.3778 
-  31   0.0000      -0.454876       -12.3778 
-  32   0.0000      -0.306078        -8.3288 
-  33   0.0000      -0.306078        -8.3288 
+  NO   OCC          E(Eh)            E(eV)
+   0   2.0000     -19.885452      -541.1107
+   1   2.0000     -19.885355      -541.1080
+   2   2.0000     -12.787070      -347.9539
+   3   2.0000      -8.221759      -223.7254
+   4   2.0000      -8.221759      -223.7254
+   5   2.0000      -8.165007      -222.1811
+   6   2.0000      -4.586789      -124.8129
+   7   2.0000      -4.586788      -124.8128
+   8   2.0000      -4.555141      -123.9517
+   9   2.0000      -4.555141      -123.9517
+  10   2.0000      -4.545037      -123.6767
+  11   2.0000      -2.580920       -70.2304
+  12   2.0000      -1.875982       -51.0481
+  13   2.0000      -1.604476       -43.6600
+  14   2.0000      -1.604476       -43.6600
+  15   2.0000      -1.591060       -43.2950
+  16   2.0000      -1.299522       -35.3618
+  17   2.0000      -1.023580       -27.8530
+  18   2.0000      -1.023580       -27.8530
+  19   2.0000      -1.010420       -27.4949
+  20   2.0000      -1.010420       -27.4949
+  21   2.0000      -0.989561       -26.9273
+  22   2.0000      -0.976831       -26.5809
+  23   0.0000      -0.554888       -15.0993
+  24   0.0000      -0.554888       -15.0993
+  25   0.0000      -0.541061       -14.7230
+  26   0.0000      -0.541023       -14.7220
+  27   0.0000      -0.458878       -12.4867
+  28   0.0000      -0.455021       -12.3818
+  29   0.0000      -0.455020       -12.3817
+  30   0.0000      -0.454876       -12.3778
+  31   0.0000      -0.454876       -12.3778
+  32   0.0000      -0.306078        -8.3288
+  33   0.0000      -0.306078        -8.3288
 *Only the first 10 virtual orbitals were printed.
 
                     ********************************
@@ -4884,13 +4884,13 @@ LOEWDIN REDUCED ORBITAL CHARGES
   2 O      8.1960     8.0000    -0.1960     2.3955     2.3955     0.0000
 
   Mayer bond orders larger than 0.100000
-B(  0-U ,  1-O ) :   2.3437 B(  0-U ,  2-O ) :   2.3437 
+B(  0-U ,  1-O ) :   2.3437 B(  0-U ,  2-O ) :   2.3437
 
 -------
 TIMINGS
 -------
 
-Total SCF time: 0 days 0 hours 0 min 4 sec 
+Total SCF time: 0 days 0 hours 0 min 4 sec
 
 Total time                  ....       4.864 sec
 Sum of individual times     ....       3.813 sec  ( 78.4%)
@@ -5008,19 +5008,19 @@ Magnitude (Debye)      :      0.001113192
 
 
 --------------------
-Rotational spectrum 
+Rotational spectrum
 --------------------
- 
-Rotational constants in cm-1:             0.000000             0.187158             0.187158 
-Rotational constants in MHz :             0.000000          5610.870197          5610.870197 
 
-Dipole components along the rotational axes: 
-x,y,z [a.u.] :     0.000438    -0.000001     0.000000 
-x,y,z [Debye]:     0.001113    -0.000002     0.000000 
+Rotational constants in cm-1:             0.000000             0.187158             0.187158
+Rotational constants in MHz :             0.000000          5610.870197          5610.870197
 
- 
+Dipole components along the rotational axes:
+x,y,z [a.u.] :     0.000438    -0.000001     0.000000
+x,y,z [Debye]:     0.001113    -0.000002     0.000000
 
-Dipole moment calculation done in   0.0 sec 
+
+
+Dipole moment calculation done in   0.0 sec
 
 Maximum memory used throughout the entire PROP-calculation: 16.3 MB
 
@@ -5067,7 +5067,7 @@ Hence, in our opinion, the algorithm design and method developments papers are e
      doi.org/10.1016/j.chemphys.2008.10.036
   3. Lehtola, S.; Steigemann, C.; Oliveira, M.; Marques, M.
      Recent developments in Libxc - A comprehensive library of functionals for density functional theory
-     Software X 2018 7 , 
+     Software X 2018 7 ,
      doi.org/10.1016/j.softx.2017.11.002
   4. Helmich-Paris, B.; de Souza, B.; Neese, F.; Izsák, R.
      An improved chain of spheres for exchange algorithm
@@ -5078,7 +5078,7 @@ Hence, in our opinion, the algorithm design and method developments papers are e
      J. Comp. Chem. 2022 44(3), 381
      doi.org/10.1002/jcc.26942
 
-List of suggested additional citations. These are papers that are important in the 'surrounding' of 
+List of suggested additional citations. These are papers that are important in the 'surrounding' of
 of this run, or papers that preceded the highly important papers. If you like your results we are grateful for a citation.
 
   1. Izsak, R.; Neese, F.
@@ -5095,7 +5095,7 @@ of this run, or papers that preceded the highly important papers. If you like yo
      doi.org/10.1002/wcms.81
   4. Izsak, R.; Neese, F.; Klopper, W.
      Robust fitting techniques in the chain of spheres approximation to the Fock exchange: The role of the complementary space
-     J. Chem. Phys. 2013 139 , 
+     J. Chem. Phys. 2013 139 ,
      doi.org/10.1063/1.4819264
   5. Neese, F.
      Software update: the ORCA program system, version 4.0

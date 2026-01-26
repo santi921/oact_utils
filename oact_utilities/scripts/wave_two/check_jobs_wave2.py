@@ -1,6 +1,6 @@
 import os
-from oact_utilities.utils.status import check_sucessful_jobs
 
+from oact_utilities.utils.status import check_sucessful_jobs
 
 if __name__ == "__main__":
 

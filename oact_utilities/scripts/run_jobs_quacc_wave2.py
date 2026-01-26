@@ -1,24 +1,21 @@
+import argparse
 import os
-import sys
-import time
-import parsl
 import pickle as pkl
+import socket
+import sys
 
-from parsl.executors import HighThroughputExecutor
-from parsl.providers import SlurmProvider
-from parsl.launchers import SimpleLauncher
-from parsl.config import Config
+import parsl
 from parsl import python_app
+from parsl.config import Config
+from parsl.executors import HighThroughputExecutor
+from parsl.launchers import SimpleLauncher
+from parsl.providers import SlurmProvider
 
-from oact_utilities.core.orca.recipes import single_point_calculation
 from oact_utilities.utils.baselines import (
-    process_multiplicity_file,
     process_geometry_file,
+    process_multiplicity_file,
 )
 from oact_utilities.utils.status import check_job_termination
-
-import argparse
-import socket
 
 should_stop = False
 
@@ -95,7 +92,6 @@ def jobs_wrapper_an66(
     """
     import os
     import time
-    import pickle as pkl
 
     from oact_utilities.core.orca.recipes import single_point_calculation
 
@@ -256,7 +252,7 @@ def parsl_wave2(
                 if k in df_multiplicity.keys()
             }
 
-            for mol_name, vals in dict_geoms.items():
+            for mol_name, _ in dict_geoms.items():
                 folder_mol = os.path.join(folder_out_base, mol_name)
                 dict_unified[mol_name]["dir_name"] = folder_mol
                 os.makedirs(folder_mol, exist_ok=True)

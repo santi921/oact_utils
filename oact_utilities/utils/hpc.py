@@ -31,7 +31,9 @@ def write_flux_no_template_sella_ase(
 
     # go through each subfolder in root_directory and write a flux job for each, scan for .inp files and add them to last line of template
     # First, if root_dir itself contains .inp files, write a flux job there
-    inp_files_root = [os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.endswith(".inp")]
+    inp_files_root = [
+        os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.endswith(".inp")
+    ]
     if inp_files_root:
         out_lines = base_lines.copy()
         with open(os.path.join(root_dir, "flux_job.flux"), "w") as fh:
@@ -84,7 +86,9 @@ def write_flux_no_template(
 
     # go through each subfolder in root_directory and write a flux job for each, scan for .inp files and add them to last line of template
     # If root_dir itself contains .inp files, write a flux job directly there (useful when root_dir is a job folder)
-    inp_files_root = [os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.endswith(".inp")]
+    inp_files_root = [
+        os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.endswith(".inp")
+    ]
     if inp_files_root and not two_step:
         out_lines = base_lines.copy()
         if out_lines[-1].endswith("\n"):
@@ -164,7 +168,7 @@ def write_slurm_no_template(
         "#!/bin/sh\n",
         "#SBATCH -N 1\n",
         # f"#SBATCH -n {n_cores}\n", # optional, remove with None
-        f"#SBATCH --constraint standard\n",
+        "#SBATCH --constraint standard\n",
         f"#SBATCH --qos {queue}\n",
         f"#SBATCH --account {allocation}\n",
         f"#SBATCH -t {n_hours}:00:00\n",
@@ -232,7 +236,7 @@ def write_slurm_no_template(
 
 def write_flux(template_file: str, root_dir: str, two_step: bool = False) -> None:
 
-    with open(template_file, "r") as f:
+    with open(template_file) as f:
         lines = f.readlines()
 
     # remove lines that start with #* and * and lines in between

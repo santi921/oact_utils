@@ -1,6 +1,6 @@
 import os
-from oact_utilities.utils.status import check_sucessful_jobs_sella
 
+from oact_utilities.utils.status import check_sucessful_jobs_sella
 
 if __name__ == "__main__":
 

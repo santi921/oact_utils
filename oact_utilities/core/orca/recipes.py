@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import os
 
-from annotated_types import doc
-
-from oact_utilities.core.orca._base import run_and_summarize, run_and_summarize_opt
+from ase.calculators.orca import ORCA, OrcaProfile
 from quacc import change_settings
 from sella import Sella
 
+from oact_utilities.core.orca._base import run_and_summarize, run_and_summarize_opt
 from oact_utilities.core.orca.calc import Vertical, get_orca_blocks
 
 
@@ -195,9 +194,6 @@ def ase_relaxation(
         )
 
     return doc
-
-
-from ase.calculators.orca import ORCA, OrcaProfile
 
 
 def pure_ase_relaxation(

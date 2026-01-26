@@ -1,20 +1,22 @@
 import os
-import shutil
-import pytest
-from pathlib import Path
 import pickle as pkl
+import shutil
+from pathlib import Path
+
+import numpy as np
+import pytest
+from spyrmsd.rmsd import rmsd
+
 from oact_utilities.core.orca.recipes import ase_relaxation
-from oact_utilities.utils.create import (
-    read_geom_from_inp_file,
-    read_template,
-    fetch_actinides,
-)
 from oact_utilities.utils.analysis import (
     get_geo_forces,
     get_rmsd_start_final,
 )
-from spyrmsd.rmsd import rmsd
-import numpy as np
+from oact_utilities.utils.create import (
+    fetch_actinides,
+    read_geom_from_inp_file,
+    read_template,
+)
 
 hartree_to_ev = 27.2114
 
@@ -38,7 +40,10 @@ def test_H2(
     os.makedirs(output_directory, exist_ok=True)
 
     # Skip this test if ORCA is not available on the system
-    if not (os.path.exists(orca_cmd) and os.access(orca_cmd, os.X_OK)) and shutil.which("orca") is None:
+    if (
+        not (os.path.exists(orca_cmd) and os.access(orca_cmd, os.X_OK))
+        and shutil.which("orca") is None
+    ):
         pytest.skip("ORCA executable not found; skipping ORCA-dependent test")
 
     res_dict = ase_relaxation(
@@ -62,7 +67,7 @@ def test_H2(
     with open(f"{output_directory}/results.pkl", "wb") as f:
         pkl.dump(res_dict, f)
 
-    run_folder = res_dict["dir_name"]
+    # run_folder = res_dict["dir_name"]
 
     # assert job is completed
     assert res_dict["converged"], "quacc baseline job did not converge"
@@ -88,7 +93,7 @@ def test_H2(
 
     lines_to_write = []
     lines_to_write.append(f"%pal\n nprocs {cores} \nend\n\n")
-    lines_to_write.append(f"%basis\n")
+    lines_to_write.append("%basis\n")
     for element in element_set:
         if element in actinide_list:
             if os.path.isfile(actinide_basis):
@@ -110,7 +115,7 @@ def test_H2(
                     f'  NewGTO {element} "{non_actinide_basis}" end\n'
                 )
 
-    lines_to_write.append(f"end\n\n")
+    lines_to_write.append("end\n\n")
 
     lines_to_write.append(f"* xyz {charge} {spin}\n")
     for atom in read_geom_from_inp_file(str(inp_test)):
@@ -144,12 +149,19 @@ def test_H2(
     os.system(command_loose)
 
     # find log file; if ORCA didn't produce a usable log/out, skip the rest of the test
-    candidate_logs = [f for f in os.listdir(root_dir) if f.endswith(".log") or f.endswith(".out") or "flux-" in f]
+    candidate_logs = [
+        f
+        for f in os.listdir(root_dir)
+        if f.endswith(".log") or f.endswith(".out") or "flux-" in f
+    ]
     if not candidate_logs:
-        pytest.skip("ORCA did not produce a log/output file; skipping ORCA-dependent assertions")
+        pytest.skip(
+            "ORCA did not produce a log/output file; skipping ORCA-dependent assertions"
+        )
     log_file_name = candidate_logs[0]
     log_file_path = os.path.join(root_dir, log_file_name)
 
+    # Attempt to parse ORCA output and compare to Quacc results; skip if parsing fails
     # nprocs, total_time_seconds = find_timings_and_cores(log_file_path)
     geo_forces = get_geo_forces(log_file=log_file_path)
     geom_info = get_rmsd_start_final(root_dir)

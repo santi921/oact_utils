@@ -1,8 +1,9 @@
-import time
 import os
+import time
+
 from oact_utilities.core.orca.recipes import pure_ase_relaxation
 from oact_utilities.utils.create import read_geom_from_inp_file
-from oact_utilities.utils.status import check_sella_complete, check_job_termination
+from oact_utilities.utils.status import check_job_termination, check_sella_complete
 
 
 def main():
@@ -26,7 +27,7 @@ def main():
     print(check_sella_complete(output_directory, fmax=0.05))
     print(check_job_termination(output_directory))
 
-    res_dict = pure_ase_relaxation(
+    _ = pure_ase_relaxation(
         atoms=atoms_orca,
         charge=charge,
         spin_multiplicity=mult,

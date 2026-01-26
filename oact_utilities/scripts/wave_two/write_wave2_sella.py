@@ -1,17 +1,14 @@
-import os
-import time
 import argparse
+import os
 
-from oact_utilities.utils.baselines import (
-    process_multiplicity_file,
-    process_geometry_file,
-)
-from oact_utilities.utils.hpc import write_flux_no_template_sella_ase
-from oact_utilities.utils.create import write_inputs_ase
-from oact_utilities.utils.status import check_job_termination
 from oact_utilities.core.orca.calc import write_orca_inputs
-
-import time
+from oact_utilities.utils.baselines import (
+    process_geometry_file,
+    process_multiplicity_file,
+)
+from oact_utilities.utils.create import write_inputs_ase
+from oact_utilities.utils.hpc import write_flux_no_template_sella_ase
+from oact_utilities.utils.status import check_job_termination
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
@@ -120,7 +117,7 @@ def write_sella_python_ase_job(
                 if k in df_multiplicity.keys()
             }
 
-            for mol_name, vals in dict_geoms.items():
+            for mol_name, _ in dict_geoms.items():
                 # print(f"Processing molecule: {mol_name}, geometry with {len(vals)} atoms")
                 # if orca.inp already exists in folder_to_use/mol_name, delete
 
@@ -144,7 +141,7 @@ def write_sella_python_ase_job(
 
                     restart = False
                     # check if there is no *inp file already there
-                    if "orca.inp" not in os.listdir(folder_mol) and overwrite == False:
+                    if "orca.inp" not in os.listdir(folder_mol) and not overwrite:
                         write_orca_inputs(
                             atoms=dict_unified[mol_name]["geometry"],
                             output_directory=folder_mol,

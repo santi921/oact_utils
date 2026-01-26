@@ -1,6 +1,4 @@
-import os
 from oact_utilities.utils.jobs import launch_flux_jobs
-
 
 # roots
 # root_directory = "/usr/workspace/vargas58/orca_test/an66_omol_sweep/omol/"
