@@ -1,0 +1,226 @@
+"""Tests for architector workflow manager."""
+
+import sqlite3
+
+import pandas as pd
+import pytest
+
+from oact_utilities.utils.architector import create_workflow_db
+from oact_utilities.workflows import ArchitectorWorkflow, JobStatus, create_workflow
+
+
+@pytest.fixture
+def sample_csv(tmp_path):
+    """Create a sample architector CSV file."""
+    csv_file = tmp_path / "sample.csv"
+
+    # Create sample XYZ strings (without atom count and comment lines)
+    xyz1 = """H 0.0 0.0 0.0
+H 0.0 0.0 0.74"""
+
+    xyz2 = """O 0.0 0.0 0.0
+H 0.757 0.586 0.0
+H -0.757 0.586 0.0"""
+
+    data = {
+        "aligned_csd_core": [xyz1, xyz2],
+        "charge": [0, 0],
+        "uhf": [0, 0],  # unpaired electrons
+        "other_col": ["A", "B"],
+    }
+
+    df = pd.DataFrame(data)
+    df.to_csv(csv_file, index=False)
+
+    return csv_file
+
+
+def test_create_workflow(sample_csv, tmp_path):
+    """Test workflow creation from CSV."""
+    db_path = tmp_path / "workflow.db"
+
+    db_path_ret, workflow = create_workflow(
+        csv_path=sample_csv,
+        db_path=db_path,
+        geometry_column="aligned_csd_core",
+        charge_column="charge",
+        spin_column="uhf",
+    )
+
+    assert db_path_ret.exists()
+
+    # Check that jobs were created
+    jobs = workflow.get_jobs_by_status(JobStatus.READY)
+    assert len(jobs) == 2
+
+    # Check job details
+    job1 = jobs[0]
+    assert job1.natoms == 2
+    assert "H" in job1.elements
+
+    job2 = jobs[1]
+    assert job2.natoms == 3
+    assert "O" in job2.elements
+
+    workflow.close()
+
+
+def test_workflow_status_updates(tmp_path):
+    """Test updating job statuses."""
+    db_path = tmp_path / "test.db"
+
+    # Use new db init
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+
+    # Insert test rows
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="ready",
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="O;H;H",
+        natoms=3,
+        geometry="O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0",
+        status="ready",
+    )
+    conn.commit()
+    conn.close()
+
+    # Test workflow
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Check initial state
+        ready = workflow.get_jobs_by_status(JobStatus.READY)
+        assert len(ready) == 2
+
+        # Update one job
+        workflow.update_status(1, JobStatus.RUNNING)
+
+        # Check updated state
+        ready = workflow.get_jobs_by_status(JobStatus.READY)
+        running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(ready) == 1
+        assert len(running) == 1
+
+        # Bulk update
+        workflow.update_status_bulk([1, 2], JobStatus.COMPLETED)
+
+        completed = workflow.get_jobs_by_status(JobStatus.COMPLETED)
+        assert len(completed) == 2
+
+
+def test_workflow_metrics(tmp_path):
+    """Test updating job metrics."""
+    db_path = tmp_path / "test.db"
+
+    # Use new db init
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Update metrics
+        workflow.update_job_metrics(
+            job_id=1,
+            job_dir="/path/to/job",
+            max_forces=0.00123,
+            scf_steps=15,
+            final_energy=-1.23456,
+        )
+
+        # Retrieve and check
+        jobs = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(jobs) == 1
+        job = jobs[0]
+        assert job.job_dir == "/path/to/job"
+        assert job.max_forces == pytest.approx(0.00123)
+        assert job.scf_steps == 15
+        assert job.final_energy == pytest.approx(-1.23456)
+
+
+def test_count_by_status(tmp_path):
+    """Test status counting."""
+    db_path = tmp_path / "test.db"
+
+    # Use new db init
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+
+    for i in range(10):
+        if i < 5:
+            status = "ready"
+        elif i < 8:
+            status = "running"
+        elif i < 9:
+            status = "completed"
+        else:
+            status = "failed"
+
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status=status,
+        )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        counts = workflow.count_by_status()
+
+        assert counts[JobStatus.READY] == 5
+        assert counts[JobStatus.RUNNING] == 3
+        assert counts[JobStatus.COMPLETED] == 1
+        assert counts[JobStatus.FAILED] == 1
+
+
+def test_create_workflow_db_directly(sample_csv, tmp_path):
+    """Test direct database creation."""
+    db_path = tmp_path / "test.db"
+
+    result_path = create_workflow_db(
+        csv_path=sample_csv,
+        db_path=db_path,
+        geometry_column="aligned_csd_core",
+        charge_column="charge",
+        spin_column="uhf",
+    )
+
+    assert result_path.exists()
+
+    # Check database contents
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM structures")
+    count = cur.fetchone()[0]
+    assert count == 2
+
+    cur.execute("SELECT elements, natoms, charge, spin FROM structures WHERE id = 1")
+    row = cur.fetchone()
+    assert row[0] == "H;H"  # elements
+    assert row[1] == 2  # natoms
+    assert row[2] == 0  # charge
+    assert row[3] == 1  # spin (uhf=0 -> 2S+1 = 1)
+
+    conn.close()

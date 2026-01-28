@@ -1,4 +1,6 @@
 import os
+import re
+from pathlib import Path
 
 import numpy as np
 from ase.io.trajectory import TrajectoryReader
@@ -178,6 +180,79 @@ def get_geo_forces(log_file: str) -> list:
     return list_info
 
 
+def parse_max_forces(output_file: str) -> float | None:
+    """Extract the maximum force from an ORCA output file.
+
+    Args:
+        output_file: Path to ORCA .out file.
+
+    Returns:
+        Maximum force value (in Eh/Bohr), or None if not found.
+    """
+    try:
+        with open(output_file) as f:
+            lines = f.readlines()
+
+        # Look for "MAX gradient" in geometry optimization output
+        # Example line: "MAX gradient             0.00123456"
+        max_force = None
+        for line in reversed(lines):
+            if "MAX gradient" in line:
+                parts = line.split()
+                try:
+                    max_force = float(parts[-1])
+                    break
+                except (ValueError, IndexError):
+                    continue
+
+        return max_force
+
+    except Exception:
+        return None
+
+
+def parse_scf_steps(output_file: str | Path) -> int | None:
+    """Extract the number of SCF cycles from an ORCA output file.
+
+    Args:
+        output_file: Path to ORCA .out file.
+
+    Returns:
+        Total number of SCF iterations, or None if not found.
+    """
+    output_file = Path(output_file)
+    if not output_file.exists():
+        return None
+
+    try:
+        with open(output_file) as f:
+            content = f.read()
+
+        # Count SCF iterations
+        # Look for lines like "SCF ITERATIONS"
+        # Or count the number of times "SCF converged" appears
+        scf_pattern = r"SCF ITERATIONS\s+(\d+)"
+        matches = re.findall(scf_pattern, content)
+
+        if matches:
+            # Sum all SCF iterations if multiple geometry steps
+            return sum(int(m) for m in matches)
+
+        # Alternative: look for cycle numbers in SCF output
+        # Example: "ITER       Energy         Delta-E        Max-DP      RMS-DP      [F,P]     Damp"
+        #          "  0   -123.456789012   0.000000e+00  0.12345678  0.01234567  0.1234567  0.7000"
+        cycle_pattern = r"^\s*(\d+)\s+-?\d+\.\d+\s+"
+        cycles = re.findall(cycle_pattern, content, re.MULTILINE)
+        if cycles:
+            # Return the highest cycle number + 1 (since cycles start at 0)
+            return max(int(c) for c in cycles) + 1
+
+        return None
+
+    except Exception:
+        return None
+
+
 """ Format  of orca.engrad file:
 # Number of atoms
 #
@@ -204,10 +279,14 @@ def get_geo_forces(log_file: str) -> list:
 def get_engrad(engrad_file: str) -> dict:
     """
     Extract energy and gradient information from orca.engrad file.
+
+    Also computes the maximum force magnitude from the gradient.
+
     Args:
         engrad_file (str): Path to the orca.engrad file.
     Returns:
-        List[Dict[str, Any]]: List of dictionaries with energy and gradient info.
+        Dict with keys: total_energy_Eh, gradient_Eh_per_bohr, elements,
+        coords_bohr, max_force_Eh_per_bohr
     """
 
     dict_info = {}
@@ -237,6 +316,20 @@ def get_engrad(engrad_file: str) -> dict:
                 j += 1
             dict_info["elements"] = elements
             dict_info["coords_bohr"] = coords
+
+    # Compute max force from gradient
+    gradient = dict_info.get("gradient_Eh_per_bohr")
+    if gradient and len(gradient) > 0:
+        try:
+            gradient_arr = np.array(gradient)
+            natoms = len(gradient_arr) // 3
+
+            if len(gradient_arr) % 3 == 0 and natoms > 0:
+                gradient_3d = gradient_arr.reshape((natoms, 3))
+                force_magnitudes = np.linalg.norm(gradient_3d, axis=1)
+                dict_info["max_force_Eh_per_bohr"] = float(np.max(force_magnitudes))
+        except Exception:
+            pass
 
     return dict_info
 
@@ -478,6 +571,144 @@ def get_energy_from_log_file(log_file):
                 energy = float(line.strip().split()[3])
                 energy_arr.append(energy)
     return energy_arr
+
+
+def parse_final_energy(output_file: str) -> float | None:
+    """Extract the final energy from an ORCA output file.
+
+    Args:
+        output_file: Path to ORCA .out file.
+
+    Returns:
+        Final energy in Hartree, or None if not found.
+    """
+    try:
+        with open(output_file) as f:
+            lines = f.readlines()
+
+        # Look for "FINAL SINGLE POINT ENERGY"
+        for line in reversed(lines):
+            if "FINAL SINGLE POINT ENERGY" in line:
+                parts = line.split()
+                try:
+                    return float(parts[-1])
+                except (ValueError, IndexError):
+                    continue
+
+        return None
+
+    except Exception:
+        return None
+
+
+def parse_job_metrics(
+    job_dir: str | Path, unzip: bool = False
+) -> dict[str, float | int | None]:
+    """Extract multiple metrics from ORCA output files in a job directory.
+
+    This function handles both regular and gzipped ORCA output files.
+    It tries to extract max forces from .engrad file first (more reliable),
+    then falls back to parsing text output.
+
+    Args:
+        job_dir: Path to job directory containing ORCA output.
+        unzip: If True, look for gzipped files (e.g., quacc output).
+
+    Returns:
+        Dictionary with keys: max_forces, scf_steps, final_energy, success.
+    """
+    job_dir = Path(job_dir)
+
+    try:
+        # Find output file
+        if unzip:
+            import gzip
+            import tempfile
+
+            # Look for gzipped output
+            gz_files = list(job_dir.glob("*.out.gz"))
+            if not gz_files:
+                return {
+                    "max_forces": None,
+                    "scf_steps": None,
+                    "final_energy": None,
+                    "success": False,
+                }
+
+            # Unzip to temp file
+            with gzip.open(gz_files[0], "rt") as f_in:
+                content = f_in.read()
+                with tempfile.NamedTemporaryFile(
+                    mode="w", delete=False, suffix=".out"
+                ) as f_out:
+                    f_out.write(content)
+                    temp_path = f_out.name
+
+            try:
+                output_file = temp_path
+                max_forces = parse_max_forces(output_file)
+                scf_steps = parse_scf_steps(output_file)
+                final_energy = parse_final_energy(output_file)
+
+                # Try to get max forces from engrad file if available
+                engrad_gz = list(job_dir.glob("*.engrad.gz"))
+                if engrad_gz and max_forces is None:
+                    with gzip.open(engrad_gz[0], "rt") as f_in:
+                        with tempfile.NamedTemporaryFile(
+                            mode="w", delete=False, suffix=".engrad"
+                        ) as f_out:
+                            f_out.write(f_in.read())
+                            engrad_temp = f_out.name
+                    try:
+                        engrad_data = get_engrad(engrad_temp)
+                        max_forces = engrad_data.get("max_force_Eh_per_bohr")
+                    finally:
+                        import os
+
+                        os.unlink(engrad_temp)
+
+                # Check termination from content (for gzipped files)
+                success = "ORCA TERMINATED NORMALLY" in content
+
+            finally:
+                import os
+
+                os.unlink(temp_path)
+        else:
+            # Regular output file
+            output_file = pull_log_file(str(job_dir))
+            max_forces = parse_max_forces(output_file)
+            scf_steps = parse_scf_steps(output_file)
+            final_energy = parse_final_energy(output_file)
+
+            # Try to get max forces from engrad file if available and not yet found
+            engrad_file = job_dir / "orca.engrad"
+            if engrad_file.exists() and max_forces is None:
+                try:
+                    engrad_data = get_engrad(str(engrad_file))
+                    max_forces = engrad_data.get("max_force_Eh_per_bohr")
+                except Exception:
+                    pass
+
+            # Check if job completed successfully
+            termination = check_job_termination(str(job_dir))
+            success = termination == 1
+
+        return {
+            "max_forces": max_forces,
+            "scf_steps": scf_steps,
+            "final_energy": final_energy,
+            "success": success,
+        }
+
+    except Exception as e:
+        return {
+            "max_forces": None,
+            "scf_steps": None,
+            "final_energy": None,
+            "success": False,
+            "error": str(e),
+        }
 
 
 def parse_sella_log(sella_log_file, filter: bool = False) -> dict:

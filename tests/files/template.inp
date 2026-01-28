@@ -1,0 +1,28 @@
+! wB97M-V RIJCOSX def2/J NoUseSym DIIS NOSOSCF NormalConv DEFGRID3 OPT ALLPOP NoTRAH
+
+%scf
+  MaxIter 300
+  Convergence Tight
+  THRESH 1e-12
+  TCUT 1e-13
+  Shift Shift 0.1 ErrOff 0.1 end
+end
+
+#%pal
+#  nprocs 8
+#end
+
+%elprop Dipole true Quadrupole true end
+%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end
+
+
+# Geometry: linear O=U=O starting guess (Å). Adjust bond lengths as needed.
+# CHARGE & MULTIPLICITY:
+#  - Uranyl dication UO2^2+ (common molecular target): charge=+2, singlet => "2 1"
+#  - Neutral UO2 (gas-phase dioxide): often open-shell; one option is triplet => "0 3"
+# Set the line below to what you want to compute.
+#* xyz 2 1
+#U     0.000000    0.000000    0.000000
+#O      0.000000    0.000000    2.00
+#O     0.000000    0.000000   -2.00
+#*

@@ -1,0 +1,22 @@
+#
+# Number of atoms
+#
+ 2
+#
+# The current total energy in Eh
+#
+   -670.534993289315
+#
+# The current gradient in Eh/bohr
+#
+       0.000000074179
+       0.000000059906
+       0.000128269733
+      -0.000000074179
+      -0.000000059906
+      -0.000128269726
+#
+# The atomic numbers and current coordinates in Bohr
+#
+  95     0.0000000    0.0000000    0.0266835
+   8     0.0000000    0.0000000    3.4862607
