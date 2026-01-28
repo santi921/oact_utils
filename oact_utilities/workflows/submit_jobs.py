@@ -1,7 +1,7 @@
 """Job submission utilities for architector workflows.
 
 This module provides utilities to submit jobs from the workflow database
-to HPC systems (Flux or SLURM).
+to HPC systems (Flux or SLURM). Jobs generate ORCA input files directly.
 """
 
 from __future__ import annotations
@@ -10,24 +10,74 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypedDict
 
+from ..core.orca.calc import write_orca_inputs
+from ..utils.architector import xyz_string_to_atoms
 from .architector_workflow import ArchitectorWorkflow, JobStatus
+
+
+class OrcaConfig(TypedDict, total=False):
+    """Configuration options for ORCA calculations.
+
+    Attributes:
+        functional: DFT functional (default: "wB97M-V").
+        simple_input: Input template (default: "omol"). Options: "omol", "x2c", "dk3".
+        actinide_basis: Basis set for actinides (default: "ma-def-TZVP").
+        actinide_ecp: ECP for actinides (default: None).
+        non_actinide_basis: Basis set for non-actinides (default: "def2-TZVPD").
+        scf_MaxIter: Maximum SCF iterations (default: None, uses ORCA default).
+        nbo: Enable NBO analysis (default: False).
+        opt: Enable geometry optimization (default: False).
+        orca_path: Path to ORCA executable (default: scheduler-specific).
+    """
+
+    functional: str
+    simple_input: str
+    actinide_basis: str
+    actinide_ecp: str | None
+    non_actinide_basis: str
+    scf_MaxIter: int | None
+    nbo: bool
+    opt: bool
+    orca_path: str
+
+
+DEFAULT_ORCA_CONFIG: OrcaConfig = {
+    "functional": "wB97M-V",
+    "simple_input": "omol",
+    "actinide_basis": "ma-def-TZVP",
+    "actinide_ecp": "def2-ECP",
+    "non_actinide_basis": "def2-TZVPD",
+    "scf_MaxIter": None,
+    "nbo": False,
+    "opt": False,
+}
+
+DEFAULT_ORCA_PATHS = {
+    "flux": "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
+    "macos_arm64_openmpi411": "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
+    "slurm": "orca",
+}
 
 
 def prepare_job_directory(
     job_record,
     root_dir: Path,
     job_dir_pattern: str = "job_{orig_index}",
+    orca_config: OrcaConfig | None = None,
+    n_cores: int = 4,
     setup_func: Callable | None = None,
 ) -> Path:
-    """Create a job directory and prepare input files.
+    """Create a job directory and prepare ORCA input files.
 
     Args:
         job_record: JobRecord from the workflow database.
         root_dir: Root directory where job directories will be created.
         job_dir_pattern: Pattern for job directory names.
-        setup_func: Optional function to set up input files. Called with
+        orca_config: ORCA calculation configuration.
+        n_cores: Number of CPU cores for ORCA.
+        setup_func: Optional function to set up additional files. Called with
                    (job_dir, job_record) as arguments.
 
     Returns:
@@ -36,17 +86,37 @@ def prepare_job_directory(
     job_dir_name = job_dir_pattern.format(
         orig_index=job_record.orig_index,
         id=job_record.id,
-        index_in_chunk=job_record.index_in_chunk,
     )
     job_dir = root_dir / job_dir_name
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write geometry to XYZ file
+    # Merge with defaults
+    config: OrcaConfig = {**DEFAULT_ORCA_CONFIG, **(orca_config or {})}
+
+    # Write ORCA input file
     if job_record.geometry:
-        xyz_file = job_dir / "input.xyz"
-        with open(xyz_file, "w") as f:
-            f.write(job_record.geometry.strip())
-            f.write("\n")
+        atoms = xyz_string_to_atoms(job_record.geometry)
+        # print("")
+        charge = job_record.charge if job_record.charge is not None else 0
+        # DB stores spin multiplicity directly
+        mult = job_record.spin if job_record.spin is not None else 1
+
+        write_orca_inputs(
+            atoms=atoms,
+            output_directory=str(job_dir),
+            charge=charge,
+            mult=mult,
+            nbo=config.get("nbo", False),
+            cores=n_cores,
+            opt=config.get("opt", False),
+            functional=config.get("functional", "wB97M-V"),
+            simple_input=config.get("simple_input", "omol"),
+            orca_path=config.get("orca_path"),
+            scf_MaxIter=config.get("scf_MaxIter"),
+            actinide_basis=config.get("actinide_basis", "ma-def-TZVP"),
+            actinide_ecp=config.get("actinide_ecp"),
+            non_actinide_basis=config.get("non_actinide_basis", "def2-TZVPD"),
+        )
 
     # Call custom setup function if provided
     if setup_func:
@@ -61,7 +131,9 @@ def write_flux_job_file(
     n_hours: int = 2,
     queue: str = "pbatch",
     allocation: str = "dnn-sim",
-    command: str = "python orca.py",
+    orca_path: str = "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
+    conda_env: str = "py10mpi",
+    input_file: str = "orca.inp",
 ) -> Path:
     """Write a Flux job submission script.
 
@@ -71,12 +143,15 @@ def write_flux_job_file(
         n_hours: Number of hours for job runtime.
         queue: Queue/partition name.
         allocation: Allocation/account name.
-        command: Command to execute.
+        orca_path: Path to ORCA executable.
+        conda_env: Conda environment to activate.
+        input_file: Name of the ORCA input file.
 
     Returns:
         Path to the created flux job file.
     """
     flux_script = job_dir / "flux_job.flux"
+    input_path = job_dir / input_file
 
     lines = [
         "#!/bin/sh\n",
@@ -87,10 +162,9 @@ def write_flux_job_file(
         f"#flux: -t {n_hours*60}m\n",
         "\n",
         "source ~/.bashrc\n",
-        "conda activate py10mpi\n",
+        f"conda activate {conda_env}\n",
         "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
-        "export JAX_PLATFORMS=cpu\n",
-        f"{command}\n",
+        f"{orca_path} {input_path}\n",
     ]
 
     with open(flux_script, "w") as f:
@@ -108,7 +182,9 @@ def write_slurm_job_file(
     n_hours: int = 2,
     queue: str = "pbatch",
     allocation: str = "dnn-sim",
-    command: str = "python orca.py",
+    orca_path: str = "orca",
+    conda_env: str = "py10mpi",
+    input_file: str = "orca.inp",
 ) -> Path:
     """Write a SLURM job submission script.
 
@@ -118,25 +194,29 @@ def write_slurm_job_file(
         n_hours: Number of hours for job runtime.
         queue: QOS name.
         allocation: Account name.
-        command: Command to execute.
+        orca_path: Path to ORCA executable.
+        conda_env: Conda environment to activate.
+        input_file: Name of the ORCA input file.
 
     Returns:
         Path to the created SLURM job file.
     """
     slurm_script = job_dir / "slurm_job.sh"
+    input_path = job_dir / input_file
 
     lines = [
         "#!/bin/sh\n",
         "#SBATCH -N 1\n",
+        f"#SBATCH --ntasks-per-node {n_cores}\n",
         "#SBATCH --constraint standard\n",
         f"#SBATCH --qos {queue}\n",
         f"#SBATCH --account {allocation}\n",
         f"#SBATCH -t {n_hours}:00:00\n",
         "\n",
         "source ~/.bashrc\n",
-        "conda activate py10mpi\n",
+        f"conda activate {conda_env}\n",
         "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
-        f"{command}\n",
+        f"{orca_path} {input_path}\n",
     ]
 
     with open(slurm_script, "w") as f:
@@ -154,13 +234,15 @@ def submit_batch(
     batch_size: int = 10,
     scheduler: str = "flux",
     job_dir_pattern: str = "job_{orig_index}",
+    orca_config: OrcaConfig | None = None,
     setup_func: Callable | None = None,
     n_cores: int = 4,
     n_hours: int = 2,
     queue: str = "pbatch",
     allocation: str = "dnn-sim",
-    command: str = "python orca.py",
+    conda_env: str = "py10mpi",
     dry_run: bool = False,
+    max_fail_count: int | None = None,
 ) -> list[int]:
     """Submit a batch of ready jobs to the HPC scheduler.
 
@@ -170,13 +252,15 @@ def submit_batch(
         batch_size: Number of jobs to submit in this batch.
         scheduler: Either "flux" or "slurm".
         job_dir_pattern: Pattern for job directory names.
+        orca_config: ORCA calculation configuration.
         setup_func: Optional function to set up job-specific files.
         n_cores: Number of cores per job.
         n_hours: Runtime in hours.
         queue: Queue/partition/QOS name.
         allocation: Allocation/account name.
-        command: Command to run in each job.
+        conda_env: Conda environment to activate.
         dry_run: If True, prepare directories but don't submit.
+        max_fail_count: If specified, skip jobs with fail_count >= this value.
 
     Returns:
         List of job IDs that were submitted.
@@ -184,8 +268,23 @@ def submit_batch(
     root_dir = Path(root_dir)
     root_dir.mkdir(parents=True, exist_ok=True)
 
+    # Merge config with defaults and set scheduler-specific orca_path if not provided
+    config: OrcaConfig = {**DEFAULT_ORCA_CONFIG, **(orca_config or {})}
+    if "orca_path" not in config or config.get("orca_path") is None:
+        config["orca_path"] = DEFAULT_ORCA_PATHS.get(
+            scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
+        )
+
     # Get ready jobs
     ready_jobs = workflow.get_jobs_by_status(JobStatus.READY)
+
+    # Filter out jobs that have failed too many times
+    if max_fail_count is not None:
+        original_count = len(ready_jobs)
+        ready_jobs = [j for j in ready_jobs if j.fail_count < max_fail_count]
+        skipped = original_count - len(ready_jobs)
+        if skipped > 0:
+            print(f"Skipping {skipped} jobs that have failed {max_fail_count}+ times")
 
     if not ready_jobs:
         print("No ready jobs to submit")
@@ -198,12 +297,18 @@ def submit_batch(
     submitted_ids = []
 
     for i, job in enumerate(jobs_to_submit):
-        # Prepare job directory
+        # Prepare job directory with ORCA input
         job_dir = prepare_job_directory(
-            job, root_dir, job_dir_pattern=job_dir_pattern, setup_func=setup_func
+            job,
+            root_dir,
+            job_dir_pattern=job_dir_pattern,
+            orca_config=config,
+            n_cores=n_cores,
+            setup_func=setup_func,
         )
 
         # Write job submission script
+        orca_path = config.get("orca_path", DEFAULT_ORCA_PATHS["flux"])
         if scheduler.lower() == "flux":
             job_script = write_flux_job_file(
                 job_dir,
@@ -211,9 +316,11 @@ def submit_batch(
                 n_hours=n_hours,
                 queue=queue,
                 allocation=allocation,
-                command=command,
+                orca_path=orca_path,
+                conda_env=conda_env,
             )
             submit_cmd = ["flux", "batch", str(job_script)]
+
         elif scheduler.lower() == "slurm":
             job_script = write_slurm_job_file(
                 job_dir,
@@ -221,7 +328,8 @@ def submit_batch(
                 n_hours=n_hours,
                 queue=queue,
                 allocation=allocation,
-                command=command,
+                orca_path=orca_path,
+                conda_env=conda_env,
             )
             submit_cmd = ["sbatch", str(job_script)]
         else:
@@ -303,17 +411,87 @@ def main():
         help="Allocation/account name (default: dnn-sim)",
     )
     parser.add_argument(
-        "--command",
-        default="python orca.py",
-        help="Command to run (default: python orca.py)",
+        "--conda-env",
+        default="py10mpi",
+        help="Conda environment to activate (default: py10mpi)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Prepare jobs but don't submit",
     )
+    parser.add_argument(
+        "--max-fail-count",
+        type=int,
+        default=None,
+        help="Skip jobs that have failed this many times or more",
+    )
+
+    # ORCA configuration arguments
+    orca_group = parser.add_argument_group("ORCA Configuration")
+    orca_group.add_argument(
+        "--functional",
+        default="wB97M-V",
+        help="DFT functional (default: wB97M-V)",
+    )
+    orca_group.add_argument(
+        "--simple-input",
+        choices=["omol", "x2c", "dk3"],
+        default="omol",
+        help="ORCA input template (default: omol)",
+    )
+    orca_group.add_argument(
+        "--actinide-basis",
+        default="ma-def-TZVP",
+        help="Basis set for actinides (default: ma-def-TZVP)",
+    )
+    orca_group.add_argument(
+        "--actinide-ecp",
+        default=None,
+        help="ECP for actinides (default: None)",
+    )
+    orca_group.add_argument(
+        "--non-actinide-basis",
+        default="def2-TZVPD",
+        help="Basis set for non-actinides (default: def2-TZVPD)",
+    )
+    orca_group.add_argument(
+        "--scf-maxiter",
+        type=int,
+        default=None,
+        help="Maximum SCF iterations (default: ORCA default)",
+    )
+    orca_group.add_argument(
+        "--nbo",
+        action="store_true",
+        help="Enable NBO analysis",
+    )
+    orca_group.add_argument(
+        "--opt",
+        action="store_true",
+        help="Enable geometry optimization",
+    )
+    orca_group.add_argument(
+        "--orca-path",
+        default=None,
+        help="Path to ORCA executable (default: scheduler-specific)",
+    )
 
     args = parser.parse_args()
+
+    # Build ORCA config from CLI arguments
+    orca_config: OrcaConfig = {
+        "functional": args.functional,
+        "simple_input": args.simple_input,
+        "actinide_basis": args.actinide_basis,
+        "actinide_ecp": args.actinide_ecp,
+        "non_actinide_basis": args.non_actinide_basis,
+        "scf_MaxIter": args.scf_maxiter,
+        "nbo": args.nbo,
+        "opt": args.opt,
+    }
+    if args.orca_path:
+        orca_config["orca_path"] = args.orca_path
 
     # Open workflow
     try:
@@ -329,12 +507,14 @@ def main():
         batch_size=args.batch_size,
         scheduler=args.scheduler,
         job_dir_pattern=args.job_dir_pattern,
+        orca_config=orca_config,
         n_cores=args.n_cores,
         n_hours=args.n_hours,
         queue=args.queue,
         allocation=args.allocation,
-        command=args.command,
+        conda_env=args.conda_env,
         dry_run=args.dry_run,
+        max_fail_count=args.max_fail_count,
     )
 
     print(f"\nTotal jobs submitted: {len(submitted_ids)}")

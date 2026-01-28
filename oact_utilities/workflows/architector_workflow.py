@@ -46,6 +46,9 @@ class JobRecord:
     scf_steps: int | None = None
     final_energy: float | None = None
     error_message: str | None = None
+    fail_count: int = 0
+    wall_time: float | None = None
+    n_cores: int | None = None
 
 
 class ArchitectorWorkflow:
@@ -151,6 +154,9 @@ class ArchitectorWorkflow:
                 scf_steps=r[10],
                 final_energy=r[11],
                 error_message=r[12],
+                fail_count=r[13] if len(r) > 13 and r[13] is not None else 0,
+                wall_time=r[14] if len(r) > 14 else None,
+                n_cores=r[15] if len(r) > 15 else None,
             )
             for r in rows
         ]
@@ -184,6 +190,8 @@ class ArchitectorWorkflow:
         scf_steps: int | None = None,
         final_energy: float | None = None,
         error_message: str | None = None,
+        wall_time: float | None = None,
+        n_cores: int | None = None,
     ):
         """Update job metrics (forces, SCF steps, etc).
 
@@ -194,6 +202,8 @@ class ArchitectorWorkflow:
             scf_steps: Number of SCF steps taken.
             final_energy: Final energy in Hartree.
             error_message: Error message if job failed.
+            wall_time: Total wall time in seconds.
+            n_cores: Number of CPU cores used.
         """
         updates = []
         values = []
@@ -213,6 +223,12 @@ class ArchitectorWorkflow:
         if error_message is not None:
             updates.append("error_message = ?")
             values.append(error_message)
+        if wall_time is not None:
+            updates.append("wall_time = ?")
+            values.append(wall_time)
+        if n_cores is not None:
+            updates.append("n_cores = ?")
+            values.append(n_cores)
 
         if updates:
             updates.append("updated_at = CURRENT_TIMESTAMP")
@@ -274,11 +290,88 @@ class ArchitectorWorkflow:
         """
         self.update_status_bulk(job_ids, JobStatus.RUNNING)
 
-    def reset_failed_jobs(self):
-        """Reset all failed jobs back to ready status for retry."""
-        query = "UPDATE structures SET status = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE status = ?"
-        self._execute_with_retry(query, (JobStatus.READY.value, JobStatus.FAILED.value))
+    def reset_failed_jobs(self, max_fail_count: int | None = None):
+        """Reset all failed jobs back to ready status for retry.
+
+        Increments the fail_count for each job being reset.
+
+        Args:
+            max_fail_count: If specified, only reset jobs with fail_count < max_fail_count.
+                Jobs that have already failed this many times will remain in FAILED status.
+        """
+        if max_fail_count is not None:
+            query = """
+                UPDATE structures
+                SET status = ?,
+                    error_message = NULL,
+                    fail_count = COALESCE(fail_count, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status = ? AND COALESCE(fail_count, 0) < ?
+            """
+            self._execute_with_retry(
+                query, (JobStatus.READY.value, JobStatus.FAILED.value, max_fail_count)
+            )
+        else:
+            query = """
+                UPDATE structures
+                SET status = ?,
+                    error_message = NULL,
+                    fail_count = COALESCE(fail_count, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status = ?
+            """
+            self._execute_with_retry(
+                query, (JobStatus.READY.value, JobStatus.FAILED.value)
+            )
         self.conn.commit()
+
+    def make_jobs_failed_with_max_fail_count(self, max_fail_count: int):
+        """Mark jobs as failed if they have reached the maximum fail count.
+        Args:
+            max_fail_count: Maximum allowed fail count before marking as failed.
+        """
+        query = """
+            UPDATE structures
+            SET status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE COALESCE(fail_count, 0) >= ?
+        """
+        self._execute_with_retry(query, (JobStatus.FAILED.value, max_fail_count))
+        self.conn.commit()
+
+    def get_jobs_by_fail_count(self, min_fail_count: int = 1) -> list[JobRecord]:
+        """Get jobs that have failed at least min_fail_count times.
+
+        Args:
+            min_fail_count: Minimum number of failures (default: 1).
+
+        Returns:
+            List of JobRecord objects with fail_count >= min_fail_count.
+        """
+        query = "SELECT * FROM structures WHERE COALESCE(fail_count, 0) >= ?"
+        cur = self._execute_with_retry(query, (min_fail_count,))
+        rows = cur.fetchall()
+        return [
+            JobRecord(
+                id=r[0],
+                orig_index=r[1],
+                elements=r[2],
+                natoms=r[3],
+                status=JobStatus(r[4]),
+                charge=r[5],
+                spin=r[6],
+                geometry=r[7],
+                job_dir=r[8],
+                max_forces=r[9],
+                scf_steps=r[10],
+                final_energy=r[11],
+                error_message=r[12],
+                fail_count=r[13] if len(r) > 13 and r[13] is not None else 0,
+                wall_time=r[14] if len(r) > 14 else None,
+                n_cores=r[15] if len(r) > 15 else None,
+            )
+            for r in rows
+        ]
 
 
 def create_workflow(
@@ -338,7 +431,7 @@ def update_job_status(
     Returns:
         The new status of the job.
     """
-    from ..utils.analysis import parse_job_metrics
+    from ..utils.analysis import find_timings_and_cores, parse_job_metrics
 
     job_dir = Path(job_dir)
     if not job_dir.exists():
@@ -354,6 +447,27 @@ def update_job_status(
 
             new_status = JobStatus.COMPLETED if metrics["success"] else JobStatus.FAILED
 
+            # Extract timing info for successful jobs
+            wall_time = None
+            n_cores = None
+            if new_status == JobStatus.COMPLETED:
+                # Find the log file for timing extraction
+                log_file = None
+                for pattern in ["*.out", "orca.out", "*.log"]:
+                    matches = list(job_dir.glob(pattern))
+                    if matches:
+                        log_file = str(matches[0])
+                        break
+
+                if log_file:
+                    try:
+                        n_cores, time_dict = find_timings_and_cores(log_file)
+                        if time_dict and "Total" in time_dict:
+                            wall_time = time_dict["Total"]
+                    except Exception:
+                        # Timing extraction is best-effort, don't fail on errors
+                        pass
+
             workflow.update_job_metrics(
                 job_id,
                 job_dir=str(job_dir),
@@ -361,6 +475,8 @@ def update_job_status(
                 scf_steps=metrics.get("scf_steps"),
                 final_energy=metrics.get("final_energy"),
                 error_message=metrics.get("error") if not metrics["success"] else None,
+                wall_time=wall_time,
+                n_cores=n_cores,
             )
 
             workflow.update_status(job_id, new_status)

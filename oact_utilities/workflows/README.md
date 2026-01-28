@@ -6,6 +6,7 @@ High-throughput workflow management for architector calculations on HPC systems.
 
 - **Job Tracking**: SQLite database tracks job status (ready, running, completed, failed)
 - **Metrics Collection**: Automatically extracts max forces, SCF steps, final energy from ORCA outputs
+- **Performance Tracking**: Records wall time and cores used for compute usage analysis (core-hours)
 - **Concurrency Handling**: WAL mode + retry logic for concurrent database access
 - **HPC Integration**: Works with existing Flux/SLURM job generation utilities
 - **Dashboard**: Command-line monitoring with metrics display
@@ -35,6 +36,7 @@ This creates:
 ### 2. Submit Jobs to HPC
 
 ```bash
+# Basic submission with default ORCA settings
 python -m oact_utilities.workflows.submit_jobs \\
     workflow.db \\
     jobs/ \\
@@ -44,12 +46,42 @@ python -m oact_utilities.workflows.submit_jobs \\
     --n-hours 2 \\
     --queue pbatch \\
     --allocation dnn-sim
+
+# With custom ORCA configuration
+python -m oact_utilities.workflows.submit_jobs \\
+    workflow.db \\
+    jobs/ \\
+    --batch-size 100 \\
+    --functional wB97M-V \\
+    --simple-input x2c \\
+    --opt  # Enable geometry optimization
+
+# Skip jobs that have already failed 3+ times
+python -m oact_utilities.workflows.submit_jobs \\
+    workflow.db \\
+    jobs/ \\
+    --batch-size 100 \\
+    --max-fail-count 3
 ```
 
 Creates job directories `jobs/job_0/`, `jobs/job_1/`, etc. with:
-- `input.xyz` - Structure geometry
-- `flux_job.flux` or `slurm_job.sh` - Submission script
+- `orca.inp` - Complete ORCA input file (geometry + level of theory)
+- `flux_job.flux` or `slurm_job.sh` - Submission script that runs ORCA directly
 - Submits to scheduler and marks jobs as "running"
+
+**ORCA Configuration Options:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--functional` | wB97M-V | DFT functional |
+| `--simple-input` | omol | Input template: `omol`, `x2c`, or `dk3` |
+| `--actinide-basis` | ma-def-TZVP | Basis set for actinides |
+| `--actinide-ecp` | None | ECP for actinides |
+| `--non-actinide-basis` | def2-TZVPD | Basis set for other elements |
+| `--scf-maxiter` | ORCA default | Maximum SCF iterations |
+| `--nbo` | False | Enable NBO analysis |
+| `--opt` | False | Enable geometry optimization |
+| `--orca-path` | scheduler-specific | Path to ORCA executable |
+| `--conda-env` | py10mpi | Conda environment to activate |
 
 ### 3. Monitor Progress
 
@@ -63,11 +95,17 @@ python -m oact_utilities.workflows.dashboard workflow.db --update jobs/
 # Show computational metrics
 python -m oact_utilities.workflows.dashboard workflow.db --show-metrics
 
-# Show failed jobs
+# Show failed jobs (includes fail count)
 python -m oact_utilities.workflows.dashboard workflow.db --show-failed
 
-# Reset failed jobs to retry
+# Reset failed jobs to retry (increments fail_count)
 python -m oact_utilities.workflows.dashboard workflow.db --reset-failed
+
+# Reset failed jobs, but skip those that have failed 3+ times
+python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-retries 3
+
+# Show jobs that have failed multiple times (chronic failures)
+python -m oact_utilities.workflows.dashboard workflow.db --show-chronic-failures 3
 ```
 
 ## Database Schema
@@ -89,6 +127,9 @@ The SQLite database tracks each structure with:
 | `scf_steps` | INTEGER | Total SCF iterations |
 | `final_energy` | REAL | Final energy (Hartree) |
 | `error_message` | TEXT | Error message if failed |
+| `fail_count` | INTEGER | Number of times job has failed (for retry tracking) |
+| `wall_time` | REAL | Total wall time in seconds (extracted from ORCA output) |
+| `n_cores` | INTEGER | Number of CPU cores used |
 | `created_at` | TIMESTAMP | Creation time |
 | `updated_at` | TIMESTAMP | Last update time |
 
@@ -131,8 +172,14 @@ with ArchitectorWorkflow("workflow.db") as workflow:
     # Bulk update
     workflow.update_status_bulk([1, 2, 3], JobStatus.RUNNING)
 
-    # Reset failed jobs
+    # Reset failed jobs (increments fail_count)
     workflow.reset_failed_jobs()
+
+    # Reset failed jobs, but only those that haven't failed too many times
+    workflow.reset_failed_jobs(max_fail_count=3)  # Skip jobs with fail_count >= 3
+
+    # Find chronically failing jobs
+    chronic_failures = workflow.get_jobs_by_fail_count(min_fail_count=3)
 ```
 
 ### Automatic Metrics Extraction
@@ -150,19 +197,25 @@ new_status = update_job_status(
 )
 ```
 
-## Custom Job Setup
+## ORCA Configuration
 
-You can provide a custom setup function to `submit_batch()`:
+Jobs are configured using the `OrcaConfig` TypedDict:
 
 ```python
-from oact_utilities.workflows.submit_jobs import submit_batch
+from oact_utilities.workflows.submit_jobs import submit_batch, OrcaConfig
 
-def setup_orca_input(job_dir, job_record):
-    """Write ORCA input file for each job."""
-    inp_file = job_dir / "calc.inp"
-    with open(inp_file, "w") as f:
-        f.write("! B3LYP def2-SVP OPT\\n")
-        f.write(f"* xyzfile 0 1 input.xyz\\n")
+# Configure ORCA calculation settings
+orca_config: OrcaConfig = {
+    "functional": "wB97M-V",       # DFT functional
+    "simple_input": "x2c",         # Template: "omol", "x2c", or "dk3"
+    "actinide_basis": "ma-def-TZVP",
+    "actinide_ecp": None,          # Or "def-ECP" for ECP calculations
+    "non_actinide_basis": "def2-TZVPD",
+    "scf_MaxIter": None,           # Use ORCA default
+    "nbo": False,                  # NBO analysis
+    "opt": True,                   # Geometry optimization
+    "orca_path": "/path/to/orca",  # Optional, defaults per scheduler
+}
 
 with ArchitectorWorkflow("workflow.db") as workflow:
     submit_batch(
@@ -170,7 +223,33 @@ with ArchitectorWorkflow("workflow.db") as workflow:
         root_dir="jobs/",
         batch_size=100,
         scheduler="flux",
-        setup_func=setup_orca_input,
+        orca_config=orca_config,
+        n_cores=8,
+        n_hours=4,
+        conda_env="py10mpi",
+    )
+```
+
+## Custom Job Setup
+
+You can provide a custom setup function for additional files:
+
+```python
+from oact_utilities.workflows.submit_jobs import submit_batch
+
+def add_restart_files(job_dir, job_record):
+    """Copy restart files or add custom setup."""
+    # The orca.inp is already created by submit_batch
+    # Add any additional files here
+    (job_dir / "notes.txt").write_text(f"Job for structure {job_record.orig_index}")
+
+with ArchitectorWorkflow("workflow.db") as workflow:
+    submit_batch(
+        workflow=workflow,
+        root_dir="jobs/",
+        batch_size=100,
+        scheduler="flux",
+        setup_func=add_restart_files,
         n_cores=8,
         n_hours=4
     )
@@ -210,7 +289,21 @@ SCF Steps:
   Min:    5
   Max:    45
 
+Wall Time (seconds):
+  Mean:   196.4
+  Median: 180.2
+  Min:    45.3
+  Max:    892.1
+  Total:  49100.0 (13.64 hours)
+
+Cores Used:
+  Mean:   4.0
+  Min:    4
+  Max:    4
+  Total core-hours: 54.56
+
 Total jobs with metrics: 250
+Jobs with timing data: 250
 ```
 
 ## Typical HPC Workflow
@@ -238,9 +331,50 @@ Total jobs with metrics: 250
 
 5. **Handle failures**:
    ```bash
+   # View failed jobs with fail counts
    python -m oact_utilities.workflows.dashboard workflow.db --show-failed
+
+   # Reset failed jobs for retry (increments fail_count)
    python -m oact_utilities.workflows.dashboard workflow.db --reset-failed
+
+   # Reset only jobs that haven't failed too many times
+   python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-retries 3
+
+   # View chronically failing jobs (failed 3+ times)
+   python -m oact_utilities.workflows.dashboard workflow.db --show-chronic-failures 3
+
+   # Submit jobs but skip chronic failures
+   python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --max-fail-count 3
    ```
+
+## Failure Tracking & Retry Limits
+
+The workflow tracks how many times each job has failed with the `fail_count` column:
+
+- **Automatic increment**: When `reset_failed_jobs()` is called, `fail_count` is incremented
+- **Retry limits**: Use `--max-retries N` to skip jobs that have failed N+ times
+- **Submission filtering**: Use `--max-fail-count N` to avoid resubmitting chronic failures
+- **Chronic failure detection**: Use `--show-chronic-failures N` or `get_jobs_by_fail_count(N)`
+
+This prevents wasting HPC resources on jobs that consistently fail.
+
+**Example workflow with retry limits:**
+```bash
+# First attempt - submit all ready jobs
+python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 500
+
+# After jobs complete, update statuses
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/
+
+# Reset failures for retry, but only if they haven't failed 3 times yet
+python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-retries 3
+
+# Submit again, skipping chronic failures
+python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 500 --max-fail-count 3
+
+# Check which jobs are chronically failing
+python -m oact_utilities.workflows.dashboard workflow.db --show-chronic-failures 3
+```
 
 ## Concurrency & Database Handling
 

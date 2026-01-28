@@ -43,14 +43,14 @@ def print_summary(workflow: ArchitectorWorkflow):
 
 
 def print_metrics_summary(workflow: ArchitectorWorkflow):
-    """Print summary of computational metrics (forces, SCF steps)."""
+    """Print summary of computational metrics (forces, SCF steps, timing)."""
     import pandas as pd
 
     # Query completed jobs with metrics
     cur = workflow.conn.cursor()
     cur.execute(
         """
-        SELECT max_forces, scf_steps
+        SELECT max_forces, scf_steps, wall_time, n_cores
         FROM structures
         WHERE status = 'completed' AND max_forces IS NOT NULL
         """
@@ -61,7 +61,7 @@ def print_metrics_summary(workflow: ArchitectorWorkflow):
         print("\nNo metrics data available yet.")
         return
 
-    df = pd.DataFrame(rows, columns=["max_forces", "scf_steps"])
+    df = pd.DataFrame(rows, columns=["max_forces", "scf_steps", "wall_time", "n_cores"])
 
     print_header("Computational Metrics (Completed Jobs)")
 
@@ -81,7 +81,37 @@ def print_metrics_summary(workflow: ArchitectorWorkflow):
         print(f"  Min:    {scf_data.min():.0f}")
         print(f"  Max:    {scf_data.max():.0f}")
 
-    print(f"\nTotal jobs with metrics: {len(df)}\n")
+    # Timing statistics
+    time_data = df["wall_time"].dropna()
+    if len(time_data) > 0:
+        print("\nWall Time (seconds):")
+        print(f"  Mean:   {time_data.mean():.1f}")
+        print(f"  Median: {time_data.median():.1f}")
+        print(f"  Min:    {time_data.min():.1f}")
+        print(f"  Max:    {time_data.max():.1f}")
+        print(f"  Total:  {time_data.sum():.1f} ({time_data.sum() / 3600:.2f} hours)")
+
+    # Cores statistics
+    cores_data = df["n_cores"].dropna()
+    if len(cores_data) > 0:
+        print("\nCores Used:")
+        print(f"  Mean:   {cores_data.mean():.1f}")
+        print(f"  Min:    {cores_data.min():.0f}")
+        print(f"  Max:    {cores_data.max():.0f}")
+
+        # Calculate total core-hours
+        if len(time_data) > 0:
+            # Only compute for jobs that have both timing and cores data
+            valid_rows = df.dropna(subset=["wall_time", "n_cores"])
+            if len(valid_rows) > 0:
+                core_seconds = (valid_rows["wall_time"] * valid_rows["n_cores"]).sum()
+                print(f"  Total core-hours: {core_seconds / 3600:.2f}")
+
+    print(f"\nTotal jobs with metrics: {len(df)}")
+    if len(time_data) > 0:
+        print(f"Jobs with timing data: {len(time_data)}\n")
+    else:
+        print()
 
 
 def print_progress_bar(
@@ -189,21 +219,23 @@ def show_failed_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
         return
 
     print_header(f"Failed Jobs (showing up to {limit})")
-    print(f"\n{'ID':<8} {'Orig Index':<12} {'Job Dir':<30} {'Error':<30}")
+    print(f"\n{'ID':<8} {'Orig Index':<12} {'Fails':<6} {'Job Dir':<25} {'Error':<25}")
     print("-" * 90)
 
     for job in failed[:limit]:
         job_dir = (
-            (job.job_dir[:27] + "...")
-            if job.job_dir and len(job.job_dir) > 30
+            (job.job_dir[:22] + "...")
+            if job.job_dir and len(job.job_dir) > 25
             else (job.job_dir or "N/A")
         )
         error = (
-            (job.error_message[:27] + "...")
-            if job.error_message and len(job.error_message) > 30
+            (job.error_message[:22] + "...")
+            if job.error_message and len(job.error_message) > 25
             else (job.error_message or "N/A")
         )
-        print(f"{job.id:<8} {job.orig_index:<12} {job_dir:<30} {error:<30}")
+        print(
+            f"{job.id:<8} {job.orig_index:<12} {job.fail_count:<6} {job_dir:<25} {error:<25}"
+        )
 
     if len(failed) > limit:
         print(f"\n... and {len(failed) - limit} more failed jobs")
@@ -260,6 +292,18 @@ def main():
         help="Reset all failed jobs to ready status",
     )
     parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=None,
+        help="When resetting failed jobs, only reset those with fail_count < this value",
+    )
+    parser.add_argument(
+        "--show-chronic-failures",
+        type=int,
+        metavar="N",
+        help="Show jobs that have failed at least N times",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=20,
@@ -297,9 +341,18 @@ def main():
 
     # Reset failed jobs if requested
     if args.reset_failed:
-        failed_count = len(workflow.get_jobs_by_status(JobStatus.FAILED))
-        workflow.reset_failed_jobs()
-        print(f"\nReset {failed_count} failed jobs to ready status")
+        failed_jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
+        if args.max_retries is not None:
+            eligible = [j for j in failed_jobs if j.fail_count < args.max_retries]
+            skipped = len(failed_jobs) - len(eligible)
+            workflow.reset_failed_jobs(max_fail_count=args.max_retries)
+            print(
+                f"\nReset {len(eligible)} failed jobs to ready status "
+                f"(skipped {skipped} jobs that have already failed {args.max_retries}+ times)"
+            )
+        else:
+            workflow.reset_failed_jobs()
+            print(f"\nReset {len(failed_jobs)} failed jobs to ready status")
 
     # Always show summary
     print_summary(workflow)
@@ -321,6 +374,30 @@ def main():
     # Show metrics if requested
     if args.show_metrics:
         print_metrics_summary(workflow)
+
+    # Show chronic failures if requested
+    if args.show_chronic_failures:
+        chronic = workflow.get_jobs_by_fail_count(args.show_chronic_failures)
+        if chronic:
+            print_header(f"Jobs Failed {args.show_chronic_failures}+ Times")
+            print(
+                f"\n{'ID':<8} {'Orig Index':<12} {'Fails':<6} {'Status':<12} {'Error':<30}"
+            )
+            print("-" * 80)
+            for job in chronic[: args.limit]:
+                error = (
+                    (job.error_message[:27] + "...")
+                    if job.error_message and len(job.error_message) > 30
+                    else (job.error_message or "N/A")
+                )
+                print(
+                    f"{job.id:<8} {job.orig_index:<12} {job.fail_count:<6} "
+                    f"{job.status.value:<12} {error:<30}"
+                )
+            if len(chronic) > args.limit:
+                print(f"\n... and {len(chronic) - args.limit} more chronic failures")
+        else:
+            print(f"\nNo jobs have failed {args.show_chronic_failures}+ times.")
 
     workflow.close()
 

@@ -13,6 +13,7 @@ import sqlite3
 from pathlib import Path
 
 import pandas as pd
+from ase import Atoms
 
 
 def chunk_architector_to_lmdb(
@@ -96,7 +97,7 @@ def parse_xyz_elements(xyz_str: str) -> list[str]:
 
     # Try to parse first line as atom count (standard XYZ format)
     try:
-        # atom_count = int(lines[0].strip())
+        int(lines[0].strip())
         # If successful, skip first two lines (count + comment)
         atom_lines = lines[2:] if len(lines) > 2 else []
     except ValueError:
@@ -111,6 +112,59 @@ def parse_xyz_elements(xyz_str: str) -> list[str]:
         elems.append(parts[0])
 
     return elems
+
+
+def xyz_string_to_atoms(xyz_str: str) -> Atoms:
+    """Convert XYZ-format string to ASE Atoms object.
+
+    Handles two formats:
+    1. Standard XYZ: atom_count\\ncomment\\nelement x y z...
+    2. Architector CSV format: element x y z... (no header)
+
+    Args:
+        xyz_str: XYZ geometry string.
+
+    Returns:
+        ASE Atoms object.
+
+    Raises:
+        ValueError: If the string is empty or contains no valid atoms.
+    """
+    # print("xyz_str:", xyz_str)
+    lines = [ln for ln in xyz_str.strip().splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError("Empty XYZ string")
+
+    # Detect format: first line is atom count or coordinate line
+    # find line with *xyz and start from there to be safe
+    xyz_info_line = 0
+    for i, line in enumerate(lines):
+        if "*xyz" in line:
+            xyz_info_line = i + 1
+            break
+    try:
+        int(lines[0].strip())
+        # Standard XYZ format: skip atom count and comment lines
+        coord_lines = lines[xyz_info_line + 1 :] if len(lines) > 2 else []
+        # print(coord_lines)
+    except ValueError:
+        # Architector format: no header, all lines are coordinates
+        coord_lines = lines
+
+    symbols: list[str] = []
+    positions: list[list[float]] = []
+
+    for line in coord_lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        symbols.append(parts[0])
+        positions.append([float(parts[1]), float(parts[2]), float(parts[3])])
+
+    if not symbols:
+        raise ValueError("No atoms found in XYZ string")
+
+    return Atoms(symbols=symbols, positions=positions)
 
 
 def _init_db(db_path: Path, timeout: float = 30.0) -> sqlite3.Connection:
@@ -147,6 +201,9 @@ def _init_db(db_path: Path, timeout: float = 30.0) -> sqlite3.Connection:
             scf_steps INTEGER,
             final_energy REAL,
             error_message TEXT,
+            fail_count INTEGER DEFAULT 0,
+            wall_time REAL,
+            n_cores INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -175,6 +232,7 @@ def _insert_row(
     scf_steps: int | None = None,
     final_energy: float | None = None,
     error_message: str | None = None,
+    fail_count: int = 0,
 ):
     """Insert a structure row into the database.
 
@@ -192,12 +250,13 @@ def _insert_row(
         scf_steps: Number of SCF steps.
         final_energy: Final energy in Hartree.
         error_message: Error message if failed.
+        fail_count: Number of times the job has failed.
     """
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO structures (orig_index, elements, natoms, status, charge, spin, geometry, job_dir, max_forces, scf_steps, final_energy, error_message)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO structures (orig_index, elements, natoms, status, charge, spin, geometry, job_dir, max_forces, scf_steps, final_energy, error_message, fail_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             orig_index,
@@ -212,6 +271,7 @@ def _insert_row(
             scf_steps,
             final_energy,
             error_message,
+            fail_count,
         ),
     )
 
@@ -304,6 +364,7 @@ def create_workflow_db(
     charge_column: str | None = "charge",
     spin_column: str | None = "uhf",
     batch_size: int = 10000,
+    debug: bool = False,
 ) -> Path:
     """Create a workflow database directly from an architector CSV.
 
@@ -317,6 +378,7 @@ def create_workflow_db(
         charge_column: Name of column containing molecular charges (optional).
         spin_column: Name of column containing unpaired electrons for spin (optional).
         batch_size: Number of rows to process at a time (for memory efficiency).
+        debug: If True, print debug information.
 
     Returns:
         Path to the created database.
@@ -334,7 +396,22 @@ def create_workflow_db(
     total_inserted = 0
 
     try:
-        for chunk in pd.read_csv(csv_path, chunksize=batch_size):
+        if debug:
+            print(f"Creating workflow database at: {db_path}")
+            print(f"Reading CSV from: {csv_path}")
+            print(f"Using geometry column: {geometry_column}")
+            if charge_column:
+                print(f"Using charge column: {charge_column}")
+            if spin_column:
+                print(f"Using spin column: {spin_column}")
+            print(f"Processing in batches of {batch_size} rows")
+
+        for ind, chunk in enumerate(pd.read_csv(csv_path, chunksize=batch_size)):
+            if debug:
+                # break at chunk 1
+                # print(f"Processing chunk {ind} with {len(chunk)} rows")
+                if ind == 1:
+                    break
             if geometry_column not in chunk.columns:
                 raise ValueError(f"Column '{geometry_column}' not found in CSV")
 
@@ -361,7 +438,10 @@ def create_workflow_db(
                     if not pd.isna(spin_val):
                         # Convert unpaired electrons to spin multiplicity (2S+1)
                         spin = int(spin_val) + 1
-
+                if debug:
+                    print(
+                        f"  Inserting structure idx={idx}, natoms={natoms}, charge={charge}, spin={spin}"
+                    )
                 # Insert into database
                 _insert_row(
                     conn,
@@ -380,10 +460,30 @@ def create_workflow_db(
             conn.commit()
 
     finally:
+        if debug:
+            # print the first inserted row for verification
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, orig_index, elements, natoms, charge, spin, geometry FROM structures ORDER BY id LIMIT 1"
+            )
+            row = cur.fetchone()
+            if row:
+                idx, orig_index, elems, natoms, charge, spin, xyz_str = row
+                print("First inserted row:")
+                print(
+                    f"  id: {idx}, orig_index: {orig_index}, natoms: {natoms}, charge: {charge}, spin: {spin}"
+                )
+                print(f"  geometry:\n{xyz_str}")
+
         conn.close()
 
     print(f"Created workflow database with {total_inserted} structures at: {db_path}")
     return db_path
 
 
-__all__ = ["chunk_architector_csv", "parse_xyz_elements", "create_workflow_db"]
+__all__ = [
+    "chunk_architector_csv",
+    "parse_xyz_elements",
+    "create_workflow_db",
+    "xyz_string_to_atoms",
+]

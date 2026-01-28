@@ -480,7 +480,7 @@ def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> list:
     """
     Get full performance and geometry info for all jobs in a root directory.
     Args:
-        root_dir (str): Root directory containing job subdirectories.
+        root_dir (str): Root directory co∏ntaining job subdirectories.
         flux_tf (bool): Whether to look for flux- log files.
     Returns:
         Dict[str, Any]: Dictionary with performance and geometry info for each job.
