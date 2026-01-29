@@ -64,7 +64,7 @@ def test_H2(
             atoms=atoms,
             charge=charge,
             spin_multiplicity=mult,
-            functional="TPSS",
+            functional="wB97M-V",
             simple_input="omol",
             scf_MaxIter=400,
             outputdir=output_directory,
