@@ -96,7 +96,6 @@ def prepare_job_directory(
     # Write ORCA input file
     if job_record.geometry:
         atoms = xyz_string_to_atoms(job_record.geometry)
-        # print("")
         charge = job_record.charge if job_record.charge is not None else 0
         # DB stores spin multiplicity directly
         mult = job_record.spin if job_record.spin is not None else 1
