@@ -663,16 +663,12 @@ def parse_job_metrics(
                         engrad_data = get_engrad(engrad_temp)
                         max_forces = engrad_data.get("max_force_Eh_per_bohr")
                     finally:
-                        import os
-
                         os.unlink(engrad_temp)
 
                 # Check termination from content (for gzipped files)
                 success = "ORCA TERMINATED NORMALLY" in content
 
             finally:
-                import os
-
                 os.unlink(temp_path)
         else:
             # Regular output file
