@@ -1,28 +1,39 @@
 #!/usr/bin/env python3
 """
-Simple helper to traverse a folder tree up to a given depth and launch any
-`flux_job.flux` files it finds using `flux batch`.
+Simple helper to traverse a folder tree up to a given depth and check status
+of `flux_job.flux` jobs it finds.
 
 Usage:
-    python run_multi_spin.py /path/to/root
+    python check_multi_spin.py /path/to/root
 
 The script accepts a single positional argument (root folder). Optional flags:
     --max-depth N    : maximum directory depth to traverse (default: 5)
-    --dry-run        : do not actually execute flux, just print what would run
     --verbose        : print extra diagnostic info
+    --verbose-results: show which result keys are non-None for completed jobs
+    --print-table    : print the full jobs table
+    --truncate N     : truncate table values to N characters (default: 30)
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 from collections.abc import Iterator
 from time import time
 from typing import Any
 
+from oact_utilities.utils.analysis import (
+    get_engrad,
+    get_geo_forces,
+    get_rmsd_between_traj_frames,
+    get_rmsd_start_final,
+    parse_sella_log,
+)
 from oact_utilities.utils.status import (
     check_job_termination,
     check_sella_complete,
+    pull_log_file,
 )
 
 
@@ -90,6 +101,24 @@ def parse_info_from_path(path: str) -> dict[str, Any]:
     return info
 
 
+def truncate_str(value: Any, max_len: int = 30) -> str:
+    """Truncate a string value for table display.
+
+    Args:
+        value: Value to truncate (will be converted to str).
+        max_len: Maximum length before truncation.
+
+    Returns:
+        Truncated string with '...' if needed.
+    """
+    if value is None:
+        return "N/A"
+    s = str(value)
+    if len(s) > max_len:
+        return s[: max_len - 3] + "..."
+    return s
+
+
 def _ensure_db(conn: sqlite3.Connection) -> None:
     c = conn.cursor()
     c.execute(
@@ -103,11 +132,247 @@ def _ensure_db(conn: sqlite3.Connection) -> None:
             spin TEXT,
             status INTEGER,
             note TEXT,
-            checked_at REAL
+            checked_at REAL,
+            run_type TEXT,
+            final_energy REAL,
+            max_force REAL,
+            rmsd_start_final REAL,
+            has_final_geometry INTEGER DEFAULT 0,
+            n_opt_steps INTEGER,
+            final_rms_force REAL,
+            final_coords TEXT,
+            final_elements TEXT
         )
         """
     )
+    # Add columns if they don't exist (for older databases)
+    for col, col_type in [
+        ("run_type", "TEXT"),
+        ("final_energy", "REAL"),
+        ("max_force", "REAL"),
+        ("rmsd_start_final", "REAL"),
+        ("has_final_geometry", "INTEGER DEFAULT 0"),
+        ("n_opt_steps", "INTEGER"),
+        ("final_rms_force", "REAL"),
+        ("final_coords", "TEXT"),
+        ("final_elements", "TEXT"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     conn.commit()
+
+
+def extract_orca_analysis(
+    job_dir: str, verbose_results: bool = False
+) -> dict[str, Any]:
+    """Extract analysis data for an ORCA direct run (no Sella).
+
+    Uses get_rmsd_start_final and get_geo_forces for ORCA geom opt runs.
+
+    Args:
+        job_dir: Path to the job directory.
+        verbose_results: If True, print which keys have non-None values.
+
+    Returns:
+        Dictionary with analysis data.
+    """
+    import numpy as np
+
+    result: dict[str, Any] = {
+        "run_type": "orca",
+        "final_energy": None,
+        "max_force": None,
+        "rmsd_start_final": None,
+        "has_final_geometry": 0,
+        "n_opt_steps": None,
+        "final_rms_force": None,
+        "final_coords": None,
+        "final_elements": None,
+    }
+
+    try:
+        # Get RMSD and geometry info using the wave2 analysis approach
+        geom_info = get_rmsd_start_final(job_dir)
+        result["rmsd_start_final"] = geom_info.get("rmsd")
+
+        # Extract final coordinates and elements
+        coords_final = geom_info.get("coords_final")
+        elements_final = geom_info.get("elements_final")
+
+        if coords_final is not None:
+            result["has_final_geometry"] = 1
+            # Convert numpy array to list for JSON serialization
+            if isinstance(coords_final, np.ndarray):
+                coords_final = coords_final.tolist()
+            result["final_coords"] = json.dumps(coords_final)
+
+        if elements_final is not None:
+            # Convert to list if needed
+            if isinstance(elements_final, np.ndarray):
+                elements_final = elements_final.tolist()
+            result["final_elements"] = json.dumps(elements_final)
+
+        energies = geom_info.get("energies_frames", [])
+        if energies:
+            result["final_energy"] = energies[-1]
+            result["n_opt_steps"] = len(energies)
+    except Exception:
+        pass
+
+    try:
+        # Get forces from log file
+        log_file = pull_log_file(job_dir)
+        if log_file:
+            geo_forces = get_geo_forces(log_file)
+            if geo_forces:
+                # Get final max and RMS forces
+                last_forces = geo_forces[-1]
+                result["max_force"] = last_forces.get("Max_Gradient")
+                result["final_rms_force"] = last_forces.get("RMS_Gradient")
+    except Exception:
+        pass
+
+    if verbose_results:
+        non_none_keys = [
+            k for k, v in result.items() if v is not None and v != 0 and k != "run_type"
+        ]
+        if non_none_keys:
+            print(f"  [ORCA] Analysis keys with data: {', '.join(non_none_keys)}")
+
+    return result
+
+
+def extract_sella_analysis(
+    job_dir: str, verbose_results: bool = False
+) -> dict[str, Any]:
+    """Extract analysis data for a Sella optimizer run.
+
+    Uses get_rmsd_between_traj_frames, parse_sella_log, and get_engrad.
+
+    Args:
+        job_dir: Path to the job directory.
+        verbose_results: If True, print which keys have non-None values.
+
+    Returns:
+        Dictionary with analysis data. Energies in Hartree, forces in Eh/Bohr.
+    """
+    import numpy as np
+
+    # Conversion factors: ASE/Sella use eV and Angstrom, ORCA uses Hartree and Bohr
+    EV_TO_HARTREE = 1.0 / 27.211386
+    # 1 eV/Å = 0.0194469 Eh/Bohr (1 Bohr = 0.529177 Å, 1 Eh = 27.211386 eV)
+    EV_PER_ANG_TO_EH_PER_BOHR = 0.529177 / 27.211386  # ≈ 0.0194469
+
+    result: dict[str, Any] = {
+        "run_type": "sella",
+        "final_energy": None,  # Always stored in Hartree
+        "max_force": None,
+        "rmsd_start_final": None,
+        "has_final_geometry": 0,
+        "n_opt_steps": None,
+        "final_rms_force": None,
+        "final_coords": None,
+        "final_elements": None,
+    }
+
+    # Try to get trajectory info (preferred for Sella)
+    traj_file = os.path.join(job_dir, "opt.traj")
+    if os.path.exists(traj_file):
+        try:
+            traj_info = get_rmsd_between_traj_frames(traj_file)
+            result["rmsd_start_final"] = traj_info.get("rmsd_value")
+
+            # Extract final coordinates and elements
+            coords_final = traj_info.get("coords_final")
+            elements_final = traj_info.get("elements_final")
+
+            if coords_final is not None:
+                result["has_final_geometry"] = 1
+                # Convert numpy array to list for JSON serialization
+                if isinstance(coords_final, np.ndarray):
+                    coords_final = coords_final.tolist()
+                result["final_coords"] = json.dumps(coords_final)
+
+            if elements_final is not None:
+                # Convert to list if needed
+                if isinstance(elements_final, np.ndarray):
+                    elements_final = elements_final.tolist()
+                result["final_elements"] = json.dumps(elements_final)
+
+            # ASE trajectory energies are in eV - convert to Hartree
+            energies = traj_info.get("energies_frames", [])
+            if energies:
+                result["final_energy"] = energies[-1] * EV_TO_HARTREE
+            # ASE trajectory forces are in eV/Å - convert to Eh/Bohr
+            rms_forces = traj_info.get("rms_forces_frames", [])
+            if rms_forces:
+                result["final_rms_force"] = rms_forces[-1] * EV_PER_ANG_TO_EH_PER_BOHR
+        except Exception:
+            pass
+
+    # Try to get sella log data
+    sella_log = os.path.join(job_dir, "sella.log")
+    if os.path.exists(sella_log):
+        try:
+            sella_data = parse_sella_log(sella_log)
+            if sella_data:
+                steps = sella_data.get("steps", [])
+                forces = sella_data.get("forces", [])
+                if steps:
+                    result["n_opt_steps"] = len(steps)
+                if forces:
+                    # Convert from eV/Å (Sella/ASE units) to Eh/Bohr (ORCA units)
+                    result["max_force"] = forces[-1] * EV_PER_ANG_TO_EH_PER_BOHR
+        except Exception:
+            pass
+
+    # Fallback: try engrad file for energy/forces and geometry if not from traj
+    engrad_file = os.path.join(job_dir, "orca.engrad")
+    if os.path.exists(engrad_file):
+        try:
+            engrad_data = get_engrad(engrad_file)
+
+            if result["final_energy"] is None:
+                result["final_energy"] = engrad_data.get("total_energy_Eh")
+
+            if result["max_force"] is None:
+                result["max_force"] = engrad_data.get("max_force_Eh_per_bohr")
+
+            # Get geometry from engrad if not already from traj
+            if result["final_coords"] is None:
+                coords_bohr = engrad_data.get("coords_bohr")
+                elements = engrad_data.get("elements")
+
+                if coords_bohr:
+                    result["has_final_geometry"] = 1
+                    result["final_coords"] = json.dumps(coords_bohr)
+
+                if elements:
+                    result["final_elements"] = json.dumps(elements)
+
+            # Compute gradient norm as RMS force proxy
+            gradient = engrad_data.get("gradient_Eh_per_bohr")
+            if gradient and result["final_rms_force"] is None:
+                grad_arr = np.array(gradient)
+                natoms = len(grad_arr) // 3
+                if natoms > 0:
+                    grad_3d = grad_arr.reshape((natoms, 3))
+                    result["final_rms_force"] = float(
+                        np.sqrt(np.mean(np.linalg.norm(grad_3d, axis=1) ** 2))
+                    )
+        except Exception:
+            pass
+
+    if verbose_results:
+        non_none_keys = [
+            k for k, v in result.items() if v is not None and v != 0 and k != "run_type"
+        ]
+        if non_none_keys:
+            print(f"  [Sella] Analysis keys with data: {', '.join(non_none_keys)}")
+
+    return result
 
 
 def find_and_get_status(
@@ -117,10 +382,12 @@ def find_and_get_status(
     *,
     print_table: bool = False,
     running_age_seconds: int = 3600,
+    verbose_results: bool = False,
+    truncate_len: int = 30,
 ) -> int:
-    """Traverse `root` up to `max_depth` and launch flux jobs when `flux_job.flux` is found.
+    """Traverse `root` up to `max_depth` and check status of flux jobs.
 
-    Returns the number of jobs launched (or that would be launched in dry-run).
+    Returns the number of jobs processed.
     """
     db_path = os.path.join(root, "multi_spin_jobs.sqlite3")
     conn = sqlite3.connect(db_path)
@@ -131,8 +398,16 @@ def find_and_get_status(
         flux_file = os.path.join(d, "flux_job.flux")
         status = 0
         note = ""
+        analysis_data: dict[str, Any] = {}
+        is_sella_run = False
+
         if os.path.exists(flux_file):
             processed += 1
+            # Check if this is a Sella run (has sella.log or opt.traj)
+            sella_log = os.path.join(d, "sella.log")
+            opt_traj = os.path.join(d, "opt.traj")
+            is_sella_run = os.path.exists(sella_log) or os.path.exists(opt_traj)
+
             # default is remaining (0). Determine status in order:
             # 1) failed (-1) 2) completed (1) 3) running (2 if recent flux-*.out) 4) remaining (0)
 
@@ -148,11 +423,20 @@ def find_and_get_status(
                     print(f"Found completed job at {d}")
                 status = 1
                 note = "job_completed"
+                # Extract analysis data for completed jobs
+                if is_sella_run:
+                    analysis_data = extract_sella_analysis(d, verbose_results)
+                else:
+                    analysis_data = extract_orca_analysis(d, verbose_results)
+
             elif check_sella_complete(d):
                 if verbose:
-                    print(f"Skipping {d} because it has a completed job (sella) ")
+                    print(f"Found completed job (sella) at {d}")
                 status = 1
                 note = "sella_complete"
+                # Extract analysis data for sella-completed jobs
+                analysis_data = extract_sella_analysis(d, verbose_results)
+
             else:
                 # check for running indicator: recent flux-*.out read/write
                 import glob
@@ -173,12 +457,15 @@ def find_and_get_status(
 
             # This script is a status checker only; always record status
 
-            # insert/update into DB
+            # insert/update into DB with analysis data
             c = conn.cursor()
             c.execute(
                 """
-                INSERT INTO jobs (path, lot, category, name, spin, status, note, checked_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO jobs (path, lot, category, name, spin, status, note, checked_at,
+                                  run_type, final_energy, max_force, rmsd_start_final,
+                                  has_final_geometry, n_opt_steps, final_rms_force,
+                                  final_coords, final_elements)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     lot=excluded.lot,
                     category=excluded.category,
@@ -186,7 +473,16 @@ def find_and_get_status(
                     spin=excluded.spin,
                     status=excluded.status,
                     note=excluded.note,
-                    checked_at=excluded.checked_at
+                    checked_at=excluded.checked_at,
+                    run_type=excluded.run_type,
+                    final_energy=excluded.final_energy,
+                    max_force=excluded.max_force,
+                    rmsd_start_final=excluded.rmsd_start_final,
+                    has_final_geometry=excluded.has_final_geometry,
+                    n_opt_steps=excluded.n_opt_steps,
+                    final_rms_force=excluded.final_rms_force,
+                    final_coords=excluded.final_coords,
+                    final_elements=excluded.final_elements
                 """,
                 (
                     d,
@@ -197,6 +493,15 @@ def find_and_get_status(
                     status,
                     note,
                     time(),
+                    analysis_data.get("run_type"),
+                    analysis_data.get("final_energy"),
+                    analysis_data.get("max_force"),
+                    analysis_data.get("rmsd_start_final"),
+                    analysis_data.get("has_final_geometry", 0),
+                    analysis_data.get("n_opt_steps"),
+                    analysis_data.get("final_rms_force"),
+                    analysis_data.get("final_coords"),
+                    analysis_data.get("final_elements"),
                 ),
             )
             conn.commit()
@@ -245,35 +550,51 @@ def find_and_get_status(
         print("Status legend: running=2, remaining=0, done=1, failed=-1\n")
         c2 = conn.cursor()
         c2.execute(
-            "SELECT id, path, lot, category, name, spin, status, note, checked_at FROM jobs ORDER BY name, spin"
+            """SELECT id, name, spin, status, run_type, final_energy, max_force,
+                      rmsd_start_final, has_final_geometry, n_opt_steps, final_rms_force,
+                      note, path
+               FROM jobs ORDER BY name, spin"""
         )
         all_rows = c2.fetchall()
         headers = []
         if c2.description:
             headers = [d[0] for d in c2.description]
 
+        # Apply truncation to all values
+        truncated_rows = [
+            tuple(truncate_str(val, truncate_len) for val in row) for row in all_rows
+        ]
+
         # prefer tabulate if available, otherwise do basic aligned columns
         try:
             from tabulate import tabulate
 
-            print(tabulate(all_rows, headers=headers, tablefmt="github"))
+            print(tabulate(truncated_rows, headers=headers, tablefmt="github"))
         except Exception:
-            # fallback simple table
+            # fallback simple table with truncation applied
             if headers:
+                # Compute widths respecting truncate_len
                 widths = [
-                    max(len(str(h)), max((len(str(r[i])) for r in all_rows), default=0))
+                    min(
+                        truncate_len,
+                        max(
+                            len(str(h)),
+                            max((len(str(r[i])) for r in truncated_rows), default=0),
+                        ),
+                    )
                     for i, h in enumerate(headers)
                 ]
                 header_line = " | ".join(
-                    h.ljust(widths[i]) for i, h in enumerate(headers)
+                    truncate_str(h, widths[i]).ljust(widths[i])
+                    for i, h in enumerate(headers)
                 )
-                sep = "-+-".join("".ljust(widths[i], "-") for i in range(len(widths)))
+                sep = "-+-".join("-" * widths[i] for i in range(len(widths)))
                 print(header_line)
                 print(sep)
-                for r in all_rows:
+                for r in truncated_rows:
                     print(" | ".join(str(r[i]).ljust(widths[i]) for i in range(len(r))))
             else:
-                for r in all_rows:
+                for r in truncated_rows:
                     print("\t".join([str(x) for x in r]))
 
     conn.close()
@@ -281,9 +602,8 @@ def find_and_get_status(
 
 
 def main() -> None:
-    # TODO: add folder checking
     parser = argparse.ArgumentParser(
-        description="Launch flux_job.flux files under a folder (depth-limited)"
+        description="Check status of flux_job.flux jobs under a folder (depth-limited)"
     )
     parser.add_argument("root", help="Root folder to traverse")
     parser.add_argument(
@@ -292,11 +612,23 @@ def main() -> None:
         default=5,
         help="Max subdirectory depth to traverse (default: 5)",
     )
-    parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    parser.add_argument(
+        "--verbose-results",
+        "-vr",
+        action="store_true",
+        help="Show which analysis keys have non-None values for completed jobs",
+    )
     parser.add_argument(
         "--print-table",
         action="store_true",
-        help="Print the full jobs table for debugging",
+        help="Print the full jobs table with analysis results",
+    )
+    parser.add_argument(
+        "--truncate",
+        type=int,
+        default=30,
+        help="Truncate table values to N characters (default: 30)",
     )
     parser.add_argument(
         "--running-age-seconds",
@@ -315,8 +647,10 @@ def main() -> None:
         verbose=args.verbose,
         print_table=args.print_table,
         running_age_seconds=args.running_age_seconds,
+        verbose_results=args.verbose_results,
+        truncate_len=args.truncate,
     )
-    print(f"Total flux jobs launched/found: {n}")
+    print(f"Total flux jobs found: {n}")
 
 
 if __name__ == "__main__":

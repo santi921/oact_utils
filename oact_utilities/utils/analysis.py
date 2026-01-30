@@ -476,6 +476,116 @@ def get_full_info_all_jobs(
     return perf_info
 
 
+def actinide_first_neighbor_distances(
+    elements: list[str],
+    coords: np.ndarray,
+    center_symbols: list[str] | None = None,
+    neighbor_symbols: list[str] = ("O",),
+    max_distance: float = 5.0,
+) -> list[dict]:
+    """
+    Compute the distance to the first (nearest) neighbor for actinide center atoms.
+
+    For each center element (by default the actinide series), find the nearest atom
+    among `neighbor_symbols` within `max_distance` and return its distance.
+
+    Args:
+        elements: List of element symbols for the structure (e.g., ["U", "O", ...]).
+        coords: Nx3 array of coordinates in Angstroms.
+        center_symbols: Sequence of center element symbols to treat as centers. If
+            None, defaults to the common actinide series.
+        neighbor_symbols: Sequence of neighbor element symbols to consider (default: ("O",)).
+        max_distance: Maximum distance (Angstrom) to search for a first neighbor.
+
+    Returns:
+        A list of dicts with keys: 'center_index', 'center_symbol', 'first_distance',
+        'n_neighbors_within_cutoff', 'neighbor_index', 'neighbor_symbol'. If no
+        neighbor is found within `max_distance`, 'first_distance' is np.nan and
+        'n_neighbors_within_cutoff' is 0.
+    """
+
+    if center_symbols is None:
+        center_symbols = [
+            "Ac",
+            "Th",
+            "Pa",
+            "U",
+            "Np",
+            "Pu",
+            "Am",
+            "Cm",
+            "Bk",
+            "Cf",
+            "Es",
+            "Fm",
+            "Md",
+            "No",
+            "Lr",
+        ]
+
+    elements = [str(e) for e in elements]
+    coords = np.asarray(coords, dtype=float)
+    results: list[dict] = []
+
+    for i, el in enumerate(elements):
+        if el not in center_symbols:
+            continue
+
+        # distances to all other atoms
+        dists = np.linalg.norm(coords - coords[i], axis=1)
+        # exclude self
+        mask = (dists > 1e-8) & (dists <= max_distance)
+        neighbor_idxs = [
+            j
+            for j in range(len(elements))
+            if mask[j] and elements[j] in neighbor_symbols
+        ]
+
+        if len(neighbor_idxs) == 0:
+            results.append(
+                {
+                    "center_index": i,
+                    "center_symbol": el,
+                    "first_distance": float("nan"),
+                    "n_neighbors_within_cutoff": 0,
+                    "neighbor_index": None,
+                    "neighbor_symbol": None,
+                }
+            )
+            continue
+
+        # find nearest neighbor
+        nearest_idx = min(neighbor_idxs, key=lambda j: dists[j])
+        results.append(
+            {
+                "center_index": i,
+                "center_symbol": el,
+                "first_distance": float(dists[nearest_idx]),
+                "n_neighbors_within_cutoff": len(neighbor_idxs),
+                "neighbor_index": int(nearest_idx),
+                "neighbor_symbol": elements[nearest_idx],
+            }
+        )
+
+    return results
+
+
+def actinide_neighbor_mean_distances(*args, **kwargs):
+    """Deprecated wrapper kept for backward compatibility.
+
+    Use `actinide_first_neighbor_distances` which now provides first-neighbor
+    distances. This wrapper will emit a DeprecationWarning.
+    """
+    import warnings
+
+    warnings.warn(
+        "actinide_neighbor_mean_distances is deprecated and now returns first-neighbor distances; use actinide_first_neighbor_distances instead",
+        DeprecationWarning,
+        stacklevel=1,
+    )
+    return actinide_first_neighbor_distances(*args, **kwargs)
+
+
 def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> list:
     """
     Get full performance and geometry info for all jobs in a root directory.

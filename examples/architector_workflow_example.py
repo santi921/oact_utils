@@ -22,7 +22,7 @@ def setup_workflow():
     db_path = "architector_workflow.db"  # SQLite database
 
     # Create workflow (chunks CSV and initializes database)
-    manifest_path, db_path, workflow = create_workflow(
+    db_path, workflow = create_workflow(
         csv_path=csv_path,
         output_dir=output_dir,
         db_path=db_path,
@@ -31,7 +31,6 @@ def setup_workflow():
     )
 
     print("Workflow initialized!")
-    print(f"  Manifest: {manifest_path}")
     print(f"  Database: {db_path}")
 
     # Show initial summary

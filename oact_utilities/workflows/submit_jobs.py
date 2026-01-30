@@ -47,7 +47,7 @@ DEFAULT_ORCA_CONFIG: OrcaConfig = {
     "functional": "wB97M-V",
     "simple_input": "omol",
     "actinide_basis": "ma-def-TZVP",
-    "actinide_ecp": "def2-ECP",
+    "actinide_ecp": "def-ECP",
     "non_actinide_basis": "def2-TZVPD",
     "scf_MaxIter": None,
     "nbo": False,
@@ -58,6 +58,11 @@ DEFAULT_ORCA_PATHS = {
     "flux": "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
     "macos_arm64_openmpi411": "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
     "slurm": "orca",
+}
+
+DEFAULT_LD_LIBRARY_PATHS = {
+    "flux": "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib",
+    "slurm": "",
 }
 
 
@@ -83,9 +88,21 @@ def prepare_job_directory(
     Returns:
         Path to the created job directory.
     """
-    job_dir_name = job_dir_pattern.format(
-        orig_index=job_record.orig_index,
-        id=job_record.id,
+    # Use limited, explicit placeholder replacement to avoid format string issues.
+    # Supported placeholders: {orig_index}, {id}. Any other braces are rejected.
+    pattern = job_dir_pattern
+
+    allowed_placeholders = ("{orig_index}", "{id}")
+    temp_pattern = pattern
+    for placeholder in allowed_placeholders:
+        temp_pattern = temp_pattern.replace(placeholder, "")
+    if "{" in temp_pattern or "}" in temp_pattern:
+        raise ValueError(
+            f"Unsupported placeholder or stray brace in job_dir_pattern: {job_dir_pattern!r}"
+        )
+
+    job_dir_name = pattern.replace("{orig_index}", str(job_record.orig_index)).replace(
+        "{id}", str(job_record.id)
     )
     job_dir = root_dir / job_dir_name
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -130,9 +147,10 @@ def write_flux_job_file(
     n_hours: int = 2,
     queue: str = "pbatch",
     allocation: str = "dnn-sim",
-    orca_path: str = "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
+    orca_path: str = DEFAULT_ORCA_PATHS["flux"],
     conda_env: str = "py10mpi",
     input_file: str = "orca.inp",
+    ld_library_path: str | None = None,
 ) -> Path:
     """Write a Flux job submission script.
 
@@ -162,7 +180,11 @@ def write_flux_job_file(
         "\n",
         "source ~/.bashrc\n",
         f"conda activate {conda_env}\n",
-        "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
+        (
+            f"export LD_LIBRARY_PATH={ld_library_path}:$LD_LIBRARY_PATH\n"
+            if ld_library_path
+            else DEFAULT_LD_LIBRARY_PATHS["flux"] + "\n"
+        ),
         f"{orca_path} {input_path}\n",
     ]
 
@@ -184,6 +206,7 @@ def write_slurm_job_file(
     orca_path: str = "orca",
     conda_env: str = "py10mpi",
     input_file: str = "orca.inp",
+    ld_library_path: str | None = None,
 ) -> Path:
     """Write a SLURM job submission script.
 
@@ -202,7 +225,6 @@ def write_slurm_job_file(
     """
     slurm_script = job_dir / "slurm_job.sh"
     input_path = job_dir / input_file
-
     lines = [
         "#!/bin/sh\n",
         "#SBATCH -N 1\n",
@@ -214,7 +236,11 @@ def write_slurm_job_file(
         "\n",
         "source ~/.bashrc\n",
         f"conda activate {conda_env}\n",
-        "export LD_LIBRARY_PATH=/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib:$LD_LIBRARY_PATH\n",
+        (
+            f"export LD_LIBRARY_PATH={ld_library_path}:$LD_LIBRARY_PATH\n"
+            if ld_library_path
+            else DEFAULT_LD_LIBRARY_PATHS["slurm"] + "\n"
+        ),
         f"{orca_path} {input_path}\n",
     ]
 
@@ -446,8 +472,8 @@ def main():
     )
     orca_group.add_argument(
         "--actinide-ecp",
-        default=None,
-        help="ECP for actinides (default: None)",
+        default="def-ECP",
+        help="ECP for actinides (default: def-ECP)",
     )
     orca_group.add_argument(
         "--non-actinide-basis",
