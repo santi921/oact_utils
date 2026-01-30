@@ -68,6 +68,13 @@ def parse_info_from_path(path: str) -> dict[str, Any]:
     spin directory when possible), category, and lot when present.
     Returns keys: 'lot', 'cat', 'name', 'spin'. Missing values are ''.
     """
+
+    def sanitize_name(name_raw: str) -> str:
+        # if the name ends with _TPS, _PBE, PBE0 remove
+        for suffix in ["_TPS", "_PBE", "_PBE0", "_B3LYP", "_M06L"]:
+            if name_raw.endswith(suffix):
+                return name_raw[: -len(suffix)]
+
     parts = [p for p in path.split(os.sep) if p]
     info: dict[str, Any] = {"lot": "", "cat": "", "name": "", "spin": ""}
 
@@ -82,7 +89,8 @@ def parse_info_from_path(path: str) -> dict[str, Any]:
     if spin_idx is not None:
         info["spin"] = parts[spin_idx]
         if spin_idx - 1 >= 0:
-            info["name"] = parts[spin_idx - 1]
+            name_raw = parts[spin_idx - 1]
+            info["name"] = sanitize_name(name_raw)
         if spin_idx - 2 >= 0:
             info["cat"] = parts[spin_idx - 2]
         if spin_idx - 3 >= 0:
@@ -90,7 +98,8 @@ def parse_info_from_path(path: str) -> dict[str, Any]:
     else:
         # fallback: use last 4 parts if available
         if len(parts) >= 1:
-            info["name"] = parts[-1]
+            name_raw = parts[-1]
+            info["name"] = sanitize_name(name_raw)
         if len(parts) >= 2:
             info["spin"] = parts[-2]
         if len(parts) >= 3:
@@ -406,7 +415,9 @@ def find_and_get_status(
             # Check if this is a Sella run (has sella.log or opt.traj)
             sella_log = os.path.join(d, "sella.log")
             opt_traj = os.path.join(d, "opt.traj")
-            is_sella_run = os.path.exists(sella_log) or os.path.exists(opt_traj)
+            is_sella_run = os.path.exists(sella_log) or os.path.exists(
+                opt_traj
+            )  # is this true??
 
             # default is remaining (0). Determine status in order:
             # 1) failed (-1) 2) completed (1) 3) running (2 if recent flux-*.out) 4) remaining (0)
@@ -418,6 +429,7 @@ def find_and_get_status(
                     print(f"Found failed job at {d}")
                 status = -1
                 note = "job_failed"
+
             elif term:
                 if verbose:
                     print(f"Found completed job at {d}")
