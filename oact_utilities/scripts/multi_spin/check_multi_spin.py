@@ -352,11 +352,19 @@ def extract_sella_analysis(
             # Get geometry from engrad if not already from traj
             if result["final_coords"] is None:
                 coords_bohr = engrad_data.get("coords_bohr")
+                # convert to ang
+                # coords_bohr is list of lists with coords in Bohr
+                coords_ang = None
+                if coords_bohr:
+                    coords_ang = [
+                        [x * 0.529177 for x in atom_coords]
+                        for atom_coords in coords_bohr
+                    ]
                 elements = engrad_data.get("elements")
 
-                if coords_bohr:
+                if coords_ang:
                     result["has_final_geometry"] = 1
-                    result["final_coords"] = json.dumps(coords_bohr)
+                    result["final_coords"] = json.dumps(coords_ang)
 
                 if elements:
                     result["final_elements"] = json.dumps(elements)
