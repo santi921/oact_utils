@@ -1,0 +1,31 @@
+# Override root .gitignore patterns to include test data files
+# These files are needed for testing parsers
+
+# Include gzipped ORCA output files (quacc format)
+!*.gz
+
+# Include GBW files (ORCA wavefunction files)
+!*.gbw
+
+# Include density files
+!*.densities*
+
+# Include other ORCA output files
+!*.engrad
+!*.inp
+!*.xyz
+!*.out
+!logs
+
+# Include quacc results
+!*.pkl
+
+# Exclude generated test data directories
+data/
+quacc/
+test_orca/
+
+# Exclude any timestamped quacc directories
+*quacc-*/
+failed-quacc-*/
+symlink-*/

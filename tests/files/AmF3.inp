@@ -1,0 +1,21 @@
+! wB97M-V RIJCOSX NoUseSym DIIS NOSOSCF NormalConv DEFGRID3 OPT
+%scf
+  MaxIter 1000
+  Convergence Tight
+end
+%pal
+  nprocs 6
+end
+
+%basis
+  NewGTO F "def2-TZVPD" end
+  NewGTO Am "ma-def-TZVP" end
+  NewECP Am "def-ECP" end
+end
+
+* xyz 0 7
+Am	0.000000	0.000000	0.000000
+F	0.000000	0.000000	2.061070
+F	0.000000	1.960687	-0.630113
+F	-1.636177	-0.973355	-0.792575
+*

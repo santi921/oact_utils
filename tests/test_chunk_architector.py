@@ -1,10 +1,12 @@
 import sqlite3
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import pytest
 from ase.io import read
 
-from oact_utilities.utils.architector import chunk_architector_csv
+from oact_utilities.utils.architector import chunk_architector_csv, xyz_string_to_atoms
 
 
 def test_chunk_architector_writes_xyz_and_manifest(tmp_path: Path):
@@ -62,3 +64,69 @@ He 0.0 0.0 0.0
     statuses = {r[0] for r in cur.fetchall()}
     assert statuses == {"ready"}
     conn.close()
+
+
+class TestXyzStringToAtoms:
+    """Tests for xyz_string_to_atoms function."""
+
+    def test_standard_xyz_format(self):
+        """Test parsing standard XYZ format with atom count and comment."""
+        xyz_str = """2
+H2 molecule
+H 0.0 0.0 0.0
+H 0.0 0.0 0.74
+"""
+        atoms = xyz_string_to_atoms(xyz_str)
+
+        assert len(atoms) == 2
+        assert list(atoms.get_chemical_symbols()) == ["H", "H"]
+        assert np.allclose(atoms.get_positions()[0], [0.0, 0.0, 0.0])
+        assert np.allclose(atoms.get_positions()[1], [0.0, 0.0, 0.74])
+
+    def test_architector_format_no_header(self):
+        """Test parsing architector CSV format (no header)."""
+        xyz_str = """H 0.0 0.0 0.0
+H 0.0 0.0 0.74"""
+        atoms = xyz_string_to_atoms(xyz_str)
+
+        assert len(atoms) == 2
+        assert list(atoms.get_chemical_symbols()) == ["H", "H"]
+        assert np.allclose(atoms.get_positions()[1], [0.0, 0.0, 0.74])
+
+    def test_water_molecule(self):
+        """Test parsing a water molecule."""
+        xyz_str = """O 0.0 0.0 0.0
+H 0.757 0.586 0.0
+H -0.757 0.586 0.0"""
+        atoms = xyz_string_to_atoms(xyz_str)
+
+        assert len(atoms) == 3
+        assert list(atoms.get_chemical_symbols()) == ["O", "H", "H"]
+
+    def test_actinide_element(self):
+        """Test parsing structure with actinide element."""
+        xyz_str = """U 0.0 0.0 0.0
+O 1.8 0.0 0.0
+O -1.8 0.0 0.0"""
+        atoms = xyz_string_to_atoms(xyz_str)
+
+        assert len(atoms) == 3
+        assert "U" in atoms.get_chemical_symbols()
+        assert atoms.get_chemical_symbols().count("O") == 2
+
+    def test_empty_string_raises(self):
+        """Test that empty string raises ValueError."""
+        with pytest.raises(ValueError, match="Empty XYZ string"):
+            xyz_string_to_atoms("")
+
+    def test_whitespace_only_raises(self):
+        """Test that whitespace-only string raises ValueError."""
+        with pytest.raises(ValueError, match="Empty XYZ string"):
+            xyz_string_to_atoms("   \n\n  ")
+
+    def test_no_valid_atoms_raises(self):
+        """Test that string with no valid coordinate lines raises ValueError."""
+        xyz_str = """2
+comment line only"""
+        with pytest.raises(ValueError, match="No atoms found"):
+            xyz_string_to_atoms(xyz_str)
