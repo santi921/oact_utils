@@ -480,7 +480,7 @@ def actinide_first_neighbor_distances(
     elements: list[str],
     coords: np.ndarray,
     center_symbols: list[str] | None = None,
-    neighbor_symbols: list[str] = ("O",),
+    # neighbor_symbols: list[str] = ("O",),
     max_distance: float = 5.0,
 ) -> list[dict]:
     """
@@ -535,11 +535,7 @@ def actinide_first_neighbor_distances(
         dists = np.linalg.norm(coords - coords[i], axis=1)
         # exclude self
         mask = (dists > 1e-8) & (dists <= max_distance)
-        neighbor_idxs = [
-            j
-            for j in range(len(elements))
-            if mask[j] and elements[j] in neighbor_symbols
-        ]
+        neighbor_idxs = [j for j in range(len(elements)) if mask[j]]
 
         if len(neighbor_idxs) == 0:
             results.append(
@@ -551,6 +547,9 @@ def actinide_first_neighbor_distances(
                     "neighbor_index": None,
                     "neighbor_symbol": None,
                 }
+            )
+            print(
+                f"No neighbors found within {max_distance} Å for center {el} at index {i}."
             )
             continue
 

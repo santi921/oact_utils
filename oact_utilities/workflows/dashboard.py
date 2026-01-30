@@ -174,7 +174,6 @@ def update_all_statuses(
         job_dir_name = job_dir_pattern.format(
             orig_index=job.orig_index,
             id=job.id,
-            index_in_chunk=job.index_in_chunk,
         )
         job_dir = root_dir / job_dir_name
 
@@ -250,11 +249,11 @@ def show_ready_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
         return
 
     print_header(f"Ready Jobs (showing up to {limit})")
-    print(f"\n{'ID':<8} {'Orig Index':<12} {'Chunk File':<20} {'N Atoms':<10}")
+    print(f"\n{'ID':<8} {'Orig Index':<12} {'N Atoms':<10}")
     print("-" * 60)
 
     for job in ready[:limit]:
-        print(f"{job.id:<8} {job.orig_index:<12} {job.chunk_file:<20} {job.natoms:<10}")
+        print(f"{job.id:<8} {job.orig_index:<12} {job.natoms:<10}")
 
     if len(ready) > limit:
         print(f"\n... and {len(ready) - limit} more ready jobs")
