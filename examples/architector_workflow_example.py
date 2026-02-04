@@ -17,17 +17,19 @@ from oact_utilities.workflows import ArchitectorWorkflow, JobStatus, create_work
 def setup_workflow():
     """Create a new workflow from architector CSV file."""
 
-    csv_path = "data/architector_output.csv"  # Your architector CSV
-    output_dir = "architector_chunks"  # Directory for XYZ chunks
+    csv_path = (
+        "./data/architector_dev/2_all_architector_results.csv"  # Your architector CSV
+    )
     db_path = "architector_workflow.db"  # SQLite database
 
     # Create workflow (chunks CSV and initializes database)
     db_path, workflow = create_workflow(
         csv_path=csv_path,
-        output_dir=output_dir,
         db_path=db_path,
-        chunk_size=10000,  # Structures per chunk file
-        column="aligned_csd_core",  # Column with XYZ geometries
+        geometry_column="aligned_csd_core",  # Column with XYZ geometries
+        charge_column="charge",
+        spin_column="uhf",
+        batch_size=10000,
     )
 
     print("Workflow initialized!")
@@ -37,6 +39,10 @@ def setup_workflow():
     summary = workflow.get_summary()
     print("\nInitial status:")
     print(summary)
+    # show row from db as an example
+    example_job = workflow.get_jobs_by_status(JobStatus.READY)[0]
+    print("\nExample job record:")
+    print(example_job)
 
     workflow.close()
     return db_path
@@ -57,7 +63,7 @@ def submit_jobs_example():
         architector_workflow.db \\
         /path/to/jobs \\
         --batch-size 100 \\
-        --scheduler flux \\
+        --scheduler flux \\ # or slurm
         --n-cores 4 \\
         --n-hours 2 \\
         --queue pbatch \\
@@ -139,17 +145,6 @@ def programmatic_workflow_management():
         # Get summary statistics
         counts = workflow.count_by_status()
         print(f"\nStatus counts: {counts}")
-
-        # Update a specific job's status
-        if running_jobs:
-            job = running_jobs[0]
-            workflow.update_status(job.id, JobStatus.COMPLETED)
-            workflow.update_job_metrics(
-                job.id,
-                job_dir=f"/path/to/job_{job.orig_index}",
-                max_forces=0.00123,
-                scf_steps=15,
-            )
 
         # Bulk status update
         job_ids = [j.id for j in ready_jobs[:10]]
@@ -269,7 +264,7 @@ def typical_hpc_workflow():
 
 if __name__ == "__main__":
     # Uncomment to run
-    # db_path = setup_workflow()
+    db_path = setup_workflow()
     # print(f"\nWorkflow database created: {db_path}")
     print(__doc__)
     print("\nSee function docstrings for usage examples.")
