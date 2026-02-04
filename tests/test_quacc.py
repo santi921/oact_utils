@@ -17,6 +17,7 @@ from oact_utilities.utils.create import (
     read_geom_from_inp_file,
     read_template,
 )
+from oact_utilities.utils.status import check_job_termination
 
 hartree_to_ev = 27.2114
 
@@ -85,6 +86,13 @@ def test_H2(
 
         # assert job is completed
         assert res_dict["converged"], "quacc baseline job did not converge"
+
+        # Test status checker with quacc output (gzipped .out.gz files)
+        quacc_dir = res_dict["dir_name"]
+        status = check_job_termination(quacc_dir)
+        assert (
+            status == 1
+        ), f"Status checker failed on quacc output: expected 1 (success), got {status}"
 
         """ Normal baseline jobs for AN66 dataset """
 
