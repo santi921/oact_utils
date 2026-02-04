@@ -17,6 +17,8 @@ from oact_utilities.utils.baselines import (
 )
 from oact_utilities.utils.status import check_job_termination
 
+from concurrent.futures import as_completed
+
 should_stop = False
 
 
@@ -175,7 +177,7 @@ exec numactl --physcpubind={cpu_set} {orca_cmd} "$@"
                 os.remove(wrapper_path)
         except Exception:
             pass
-        raise
+        pass
 
 
 def parsl_wave2(
@@ -198,7 +200,7 @@ def parsl_wave2(
     source_cmd: str = "source ~/.bashrc",
     conda_env: str = "py10mpi",
     conda_base: str = "/usr/WS1/vargas58/miniconda3",
-    orca_cmd: str = None,
+    orca_cmd: str = "",
 ):
     parsl_config = base_config(
         max_blocks=max_blocks,
@@ -296,7 +298,7 @@ def parsl_wave2(
         )
 
     try:
-        for f in futures:
+        for f in as_completed(futures):
             if should_stop:
                 print("Graceful shutdown requested. Exiting before all jobs complete.")
                 break
