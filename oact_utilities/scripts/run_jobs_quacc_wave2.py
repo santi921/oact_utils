@@ -258,8 +258,14 @@ def parsl_wave2(
                 folder_mol = os.path.join(folder_out_base, mol_name)
                 dict_unified[mol_name]["dir_name"] = folder_mol
                 os.makedirs(folder_mol, exist_ok=True)
+                # this is running with orca that creates another folder inside, find the latest sub sub dir to check status
+                # get list of subdirs
+                sub_dirs = [f.path for f in os.scandir(folder_mol) if f.is_dir()]
+                if len(sub_dirs) > 0:
+                    latest_subdir = max(sub_dirs, key=os.path.getmtime)
+                    folder_check = latest_subdir
 
-                error_code = check_job_termination(folder_mol)
+                error_code = check_job_termination(folder_check)
                 if skip_done and error_code == 1:
                     # Completed job detected
                     continue

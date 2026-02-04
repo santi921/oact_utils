@@ -1,11 +1,30 @@
+import gzip
 import os
 
 
-def check_file_termination(file_path: str) -> int:
-    # read last line of file_path
-    with open(file_path) as f:
-        lines = f.readlines()
-    # if last line contains "ORCA TERMINATED NORMALLY", then return 1
+def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
+    """Check if an ORCA calculation terminated successfully.
+
+    Args:
+        file_path: Path to the ORCA output file (.out or .out.gz).
+        is_gzipped: If True, decompress the file before reading. Auto-detected if None.
+
+    Returns:
+        1 if terminated normally, -1 if aborted, 0 if still running/incomplete.
+    """
+    # Auto-detect gzipped files if not specified
+    if is_gzipped is None:
+        is_gzipped = file_path.endswith(".gz")
+
+    # Read file (handle both regular and gzipped)
+    if is_gzipped or file_path.endswith(".gz"):
+        with gzip.open(file_path, "rt") as f:
+            lines = f.readlines()
+    else:
+        with open(file_path) as f:
+            lines = f.readlines()
+
+    # Check last 5 lines for termination status
     for line in lines[-5:]:
         if "ORCA TERMINATED NORMALLY" in line:
             return 1
@@ -47,6 +66,9 @@ def check_job_termination(
 ) -> int:
     """
     Utility function to check if a job in a given directory has terminated successfully.
+
+    Supports both regular (.out, .logs) and gzipped (.out.gz) ORCA output files.
+
     Args:
         dir (str): Path to the directory containing the job.
         check_many (bool, optional): Whether to check multiple output files. Defaults to False.
@@ -60,7 +82,12 @@ def check_job_termination(
     if flux_tf:
         files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
     else:
+        # Check for regular .out files
         files_out = [f for f in files if f.endswith("out")]
+        # Check for gzipped .out.gz files (e.g., from quacc)
+        if not files_out:
+            files_out = [f for f in files if f.endswith(".out.gz")]
+        # Check for .logs files
         if not files_out:
             files_out = [f for f in files if f.endswith("logs")]
 
@@ -78,9 +105,8 @@ def check_job_termination(
         status_list = []
         for file_out in files_out:
             output_file = dir + "/" + file_out
-            # read last line of output_file
+            # Use check_file_termination which handles both regular and gzipped files
             file_status = check_file_termination(output_file)
-
             status_list.append(file_status)
         if all(status == 1 for status in status_list):
             return 1
@@ -91,18 +117,8 @@ def check_job_termination(
 
     else:
         output_file = dir + "/" + files_out[0]
-
-        # read last line of output_file
-        with open(output_file) as f:
-            lines = f.readlines()
-        # if last line contains "ORCA TERMINATED NORMALLY", then get geometry forces
-        # ORCA TERMINATED NORMALLY
-        for line in lines[-5:]:
-            if "ORCA TERMINATED NORMALLY" in line:
-                return 1
-            if "aborting the run" in line:
-                return -1
-        return 0
+        # Use check_file_termination which auto-detects gzipped files
+        return check_file_termination(output_file)
 
 
 def check_geometry_steps(
@@ -177,6 +193,8 @@ def pull_log_file(root_dir: str) -> str:
     """
     Pulls the most recent log file from a given directory.
 
+    Supports both regular (.out, .logs) and gzipped (.out.gz) output files.
+
     Args:
         root_dir (str): The directory to search for log files.
     Returns:
@@ -196,6 +214,10 @@ def pull_log_file(root_dir: str) -> str:
     if len(log_file) == 0:
         log_file = [f for f in files if f.endswith(".out")]
 
+    # If none, try .out.gz files (e.g., from quacc)
+    if len(log_file) == 0:
+        log_file = [f for f in files if f.endswith(".out.gz")]
+
     # If still none, try flux files
     if len(log_file) == 0:
         log_file = [f for f in files if "flux-" in f]
@@ -203,7 +225,7 @@ def pull_log_file(root_dir: str) -> str:
     # If we still have no log files, raise an error
     if len(log_file) == 0:
         raise FileNotFoundError(
-            f"No log files (.logs, .out, or flux-*) found in {root_dir}"
+            f"No log files (.logs, .out, .out.gz, or flux-*) found in {root_dir}"
         )
 
     # If multiple files, sort by modification time (most recent first)
