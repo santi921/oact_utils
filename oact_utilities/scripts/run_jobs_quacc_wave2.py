@@ -196,6 +196,8 @@ def parsl_wave2(
             f.path for f in os.scandir(root_data_dir + base_dir) if f.is_dir()
         ]
 
+        dict_unified = {}
+        dict_geoms = {}
         for folder_to_use in subfolders:
             print(f"Processing folder: {folder_to_use}")
             folder_name = folder_to_use.split("/")[-1]
@@ -208,17 +210,24 @@ def parsl_wave2(
 
             ase_format_tf = True
             df_multiplicity = process_multiplicity_file(mult_file)
-            dict_geoms = process_geometry_file(geom_file, ase_format_tf=ase_format_tf)
+            folder_dict_geoms = process_geometry_file(
+                geom_file, ase_format_tf=ase_format_tf
+            )
+            dict_geoms.update(folder_dict_geoms)
 
-            dict_unified = {
-                k: {
-                    "geometry": dict_geoms[k],
-                    "multiplicity": df_multiplicity[k]["multiplicity"],
-                    "charge": df_multiplicity[k]["charge"],
+            dict_unified.update(
+                {
+                    k: {
+                        "geometry": folder_dict_geoms[k],
+                        "multiplicity": df_multiplicity[k]["multiplicity"],
+                        "charge": df_multiplicity[k]["charge"],
+                    }
+                    for k in folder_dict_geoms.keys()
+                    if k in df_multiplicity.keys()
                 }
-                for k in dict_geoms.keys()
-                if k in df_multiplicity.keys()
-            }
+            )
+
+        print(f"Number of unified geometries in folder {base_dir}: {len(dict_unified)}")
 
         for mol_name, _ in dict_geoms.items():
             folder_mol = os.path.join(folder_out_base, mol_name)
@@ -240,10 +249,11 @@ def parsl_wave2(
                 if dry_run:
                     continue
 
-                if ("orca.inp" not in os.listdir(folder_mol)) and (overwrite is False):
-                    dict_full_set[mol_name] = dict_unified[mol_name]
+            if ("orca.inp" not in os.listdir(folder_mol)) or overwrite:
+                dict_full_set[mol_name] = dict_unified[mol_name]
 
     print(f"Total jobs to run: {len(dict_full_set)}")
+    exit()
 
     futures = []
     for job, vals in dict_full_set.items():
