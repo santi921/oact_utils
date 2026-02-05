@@ -73,6 +73,7 @@ def prepare_job_directory(
     orca_config: OrcaConfig | None = None,
     n_cores: int = 4,
     setup_func: Callable | None = None,
+    return_full_path: bool = True,
 ) -> Path:
     """Create a job directory and prepare ORCA input files.
 
@@ -84,6 +85,7 @@ def prepare_job_directory(
         n_cores: Number of CPU cores for ORCA.
         setup_func: Optional function to set up additional files. Called with
                    (job_dir, job_record) as arguments.
+        return_full_path: If True, return full path to job directory. If False, return relative path.
 
     Returns:
         Path to the created job directory.
@@ -104,6 +106,7 @@ def prepare_job_directory(
     job_dir_name = pattern.replace("{orig_index}", str(job_record.orig_index)).replace(
         "{id}", str(job_record.id)
     )
+
     job_dir = root_dir / job_dir_name
     job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -344,7 +347,7 @@ def submit_batch(
                 orca_path=orca_path,
                 conda_env=conda_env,
             )
-            submit_cmd = ["flux", "batch", str(job_script)]
+            submit_cmd = ["flux", "batch", job_script.name]
 
         elif scheduler.lower() == "slurm":
             job_script = write_slurm_job_file(
@@ -356,7 +359,7 @@ def submit_batch(
                 orca_path=orca_path,
                 conda_env=conda_env,
             )
-            submit_cmd = ["sbatch", str(job_script)]
+            submit_cmd = ["sbatch", job_script.name]
         else:
             raise ValueError(f"Unknown scheduler: {scheduler}")
 
