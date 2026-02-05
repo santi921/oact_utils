@@ -297,12 +297,24 @@ def parsl_wave2(
             )
         )
 
+    future_to_job = {f: job for f, job in zip(futures, dict_full_set.keys())}
+
+    failures = []
+
     try:
         for f in as_completed(futures):
             if should_stop:
                 print("Graceful shutdown requested. Exiting before all jobs complete.")
                 break
-            f.result()
+
+            job = future_to_job.get(f, "<unknown>")
+            try:
+                f.result()
+            except Exception as e:
+                print(f"[FAILED] {job}: {e}")
+                failures.append((job, repr(e)))
+                # continue running remaining jobs
+                continue
     finally:
         try:
             dfk = parsl.dfk()
@@ -314,6 +326,8 @@ def parsl_wave2(
             parsl.clear()
         except Exception:
             pass
+
+    print(f"Total failures: {len(failures)}")
 
 
 if __name__ == "__main__":
