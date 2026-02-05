@@ -94,6 +94,7 @@ def jobs_wrapper_an66(
     Runs one ORCA single-point job.
     """
     import os
+    import time
     import pickle as pkl
 
     from oact_utilities.core.orca.recipes import single_point_calculation
