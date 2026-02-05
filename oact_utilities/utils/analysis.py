@@ -1,10 +1,15 @@
 import os
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from ase.io.trajectory import TrajectoryReader
 from spyrmsd.rmsd import rmsd
+
+if TYPE_CHECKING:
+    import matplotlib.pyplot as plt
+    import pandas as pd
 
 from oact_utilities.utils.an66 import dict_to_numpy
 from oact_utilities.utils.create import (
@@ -954,3 +959,172 @@ def get_full_info_all_jobs_sella(
                         f"Could not extract orca.engrad info for job in {folder_to_use}: {e}"
                     )
     return perf_info
+
+
+def plot_element_vs_lot(
+    df: "pd.DataFrame",
+    element_col: str = "element",
+    lot_col: str = "lot",
+    value_col: str = "distance",
+    element_order: list[str] | None = None,
+    lot_styles: dict[str, dict] | None = None,
+    ylabel: str | None = None,
+    title: str | None = None,
+    ax: "plt.Axes | None" = None,
+) -> "plt.Axes":
+    """
+    Plot a value (e.g., bond distance) vs element, comparing levels of theory.
+
+    Creates a scatter plot with elements on the x-axis and values on the y-axis,
+    using different markers/colors for each level of theory (LOT).
+
+    Args:
+        df: DataFrame containing the data to plot.
+        element_col: Column name for element symbols.
+        lot_col: Column name for level of theory.
+        value_col: Column name for the numeric value to plot.
+        element_order: Optional list specifying element order on x-axis.
+            If None, defaults to actinide series order.
+        lot_styles: Optional dict mapping LOT names to style dicts with keys:
+            'marker', 'color', 'label', 'facecolor', 'edgecolor'.
+            If None, uses default styles for 'x2c' and 'omol'.
+        ylabel: Y-axis label. If None, uses value_col.
+        title: Plot title. If None, auto-generates from value_col.
+        ax: Optional matplotlib Axes to plot on. If None, creates new figure.
+
+    Returns:
+        The matplotlib Axes object with the plot.
+
+    Example:
+        >>> ax = plot_element_vs_lot(
+        ...     df_neighbors,
+        ...     element_col='element',
+        ...     lot_col='lot',
+        ...     value_col='distance'
+        ... )
+        >>> plt.show()
+    """
+    import matplotlib.pyplot as plt
+
+    # Default actinide order
+    if element_order is None:
+        element_order = [
+            "Ac",
+            "Th",
+            "Pa",
+            "U",
+            "Np",
+            "Pu",
+            "Am",
+            "Cm",
+            "Bk",
+            "Cf",
+            "Es",
+            "Fm",
+            "Md",
+            "No",
+            "Lr",
+        ]
+
+    # Default LOT styles
+    if lot_styles is None:
+        lot_styles = {
+            "x2c": {
+                "marker": "s",
+                "color": "#E57373",
+                "label": "x2c",
+                "facecolor": "#E57373",
+            },
+            "omol": {
+                "marker": "^",
+                "color": "#64B5F6",
+                "label": "omol",
+                "facecolor": "#64B5F6",
+            },
+        }
+
+    # Filter to valid data
+    df_plot = df[
+        (df[element_col] != "")
+        & (df[value_col].notna())
+        & (df[element_col].isin(element_order))
+    ].copy()
+
+    if df_plot.empty:
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, "No valid data to plot", ha="center", va="center")
+        return ax
+
+    # Create element order mapping
+    element_order_map = {el: i for i, el in enumerate(element_order)}
+    df_plot["element_order"] = df_plot[element_col].map(element_order_map)
+
+    # Create axes if not provided
+    if ax is None:
+        _, ax = plt.subplots(figsize=(12, 6))
+
+    # Plot each LOT
+    lots_in_data = df_plot[lot_col].unique()
+    n_lots = len(lots_in_data)
+
+    for i, lot in enumerate(sorted(lots_in_data)):
+        lot_data = df_plot[df_plot[lot_col] == lot].sort_values("element_order")
+        style = lot_styles.get(
+            lot,
+            {
+                "marker": "o",
+                "color": f"C{i}",
+                "label": lot,
+                "facecolor": f"C{i}",
+            },
+        )
+
+        # Add jitter to avoid overlapping points
+        jitter = (i - (n_lots - 1) / 2) * 0.15
+        x_positions = lot_data["element_order"] + jitter
+
+        # Handle hollow markers (facecolor='white' or 'none')
+        facecolor = style.get("facecolor", style["color"])
+        if facecolor in ("white", "none"):
+            ax.scatter(
+                x_positions,
+                lot_data[value_col],
+                marker=style["marker"],
+                s=80,
+                facecolors="white",
+                edgecolors=style.get("edgecolor", style["color"]),
+                linewidths=1.5,
+                label=style.get("label", lot),
+                alpha=0.8,
+            )
+        else:
+            ax.scatter(
+                x_positions,
+                lot_data[value_col],
+                marker=style["marker"],
+                s=80,
+                c=facecolor,
+                label=style.get("label", lot),
+                alpha=0.8,
+            )
+
+    # Set x-axis ticks to element symbols
+    elements_present = sorted(
+        df_plot[element_col].unique(), key=lambda x: element_order_map.get(x, 99)
+    )
+    tick_positions = [element_order_map[el] for el in elements_present]
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(elements_present, fontsize=11)
+
+    # Labels and styling
+    ax.set_xlabel("Element", fontsize=12)
+    ax.set_ylabel(ylabel if ylabel else value_col, fontsize=12)
+    ax.set_title(
+        title if title else f"{value_col.replace('_', ' ').title()} by Element and LOT",
+        fontsize=13,
+    )
+    ax.legend(loc="best", framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle="--")
+
+    return ax

@@ -67,6 +67,7 @@ export OMP_NUM_THREADS=1
         label="slurm_htex",
         cores_per_worker=16,
         max_workers_per_node=4,
+        cpu_affinity="block",
         provider=provider,
     )
 
@@ -90,27 +91,15 @@ def jobs_wrapper_an66(
     charge: int = 0,
 ):
     """
-    Runs one ORCA single-point job with proper CPU pinning for concurrent execution.
+    Runs one ORCA single-point job.
     """
     import os
-    import time
+    import pickle as pkl
 
     from oact_utilities.core.orca.recipes import single_point_calculation
 
     # Each ORCA MPI rank gets 1 CPU (16 ranks total per job)
     os.environ["OMP_NUM_THREADS"] = "1"
-
-    # hash-based slot assignment
-    slot_seed = hash(f"{job}_{int(time.time())}_{os.getpid()}")
-    slot_id = abs(slot_seed) % 4
-
-    # Map slots to NUMA-aligned CPU ranges (16 CPUs each)
-    # TODO this needs to be not hardcoded
-    cpu_ranges = ["0-15", "16-31", "32-47", "48-63"]
-    cpu_set = cpu_ranges[slot_id]
-
-    hostname = os.environ.get("SLURMD_NODENAME") or socket.gethostname()
-    print(f"[ORCA CPU Pinning] host={hostname} job={job} slot={slot_id} cpus={cpu_set}")
 
     nbo_tf = False
     root_directory_job = root_directory
@@ -120,17 +109,6 @@ def jobs_wrapper_an66(
     if os.path.exists(results_pkl):
         print(f"Job {job} already completed. Skipping.")
         return
-
-    # Need to make this wrapper script because Quacc expects a string, not a list
-    wrapper_content = f"""#!/bin/bash
-exec numactl --physcpubind={cpu_set} {orca_cmd} "$@"
-"""
-    wrapper_path = os.path.join(root_directory_job, f"orca_wrapper_{slot_id}.sh")
-    with open(wrapper_path, "w") as f:
-        f.write(wrapper_content)
-    os.chmod(wrapper_path, 0o755)
-
-    orca_cmd_pinned = wrapper_path
 
     time_start = time.time()
 
@@ -148,7 +126,7 @@ exec numactl --physcpubind={cpu_set} {orca_cmd} "$@"
             nprocs=nprocs,
             outputdir=root_directory_job,
             nbo=nbo_tf,
-            orca_cmd=orca_cmd_pinned,
+            orca_cmd=orca_cmd,
         )
 
         time_end = time.time()
@@ -162,21 +140,8 @@ exec numactl --physcpubind={cpu_set} {orca_cmd} "$@"
         with open(os.path.join(save_loc, "results.pkl"), "wb") as f:
             pkl.dump(res_dict, f)
 
-        # Clean up wrapper script after successful completion
-        try:
-            if os.path.exists(wrapper_path):
-                os.remove(wrapper_path)
-        except Exception:
-            pass  # Don't fail if cleanup fails
-
     except Exception as e:
         print(f"Job {job} failed: {e}")
-        # Clean up wrapper script on failure too
-        try:
-            if os.path.exists(wrapper_path):
-                os.remove(wrapper_path)
-        except Exception:
-            pass
         pass
 
 
@@ -254,12 +219,19 @@ def parsl_wave2(
                 if k in df_multiplicity.keys()
             }
 
-            for mol_name, _ in dict_geoms.items():
-                folder_mol = os.path.join(folder_out_base, mol_name)
-                dict_unified[mol_name]["dir_name"] = folder_mol
-                os.makedirs(folder_mol, exist_ok=True)
+        for mol_name, _ in dict_geoms.items():
+            folder_mol = os.path.join(folder_out_base, mol_name)
+            dict_unified[mol_name]["dir_name"] = folder_mol
+            os.makedirs(folder_mol, exist_ok=True)
+            # this is running with orca that creates another folder inside, find the latest sub sub dir to check status
+            folder_check = folder_mol
+            # get list of subdirs
+            sub_dirs = [f.path for f in os.scandir(folder_mol) if f.is_dir()]
+            if len(sub_dirs) > 0:
+                latest_subdir = max(sub_dirs, key=os.path.getmtime)
+                folder_check = latest_subdir
 
-                error_code = check_job_termination(folder_mol)
+                error_code = check_job_termination(folder_check)
                 if skip_done and error_code == 1:
                     # Completed job detected
                     continue
