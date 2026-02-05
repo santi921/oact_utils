@@ -170,8 +170,9 @@ def write_flux_job_file(
     Returns:
         Path to the created flux job file.
     """
-    flux_script = job_dir / "flux_job.flux"
-    input_path = job_dir / input_file
+    # Use absolute path so job runs in correct directory regardless of submission location
+    job_dir_abs = job_dir.resolve()
+    flux_script = job_dir_abs / "flux_job.flux"
 
     lines = [
         "#!/bin/sh\n",
@@ -180,6 +181,10 @@ def write_flux_job_file(
         f"#flux: -q {queue}\n",
         f"#flux: -B {allocation}\n",
         f"#flux: -t {n_hours*60}m\n",
+        f"#flux: -o {job_dir_abs}/flux.out\n",
+        f"#flux: -e {job_dir_abs}/flux.err\n",
+        "\n",
+        f"cd {job_dir_abs}\n",
         "\n",
         "source ~/.bashrc\n",
         f"conda activate {conda_env}\n",
@@ -188,7 +193,7 @@ def write_flux_job_file(
             if ld_library_path
             else DEFAULT_LD_LIBRARY_PATHS["flux"] + "\n"
         ),
-        f"{orca_path} {input_path}\n",
+        f"{orca_path} {input_file}\n",
     ]
 
     with open(flux_script, "w") as f:
@@ -226,8 +231,10 @@ def write_slurm_job_file(
     Returns:
         Path to the created SLURM job file.
     """
-    slurm_script = job_dir / "slurm_job.sh"
-    input_path = job_dir / input_file
+    # Use absolute path so job runs in correct directory regardless of submission location
+    job_dir_abs = job_dir.resolve()
+    slurm_script = job_dir_abs / "slurm_job.sh"
+
     lines = [
         "#!/bin/sh\n",
         "#SBATCH -N 1\n",
@@ -236,6 +243,10 @@ def write_slurm_job_file(
         f"#SBATCH --qos {queue}\n",
         f"#SBATCH --account {allocation}\n",
         f"#SBATCH -t {n_hours}:00:00\n",
+        f"#SBATCH -o {job_dir_abs}/slurm.out\n",
+        f"#SBATCH -e {job_dir_abs}/slurm.err\n",
+        "\n",
+        f"cd {job_dir_abs}\n",
         "\n",
         "source ~/.bashrc\n",
         f"conda activate {conda_env}\n",
@@ -244,7 +255,7 @@ def write_slurm_job_file(
             if ld_library_path
             else DEFAULT_LD_LIBRARY_PATHS["slurm"] + "\n"
         ),
-        f"{orca_path} {input_path}\n",
+        f"{orca_path} {input_file}\n",
     ]
 
     with open(slurm_script, "w") as f:
