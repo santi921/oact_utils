@@ -10,6 +10,7 @@ conda activate omol-orca
 
 cd /p/home/ritwik/dev/oact_utils/oact_utilities
 
+export PYTHONUNBUFFERED=1
 python scripts/run_jobs_quacc_wave2.py \
     --root_data_dir /p/home/ritwik/dev/oact_utils/data/big_benchmark/ \
     --calc_root_dir /p/app/projects/nga-frontier/ritwik/temp-orca/big_benchmark \
