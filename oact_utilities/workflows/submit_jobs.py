@@ -189,7 +189,7 @@ def write_flux_job_file(
         (
             f"export LD_LIBRARY_PATH={ld_library_path}:$LD_LIBRARY_PATH\n"
             if ld_library_path
-            else DEFAULT_LD_LIBRARY_PATHS["flux"] + "\n"
+            else f"export LD_LIBRARY_PATH={DEFAULT_LD_LIBRARY_PATHS['flux']}:$LD_LIBRARY_PATH\n"
         ),
         f"{orca_path} {input_file}\n",
     ]
@@ -251,7 +251,7 @@ def write_slurm_job_file(
         (
             f"export LD_LIBRARY_PATH={ld_library_path}:$LD_LIBRARY_PATH\n"
             if ld_library_path
-            else DEFAULT_LD_LIBRARY_PATHS["slurm"] + "\n"
+            else f"export LD_LIBRARY_PATH={DEFAULT_LD_LIBRARY_PATHS['slurm']}:$LD_LIBRARY_PATH\n"
         ),
         f"{orca_path} {input_file}\n",
     ]
