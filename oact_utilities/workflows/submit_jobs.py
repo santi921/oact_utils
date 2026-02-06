@@ -181,8 +181,6 @@ def write_flux_job_file(
         f"#flux: -q {queue}\n",
         f"#flux: -B {allocation}\n",
         f"#flux: -t {n_hours*60}m\n",
-        f"#flux: -o {job_dir_abs}/flux.out\n",
-        f"#flux: -e {job_dir_abs}/flux.err\n",
         "\n",
         f"cd {job_dir_abs}\n",
         "\n",
