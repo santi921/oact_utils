@@ -16,6 +16,15 @@ from ..core.orca.calc import write_orca_inputs
 from ..utils.architector import xyz_string_to_atoms
 from .architector_workflow import ArchitectorWorkflow, JobStatus
 
+try:
+    from parsl import python_app
+
+    PARSL_AVAILABLE = True
+except ImportError:
+    # Parsl not installed - Parsl features won't be available
+    PARSL_AVAILABLE = False
+    python_app = None
+
 
 class OrcaConfig(TypedDict, total=False):
     """Configuration options for ORCA calculations.
@@ -265,6 +274,393 @@ def write_slurm_job_file(
     return slurm_script
 
 
+def filter_jobs_for_submission(
+    workflow: ArchitectorWorkflow,
+    num_jobs: int,
+    max_fail_count: int | None = None,
+) -> list:
+    """Filter jobs that are ready to submit.
+
+    Args:
+        workflow: ArchitectorWorkflow instance
+        num_jobs: Number of jobs to return
+        max_fail_count: Skip jobs with fail_count >= this value
+
+    Returns:
+        List of JobRecords ready for submission
+    """
+    # Get ready jobs (DB is source of truth)
+    ready_jobs = workflow.get_jobs_by_status([JobStatus.TO_RUN, JobStatus.READY])
+
+    # Apply fail_count filter if specified
+    if max_fail_count is not None:
+        original_count = len(ready_jobs)
+        ready_jobs = [j for j in ready_jobs if j.fail_count < max_fail_count]
+        skipped = original_count - len(ready_jobs)
+        if skipped > 0:
+            print(f"Skipped {skipped} jobs with fail_count >= {max_fail_count}")
+
+    # Limit to requested count
+    jobs_to_submit = ready_jobs[:num_jobs]
+
+    print(f"Found {len(ready_jobs)} ready jobs, submitting {len(jobs_to_submit)}")
+    return jobs_to_submit
+
+
+# Only define Parsl-related functions if Parsl is available
+if PARSL_AVAILABLE:
+
+    @python_app
+    def orca_job_wrapper(
+        job_id: int,
+        job_dir: str,
+        orca_config: dict,
+        n_cores: int,
+        timeout_seconds: int = 7200,
+    ) -> dict:
+        """Execute ORCA job within Parsl worker.
+
+        This runs as a Parsl python_app, executing directly on the worker node.
+        Parsl handles CPU affinity and worker management automatically.
+
+        Args:
+            job_id: Workflow database job ID
+            job_dir: Absolute path to job directory
+            orca_config: ORCA configuration dictionary
+            n_cores: Number of cores for ORCA
+            timeout_seconds: Job timeout in seconds (default: 7200 = 2 hours)
+
+        Returns:
+            Dict with job_id, status, metrics
+        """
+        import os
+        import subprocess
+        import time
+        from pathlib import Path
+
+        job_dir_path = Path(job_dir)
+        input_file = job_dir_path / "orca.inp"
+
+        # Verify input file exists
+        if not input_file.exists():
+            return {
+                "job_id": job_id,
+                "status": "failed",
+                "error": f"Input file not found: {input_file}",
+            }
+
+        # Get ORCA path from config
+        orca_cmd = orca_config.get("orca_path", "orca")
+
+        # Let Parsl handle CPU affinity - no manual pinning needed
+        os.environ["OMP_NUM_THREADS"] = "1"
+
+        start_time = time.time()
+
+        try:
+            # Run ORCA
+            result = subprocess.run(
+                [orca_cmd, str(input_file)],
+                cwd=job_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+
+            elapsed = time.time() - start_time
+
+            if result.returncode == 0:
+                return {
+                    "job_id": job_id,
+                    "status": "completed",
+                    "wall_time": elapsed,
+                }
+            else:
+                return {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": f"ORCA exited with code {result.returncode}",
+                    "stderr": result.stderr[:500] if result.stderr else "",
+                }
+
+        except subprocess.TimeoutExpired:
+            return {
+                "job_id": job_id,
+                "status": "timeout",
+                "error": f"Job exceeded {timeout_seconds}s timeout",
+            }
+        except Exception as e:
+            return {
+                "job_id": job_id,
+                "status": "failed",
+                "error": str(e),
+            }
+
+
+def build_parsl_config_flux(
+    max_workers: int = 4,
+    cores_per_worker: int = 16,
+    conda_env: str = "py10mpi",
+    conda_base: str = "/usr/WS1/vargas58/miniconda3",
+    ld_library_path: str | None = None,
+):
+    """Build Parsl Config for Flux single-node execution.
+
+    Uses LocalProvider since Flux doesn't support scale-out in Parsl.
+    This configuration runs all workers on the local node.
+
+    Args:
+        max_workers: Maximum number of concurrent workers
+        cores_per_worker: CPU cores per worker
+        conda_env: Conda environment name
+        conda_base: Conda base path
+        ld_library_path: Override LD_LIBRARY_PATH
+
+    Returns:
+        Parsl Config object
+    """
+    if not PARSL_AVAILABLE:
+        raise ImportError(
+            "Parsl is not installed. Please install with: pip install 'parsl>=2024.1'"
+        )
+
+    from parsl.config import Config
+    from parsl.executors import HighThroughputExecutor
+    from parsl.providers import LocalProvider
+
+    # Worker initialization commands
+    ld_lib = ld_library_path or DEFAULT_LD_LIBRARY_PATHS.get("flux", "")
+    worker_init = f"""
+source ~/.bashrc
+conda activate {conda_env}
+export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH
+export OMP_NUM_THREADS=1
+export JAX_PLATFORMS=cpu
+"""
+
+    provider = LocalProvider(
+        worker_init=worker_init,
+    )
+
+    executor = HighThroughputExecutor(
+        label="flux_htex",
+        cores_per_worker=cores_per_worker,
+        max_workers=max_workers,
+        provider=provider,
+    )
+
+    return Config(executors=[executor])
+
+
+def submit_batch_parsl(
+    workflow: ArchitectorWorkflow,
+    root_dir: str | Path,
+    num_jobs: int,
+    max_workers: int = 4,
+    cores_per_worker: int = 16,
+    job_dir_pattern: str = "job_{orig_index}",
+    orca_config: OrcaConfig | None = None,
+    setup_func: Callable | None = None,
+    n_cores: int = 16,
+    conda_env: str = "py10mpi",
+    conda_base: str = "/usr/WS1/vargas58/miniconda3",
+    ld_library_path: str | None = None,
+    dry_run: bool = False,
+    max_fail_count: int | None = None,
+    timeout_seconds: int = 72000,
+) -> list[int]:
+    """Submit batch of jobs using Parsl for concurrent execution.
+
+    Args:
+        workflow: ArchitectorWorkflow instance
+        root_dir: Root directory for job directories
+        num_jobs: Total number of jobs to submit
+        max_workers: Maximum number of concurrent workers
+        cores_per_worker: CPU cores per worker
+        job_dir_pattern: Pattern for job directory names
+        orca_config: ORCA configuration
+        setup_func: Optional setup function per job
+        n_cores: Cores per ORCA job
+        conda_env: Conda environment name
+        conda_base: Conda base path
+        ld_library_path: Override LD_LIBRARY_PATH
+        dry_run: Prepare but don't submit
+        max_fail_count: Skip jobs with fail_count >= this value
+        timeout_seconds: Job timeout in seconds (default: 7200 = 2 hours)
+
+    Returns:
+        List of submitted job IDs
+    """
+    if not PARSL_AVAILABLE:
+        print(
+            "Error: Parsl is not installed. Please install with: pip install 'parsl>=2024.1'"
+        )
+        return []
+
+    from concurrent.futures import as_completed
+
+    import parsl
+
+    root_dir = Path(root_dir)
+    root_dir.mkdir(parents=True, exist_ok=True)
+
+    # Merge ORCA config
+    config: OrcaConfig = {**DEFAULT_ORCA_CONFIG, **(orca_config or {})}
+    if "orca_path" not in config or config.get("orca_path") is None:
+        config["orca_path"] = DEFAULT_ORCA_PATHS.get("flux", DEFAULT_ORCA_PATHS["flux"])
+
+    # Filter jobs for submission (DB status only)
+    jobs_to_submit = filter_jobs_for_submission(
+        workflow,
+        num_jobs=num_jobs,
+        max_fail_count=max_fail_count,
+    )
+
+    if not jobs_to_submit:
+        print("No jobs available for submission after filtering")
+        return []
+
+    print(f"\nPreparing {len(jobs_to_submit)} jobs for Parsl submission...")
+
+    # Prepare job directories
+    print("Setting up job directories...")
+    for i, job in enumerate(jobs_to_submit, 1):
+        job_dir = prepare_job_directory(
+            job,
+            root_dir,
+            job_dir_pattern=job_dir_pattern,
+            orca_config=config,
+            n_cores=n_cores,
+            setup_func=setup_func,
+        )
+        print(f"  [{i}/{len(jobs_to_submit)}] Prepared {job_dir}")
+
+    if dry_run:
+        print("\n[DRY RUN] Would submit to Parsl executor")
+        print(f"  Max workers: {max_workers}")
+        print(f"  Cores per worker: {cores_per_worker}")
+        return [j.id for j in jobs_to_submit]
+
+    # Build Parsl configuration
+    print("\nBuilding Parsl config (Flux single-node)...")
+    parsl_config = build_parsl_config_flux(
+        max_workers=max_workers,
+        cores_per_worker=cores_per_worker,
+        conda_env=conda_env,
+        conda_base=conda_base,
+        ld_library_path=ld_library_path,
+    )
+
+    # Initialize Parsl
+    try:
+        parsl.clear()
+        parsl.load(parsl_config)
+        print("Parsl executor loaded successfully")
+    except Exception as e:
+        print(f"Failed to initialize Parsl: {e}")
+        print("Check your conda environment and ORCA installation")
+        return []
+
+    # Submit futures
+    print(f"\nSubmitting {len(jobs_to_submit)} jobs to Parsl...")
+    futures = []
+
+    for job in jobs_to_submit:
+        job_dir_name = job_dir_pattern.replace(
+            "{orig_index}", str(job.orig_index)
+        ).replace("{id}", str(job.id))
+        job_dir_abs = (root_dir / job_dir_name).resolve()
+
+        future = orca_job_wrapper(
+            job_id=job.id,
+            job_dir=str(job_dir_abs),
+            orca_config=dict(config),
+            n_cores=n_cores,
+            timeout_seconds=timeout_seconds,
+        )
+        futures.append((job.id, future))
+
+    # Mark jobs as running
+    submitted_ids = [j.id for j in jobs_to_submit]
+    workflow.mark_jobs_as_running(submitted_ids)
+    print(f"Marked {len(submitted_ids)} jobs as RUNNING in database")
+
+    # Monitor futures concurrently (CRITICAL: use as_completed, not sequential loop)
+    print("\nMonitoring job execution...")
+    print("(Press Ctrl+C for graceful shutdown)\n")
+
+    completed_ids = []
+    failed_ids = []
+
+    # Create future->job_id mapping for concurrent completion
+    futures_map = {future: job_id for job_id, future in futures}
+
+    try:
+        # as_completed() yields futures as they finish (concurrent, not sequential!)
+        for future in as_completed(futures_map.keys()):
+            job_id = futures_map[future]
+            try:
+                result = future.result()
+
+                if result["status"] == "completed":
+                    workflow.update_status(job_id, JobStatus.COMPLETED)
+                    completed_ids.append(job_id)
+                    print(
+                        f"✓ Job {job_id} completed ({len(completed_ids)}/{len(futures)} done)"
+                    )
+                elif result["status"] == "timeout":
+                    workflow.update_status(
+                        job_id, JobStatus.TIMEOUT, error_message=result.get("error")
+                    )
+                    failed_ids.append(job_id)
+                    print(f"⏱ Job {job_id} timeout")
+                else:
+                    workflow.update_status(
+                        job_id, JobStatus.FAILED, error_message=result.get("error")
+                    )
+                    workflow._execute_with_retry(
+                        "UPDATE structures SET fail_count = COALESCE(fail_count, 0) + 1 WHERE id = ?",
+                        (job_id,),
+                    )
+                    failed_ids.append(job_id)
+                    error_msg = result.get("error", "Unknown error")[:100]
+                    print(f"✗ Job {job_id} failed: {error_msg}")
+
+            except Exception as e:
+                workflow.update_status(job_id, JobStatus.FAILED, error_message=str(e))
+                workflow._execute_with_retry(
+                    "UPDATE structures SET fail_count = COALESCE(fail_count, 0) + 1 WHERE id = ?",
+                    (job_id,),
+                )
+                failed_ids.append(job_id)
+                print(f"✗ Job {job_id} exception: {str(e)[:100]}")
+
+    except KeyboardInterrupt:
+        print("\n\nGraceful shutdown requested...")
+
+    finally:
+        # Cleanup Parsl
+        print("\nCleaning up Parsl executor...")
+        try:
+            dfk = parsl.dfk()
+            if dfk is not None:
+                dfk.cleanup()
+        except Exception as e:
+            print(f"Warning: Parsl cleanup failed: {e}")
+
+        try:
+            parsl.clear()
+        except Exception:
+            pass
+
+    print("\nSubmission complete:")
+    print(f"  ✓ Completed: {len(completed_ids)}")
+    print(f"  ✗ Failed: {len(failed_ids)}")
+    print(f"  Total: {len(submitted_ids)}")
+
+    return submitted_ids
+
+
 def submit_batch(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
@@ -408,11 +804,19 @@ def main():
     )
     parser.add_argument("db_path", help="Path to workflow SQLite database")
     parser.add_argument("root_dir", help="Root directory for job directories")
+
+    # Submission mode
+    parser.add_argument(
+        "--use-parsl",
+        action="store_true",
+        help="Use Parsl for concurrent execution on exclusive nodes (Flux single-node)",
+    )
+
     parser.add_argument(
         "--batch-size",
         type=int,
         default=10,
-        help="Number of jobs to submit (default: 10)",
+        help="Number of jobs to submit (default: 10). For Parsl mode, this is the total job count.",
     )
     parser.add_argument(
         "--scheduler",
@@ -456,6 +860,32 @@ def main():
         "--dry-run",
         action="store_true",
         help="Prepare jobs but don't submit",
+    )
+
+    # Parsl-specific options
+    parsl_group = parser.add_argument_group("Parsl Options (--use-parsl)")
+    parsl_group.add_argument(
+        "--max-workers",
+        type=int,
+        default=4,
+        help="Maximum concurrent workers for Parsl (default: 4)",
+    )
+    parsl_group.add_argument(
+        "--cores-per-worker",
+        type=int,
+        default=16,
+        help="CPU cores per Parsl worker (default: 16)",
+    )
+    parsl_group.add_argument(
+        "--conda-base",
+        default="/usr/WS1/vargas58/miniconda3",
+        help="Conda base path for Parsl workers (default: /usr/WS1/vargas58/miniconda3)",
+    )
+    parsl_group.add_argument(
+        "--job-timeout",
+        type=int,
+        default=7200,
+        help="Job timeout in seconds for Parsl mode (default: 7200 = 2 hours)",
     )
     parser.add_argument(
         "--max-fail-count",
@@ -537,22 +967,41 @@ def main():
         print(f"Error: Database not found at {args.db_path}")
         sys.exit(1)
 
-    # Submit batch
-    submitted_ids = submit_batch(
-        workflow=workflow,
-        root_dir=args.root_dir,
-        batch_size=args.batch_size,
-        scheduler=args.scheduler,
-        job_dir_pattern=args.job_dir_pattern,
-        orca_config=orca_config,
-        n_cores=args.n_cores,
-        n_hours=args.n_hours,
-        queue=args.queue,
-        allocation=args.allocation,
-        conda_env=args.conda_env,
-        dry_run=args.dry_run,
-        max_fail_count=args.max_fail_count,
-    )
+    # Submit based on mode
+    if args.use_parsl:
+        # Parsl mode: concurrent execution on single node
+        submitted_ids = submit_batch_parsl(
+            workflow=workflow,
+            root_dir=args.root_dir,
+            num_jobs=args.batch_size,
+            max_workers=args.max_workers,
+            cores_per_worker=args.cores_per_worker,
+            job_dir_pattern=args.job_dir_pattern,
+            orca_config=orca_config,
+            n_cores=args.n_cores,
+            conda_env=args.conda_env,
+            conda_base=args.conda_base,
+            dry_run=args.dry_run,
+            max_fail_count=args.max_fail_count,
+            timeout_seconds=args.job_timeout,
+        )
+    else:
+        # Traditional mode: one job script per job
+        submitted_ids = submit_batch(
+            workflow=workflow,
+            root_dir=args.root_dir,
+            batch_size=args.batch_size,
+            scheduler=args.scheduler,
+            job_dir_pattern=args.job_dir_pattern,
+            orca_config=orca_config,
+            n_cores=args.n_cores,
+            n_hours=args.n_hours,
+            queue=args.queue,
+            allocation=args.allocation,
+            conda_env=args.conda_env,
+            dry_run=args.dry_run,
+            max_fail_count=args.max_fail_count,
+        )
 
     print(f"\nTotal jobs submitted: {len(submitted_ids)}")
 
