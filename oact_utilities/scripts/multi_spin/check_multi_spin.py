@@ -74,6 +74,7 @@ def parse_info_from_path(path: str) -> dict[str, Any]:
         for suffix in ["_TPS", "_PBE", "_PBE0", "_B3LYP", "_M06L"]:
             if name_raw.endswith(suffix):
                 return name_raw[: -len(suffix)]
+        return name_raw
 
     parts = [p for p in path.split(os.sep) if p]
     info: dict[str, Any] = {"lot": "", "cat": "", "name": "", "spin": ""}

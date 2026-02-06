@@ -108,7 +108,7 @@ def check_job_termination(
     if check_many and len(files_out) > 1:
         status_list = []
         for file_out in files_out:
-            output_file = dir + "/" + file_out
+            output_file = os.path.join(str(dir), file_out)
             # Use check_file_termination which handles both regular and gzipped files
             file_status = check_file_termination(output_file)
             status_list.append(file_status)
@@ -124,7 +124,7 @@ def check_job_termination(
             return 0
 
     else:
-        output_file = dir + "/" + files_out[0]
+        output_file = os.path.join(str(dir), files_out[0])
         # Use check_file_termination which auto-detects gzipped files
         return check_file_termination(output_file)
 
