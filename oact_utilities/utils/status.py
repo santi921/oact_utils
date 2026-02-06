@@ -30,6 +30,9 @@ def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
             return 1
         if "aborting the run" in line:
             return -1
+    # check if the file was modified within the last day, if not, consider it failed
+    if os.path.getmtime(file_path) < (os.path.getmtime(file_path) - 24 * 3600):
+        return -1
     return 0
 
 
@@ -108,6 +111,8 @@ def check_job_termination(
             # Use check_file_termination which handles both regular and gzipped files
             file_status = check_file_termination(output_file)
             status_list.append(file_status)
+        # check all these files, if most recent file edit is more than 24 hours ago, then consider it failed
+
         if all(status == 1 for status in status_list):
             return 1
         elif any(status == -1 for status in status_list):
