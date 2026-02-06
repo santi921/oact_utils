@@ -157,7 +157,7 @@ def update_all_statuses(
 
     # Get all running and ready jobs (these might have changed)
     jobs = workflow.get_jobs_by_status(
-        [JobStatus.RUNNING, JobStatus.READY, JobStatus.FAILED]
+        [JobStatus.RUNNING, JobStatus.READY, JobStatus.FAILED, JobStatus.TO_RUN]
     )
 
     if verbose:
@@ -166,6 +166,7 @@ def update_all_statuses(
     updated_counts = {
         JobStatus.COMPLETED: 0,
         JobStatus.FAILED: 0,
+        JobStatus.TIMEOUT: 0,
         JobStatus.RUNNING: 0,
     }
 
@@ -186,6 +187,8 @@ def update_all_statuses(
 
         if result == 1:
             new_status = JobStatus.COMPLETED
+        elif result == -2:
+            new_status = JobStatus.TIMEOUT
         elif result == -1:
             new_status = JobStatus.FAILED
         else:
@@ -205,6 +208,7 @@ def update_all_statuses(
     print(
         f"\nStatus updates: {updated_counts[JobStatus.COMPLETED]} completed, "
         f"{updated_counts[JobStatus.FAILED]} failed, "
+        f"{updated_counts[JobStatus.TIMEOUT]} timeout, "
         f"{updated_counts[JobStatus.RUNNING]} running"
     )
 
@@ -238,6 +242,37 @@ def show_failed_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
 
     if len(failed) > limit:
         print(f"\n... and {len(failed) - limit} more failed jobs")
+
+
+def show_timeout_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
+    """Display details of timed out jobs."""
+    timeout = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
+
+    if not timeout:
+        print("\nNo timeout jobs found.")
+        return
+
+    print_header(f"Timeout Jobs (showing up to {limit})")
+    print(f"\n{'ID':<8} {'Orig Index':<12} {'Fails':<6} {'Job Dir':<25} {'Error':<25}")
+    print("-" * 90)
+
+    for job in timeout[:limit]:
+        job_dir = (
+            (job.job_dir[:22] + "...")
+            if job.job_dir and len(job.job_dir) > 25
+            else (job.job_dir or "N/A")
+        )
+        error = (
+            (job.error_message[:22] + "...")
+            if job.error_message and len(job.error_message) > 25
+            else (job.error_message or "N/A")
+        )
+        print(
+            f"{job.id:<8} {job.orig_index:<12} {job.fail_count:<6} {job_dir:<25} {error:<25}"
+        )
+
+    if len(timeout) > limit:
+        print(f"\n... and {len(timeout) - limit} more timeout jobs")
 
 
 def show_ready_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
@@ -281,6 +316,11 @@ def main():
         help="Show details of failed jobs",
     )
     parser.add_argument(
+        "--show-timeout",
+        action="store_true",
+        help="Show details of timeout jobs",
+    )
+    parser.add_argument(
         "--show-ready",
         action="store_true",
         help="Show jobs ready to run",
@@ -289,6 +329,16 @@ def main():
         "--reset-failed",
         action="store_true",
         help="Reset all failed jobs to ready status",
+    )
+    parser.add_argument(
+        "--reset-timeout",
+        action="store_true",
+        help="Reset all timeout jobs to ready status",
+    )
+    parser.add_argument(
+        "--include-timeout-in-reset",
+        action="store_true",
+        help="When using --reset-failed, also reset timeout jobs",
     )
     parser.add_argument(
         "--max-retries",
@@ -344,14 +394,34 @@ def main():
         if args.max_retries is not None:
             eligible = [j for j in failed_jobs if j.fail_count < args.max_retries]
             skipped = len(failed_jobs) - len(eligible)
-            workflow.reset_failed_jobs(max_fail_count=args.max_retries)
+            workflow.reset_failed_jobs(
+                max_fail_count=args.max_retries,
+                include_timeout=args.include_timeout_in_reset,
+            )
+            status_msg = "failed/timeout" if args.include_timeout_in_reset else "failed"
             print(
-                f"\nReset {len(eligible)} failed jobs to ready status "
+                f"\nReset {len(eligible)} {status_msg} jobs to ready status "
                 f"(skipped {skipped} jobs that have already failed {args.max_retries}+ times)"
             )
         else:
-            workflow.reset_failed_jobs()
-            print(f"\nReset {len(failed_jobs)} failed jobs to ready status")
+            workflow.reset_failed_jobs(include_timeout=args.include_timeout_in_reset)
+            status_msg = "failed/timeout" if args.include_timeout_in_reset else "failed"
+            print(f"\nReset {len(failed_jobs)} {status_msg} jobs to ready status")
+
+    # Reset timeout jobs if requested
+    if args.reset_timeout:
+        timeout_jobs = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
+        if args.max_retries is not None:
+            eligible = [j for j in timeout_jobs if j.fail_count < args.max_retries]
+            skipped = len(timeout_jobs) - len(eligible)
+            workflow.reset_timeout_jobs(max_fail_count=args.max_retries)
+            print(
+                f"\nReset {len(eligible)} timeout jobs to ready status "
+                f"(skipped {skipped} jobs that have already timed out {args.max_retries}+ times)"
+            )
+        else:
+            workflow.reset_timeout_jobs()
+            print(f"\nReset {len(timeout_jobs)} timeout jobs to ready status")
 
     # Always show summary
     print_summary(workflow)
@@ -365,6 +435,10 @@ def main():
     # Show failed jobs if requested
     if args.show_failed:
         show_failed_jobs(workflow, limit=args.limit)
+
+    # Show timeout jobs if requested
+    if args.show_timeout:
+        show_timeout_jobs(workflow, limit=args.limit)
 
     # Show ready jobs if requested
     if args.show_ready:

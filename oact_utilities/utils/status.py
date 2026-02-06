@@ -1,5 +1,6 @@
 import gzip
 import os
+import time
 
 
 def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
@@ -10,7 +11,7 @@ def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
         is_gzipped: If True, decompress the file before reading. Auto-detected if None.
 
     Returns:
-        1 if terminated normally, -1 if aborted, 0 if still running/incomplete.
+        1 if terminated normally, -1 if aborted, -2 if timeout, 0 if still running/incomplete.
     """
     # Auto-detect gzipped files if not specified
     if is_gzipped is None:
@@ -30,9 +31,9 @@ def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
             return 1
         if "aborting the run" in line:
             return -1
-    # check if the file was modified within the last six hours, if not, consider it failed
-    if os.path.getmtime(file_path) < (os.path.getmtime(file_path) - 6 * 3600):
-        return -1
+    # check if the file was modified within the last six hours, if not, consider it timed out
+    if os.path.getmtime(file_path) < (time.time() - 6 * 3600):
+        return -2
     return 0
 
 
@@ -77,7 +78,7 @@ def check_job_termination(
         check_many (bool, optional): Whether to check multiple output files. Defaults to False.
         flux_tf (bool, optional): Whether to check for flux output files. Defaults to False.
     Returns:
-        int: 1 if the job terminated successfully, -1 if it failed, 0 if still running or incomplete.
+        int: 1 if the job terminated successfully, -1 if it failed, -2 if timeout, 0 if still running or incomplete.
     """
     # sweep folder file for flux*out files
     files = os.listdir(dir)
@@ -115,6 +116,8 @@ def check_job_termination(
 
         if all(status == 1 for status in status_list):
             return 1
+        elif any(status == -2 for status in status_list):
+            return -2
         elif any(status == -1 for status in status_list):
             return -1
         else:

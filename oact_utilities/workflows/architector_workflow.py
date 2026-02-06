@@ -23,10 +23,12 @@ from ..utils.architector import create_workflow_db
 class JobStatus(str, Enum):
     """Status values for jobs in the workflow."""
 
-    READY = "ready"  # Job is queued and ready to run
+    TO_RUN = "to_run"  # Job is ready to be submitted
+    READY = "ready"  # Job is queued and ready to run (legacy, use TO_RUN)
     RUNNING = "running"  # Job has been submitted and is running
     COMPLETED = "completed"  # Job finished successfully
     FAILED = "failed"  # Job failed or crashed
+    TIMEOUT = "timeout"  # Job timed out without completing
 
 
 @dataclass
@@ -290,7 +292,9 @@ class ArchitectorWorkflow:
         """
         self.update_status_bulk(job_ids, JobStatus.RUNNING)
 
-    def reset_failed_jobs(self, max_fail_count: int | None = None):
+    def reset_failed_jobs(
+        self, max_fail_count: int | None = None, include_timeout: bool = False
+    ):
         """Reset all failed jobs back to ready status for retry.
 
         Increments the fail_count for each job being reset.
@@ -298,6 +302,49 @@ class ArchitectorWorkflow:
         Args:
             max_fail_count: If specified, only reset jobs with fail_count < max_fail_count.
                 Jobs that have already failed this many times will remain in FAILED status.
+            include_timeout: If True, also reset TIMEOUT jobs along with FAILED jobs.
+        """
+        statuses_to_reset = [JobStatus.FAILED.value]
+        if include_timeout:
+            statuses_to_reset.append(JobStatus.TIMEOUT.value)
+
+        placeholders = ",".join("?" * len(statuses_to_reset))
+
+        if max_fail_count is not None:
+            query = f"""
+                UPDATE structures
+                SET status = ?,
+                    error_message = NULL,
+                    fail_count = COALESCE(fail_count, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status IN ({placeholders}) AND COALESCE(fail_count, 0) < ?
+            """
+            self._execute_with_retry(
+                query,
+                tuple([JobStatus.TO_RUN.value] + statuses_to_reset + [max_fail_count]),
+            )
+        else:
+            query = f"""
+                UPDATE structures
+                SET status = ?,
+                    error_message = NULL,
+                    fail_count = COALESCE(fail_count, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status IN ({placeholders})
+            """
+            self._execute_with_retry(
+                query, tuple([JobStatus.TO_RUN.value] + statuses_to_reset)
+            )
+        self.conn.commit()
+
+    def reset_timeout_jobs(self, max_fail_count: int | None = None):
+        """Reset all timeout jobs back to ready status for retry.
+
+        Increments the fail_count for each job being reset.
+
+        Args:
+            max_fail_count: If specified, only reset jobs with fail_count < max_fail_count.
+                Jobs that have already timed out this many times will remain in TIMEOUT status.
         """
         if max_fail_count is not None:
             query = """
@@ -309,7 +356,7 @@ class ArchitectorWorkflow:
                 WHERE status = ? AND COALESCE(fail_count, 0) < ?
             """
             self._execute_with_retry(
-                query, (JobStatus.READY.value, JobStatus.FAILED.value, max_fail_count)
+                query, (JobStatus.TO_RUN.value, JobStatus.TIMEOUT.value, max_fail_count)
             )
         else:
             query = """
@@ -321,7 +368,7 @@ class ArchitectorWorkflow:
                 WHERE status = ?
             """
             self._execute_with_retry(
-                query, (JobStatus.READY.value, JobStatus.FAILED.value)
+                query, (JobStatus.TO_RUN.value, JobStatus.TIMEOUT.value)
             )
         self.conn.commit()
 
@@ -493,6 +540,8 @@ def update_job_status(
 
         if result == 1:
             new_status = JobStatus.COMPLETED
+        elif result == -2:
+            new_status = JobStatus.TIMEOUT
         elif result == -1:
             new_status = JobStatus.FAILED
         else:

@@ -73,10 +73,11 @@ python -m oact_utilities.workflows.dashboard workflow.db --show-metrics
 ```
 Workflow Status Summary
 Status          Count    Percent
-ready            850      85.0%
+to_run           850      85.0%
 running          120      12.0%
 completed         25       2.5%
-failed             5       0.5%
+failed             3       0.3%
+timeout            2       0.2%
 
 Completion: [██░░░░░░...] 2.5% (25/1000)
 
@@ -89,10 +90,16 @@ SCF Steps:  mean=12.3, median=11
 
 The SQLite DB automatically tracks:
 
-- **Status tracking**: `status` (ready/running/completed/failed)
+- **Status tracking**: `status` (to_run/ready/running/completed/failed/timeout)
+  - `to_run`: Job ready to be submitted (default for new jobs)
+  - `ready`: Legacy status, use `to_run` instead
+  - `running`: Job currently executing
+  - `completed`: Job finished successfully
+  - `failed`: Job failed (abort, error, etc.)
+  - `timeout`: Job timed out (no file updates in 6+ hours)
 - **Metrics**: `max_forces`, `scf_steps`, `final_energy` (auto-extracted from ORCA outputs)
 - **Performance**: `wall_time` (seconds), `n_cores` (CPU cores used) - for tracking compute usage
-- **Failure tracking**: `fail_count` (incremented each time a job is reset from failed to ready)
+- **Failure tracking**: `fail_count` (incremented each time a job is reset from failed/timeout to ready)
 - **Metadata**: `job_dir`, `error_message`, `charge`, `spin`, `created_at`, `updated_at`
 - **Structure info**: `elements`, `natoms`, `geometry` (XYZ string)
 - **CSV reference**: `orig_index` (original CSV row number)
@@ -112,8 +119,17 @@ python -m oact_utilities.workflows.dashboard workflow.db --update jobs/
 # Show failed jobs (includes fail count)
 python -m oact_utilities.workflows.dashboard workflow.db --show-failed
 
+# Show timeout jobs
+python -m oact_utilities.workflows.dashboard workflow.db --show-timeout
+
 # Reset failed jobs to retry (increments fail_count)
 python -m oact_utilities.workflows.dashboard workflow.db --reset-failed
+
+# Reset timeout jobs to retry (increments fail_count)
+python -m oact_utilities.workflows.dashboard workflow.db --reset-timeout
+
+# Reset both failed and timeout jobs together
+python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --include-timeout-in-reset
 
 # Reset only jobs that haven't failed 3+ times
 python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-retries 3
@@ -174,10 +190,16 @@ with ArchitectorWorkflow("workflow.db") as wf:
 
     # Count jobs
     counts = wf.count_by_status()
-    # {'ready': 850, 'running': 120, 'completed': 25, 'failed': 5}
+    # {'to_run': 850, 'running': 120, 'completed': 25, 'failed': 3, 'timeout': 2}
 
     # Reset failed jobs (increments fail_count)
     wf.reset_failed_jobs()
+
+    # Reset timeout jobs (increments fail_count)
+    wf.reset_timeout_jobs()
+
+    # Reset both failed and timeout jobs together
+    wf.reset_failed_jobs(include_timeout=True)
 
     # Reset only jobs that haven't failed too many times
     wf.reset_failed_jobs(max_fail_count=3)
@@ -239,6 +261,8 @@ project/
 ✅ **Easy Retry**: Reset failed jobs with one command
 ✅ **Failure Tracking**: `fail_count` tracks retries; skip chronic failures automatically
 ✅ **Performance Tracking**: `wall_time` and `n_cores` for compute usage analysis (core-hours)
+✅ **Timeout Detection**: Automatically detects jobs stuck for 6+ hours
+✅ **Rich Status System**: Separate tracking for failed vs. timeout vs. running jobs
 
 ## Supported ORCA Output Formats
 

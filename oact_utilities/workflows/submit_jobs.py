@@ -312,8 +312,8 @@ def submit_batch(
             scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
         )
 
-    # Get ready jobs
-    ready_jobs = workflow.get_jobs_by_status(JobStatus.READY)
+    # Get ready jobs (includes both TO_RUN and READY for backward compatibility)
+    ready_jobs = workflow.get_jobs_by_status([JobStatus.TO_RUN, JobStatus.READY])
 
     # Filter out jobs that have failed too many times
     if max_fail_count is not None:

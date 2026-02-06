@@ -4,7 +4,8 @@ High-throughput workflow management for architector calculations on HPC systems.
 
 ## Features
 
-- **Job Tracking**: SQLite database tracks job status (ready, running, completed, failed)
+- **Job Tracking**: SQLite database tracks job status (to_run, ready, running, completed, failed, timeout)
+- **Timeout Detection**: Automatically identifies jobs stuck for 6+ hours
 - **Metrics Collection**: Automatically extracts max forces, SCF steps, final energy from ORCA outputs
 - **Performance Tracking**: Records wall time and cores used for compute usage analysis (core-hours)
 - **Concurrency Handling**: WAL mode + retry logic for concurrent database access
@@ -98,8 +99,17 @@ python -m oact_utilities.workflows.dashboard workflow.db --show-metrics
 # Show failed jobs (includes fail count)
 python -m oact_utilities.workflows.dashboard workflow.db --show-failed
 
+# Show timeout jobs (stuck for 6+ hours)
+python -m oact_utilities.workflows.dashboard workflow.db --show-timeout
+
 # Reset failed jobs to retry (increments fail_count)
 python -m oact_utilities.workflows.dashboard workflow.db --reset-failed
+
+# Reset timeout jobs to retry (increments fail_count)
+python -m oact_utilities.workflows.dashboard workflow.db --reset-timeout
+
+# Reset both failed and timeout jobs together
+python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --include-timeout-in-reset
 
 # Reset failed jobs, but skip those that have failed 3+ times
 python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-retries 3
@@ -118,7 +128,7 @@ The SQLite database tracks each structure with:
 | `orig_index` | INTEGER | Original row index from CSV |
 | `elements` | TEXT | Semicolon-separated element symbols |
 | `natoms` | INTEGER | Number of atoms |
-| `status` | TEXT | Job status: ready, running, completed, failed |
+| `status` | TEXT | Job status: to_run, ready, running, completed, failed, timeout |
 | `charge` | INTEGER | Molecular charge (optional) |
 | `spin` | INTEGER | Spin multiplicity (2S+1) |
 | `geometry` | TEXT | XYZ geometry string |
@@ -137,10 +147,12 @@ The SQLite database tracks each structure with:
 
 ## Job Statuses
 
-- **`ready`**: Job is queued and ready to submit
-- **`running`**: Job has been submitted to HPC scheduler
+- **`to_run`**: Job is ready to be submitted (default for new jobs)
+- **`ready`**: Legacy status, use `to_run` instead (maintained for backward compatibility)
+- **`running`**: Job has been submitted to HPC scheduler and is executing
 - **`completed`**: Job finished successfully
-- **`failed`**: Job crashed or failed convergence
+- **`failed`**: Job crashed or failed convergence (explicit error or abort)
+- **`timeout`**: Job timed out (file not modified in 6+ hours, likely stuck or walltime exceeded)
 
 ## Programmatic API
 
@@ -155,7 +167,7 @@ with ArchitectorWorkflow("workflow.db") as workflow:
 
     # Count jobs
     counts = workflow.count_by_status()
-    # {'ready': 1000, 'running': 200, 'completed': 50, 'failed': 10}
+    # {'to_run': 1000, 'running': 200, 'completed': 50, 'failed': 8, 'timeout': 2}
 
     # Update job status
     workflow.update_status(job_id=42, new_status=JobStatus.COMPLETED)
@@ -174,6 +186,12 @@ with ArchitectorWorkflow("workflow.db") as workflow:
 
     # Reset failed jobs (increments fail_count)
     workflow.reset_failed_jobs()
+
+    # Reset timeout jobs (increments fail_count)
+    workflow.reset_timeout_jobs()
+
+    # Reset both failed and timeout jobs together
+    workflow.reset_failed_jobs(include_timeout=True)
 
     # Reset failed jobs, but only those that haven't failed too many times
     workflow.reset_failed_jobs(max_fail_count=3)  # Skip jobs with fail_count >= 3
@@ -264,14 +282,15 @@ with ArchitectorWorkflow("workflow.db") as workflow:
 
 Status          Count    Percent
 ----------------------------------------
-ready            8500      85.0%
+to_run           8500      85.0%
 running          1200      12.0%
 completed         250       2.5%
-failed             50       0.5%
+failed             30       0.3%
+timeout            20       0.2%
 ----------------------------------------
 TOTAL           10000     100.0%
 
-Completion: [████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 2.5% (250/10000)
+Completion: [████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 2.5% (250/10000)
 
 ================================================================================
               Computational Metrics (Completed Jobs)
@@ -329,13 +348,22 @@ Jobs with timing data: 250
    python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 500
    ```
 
-5. **Handle failures**:
+5. **Handle failures and timeouts**:
    ```bash
    # View failed jobs with fail counts
    python -m oact_utilities.workflows.dashboard workflow.db --show-failed
 
+   # View timeout jobs (stuck for 6+ hours)
+   python -m oact_utilities.workflows.dashboard workflow.db --show-timeout
+
    # Reset failed jobs for retry (increments fail_count)
    python -m oact_utilities.workflows.dashboard workflow.db --reset-failed
+
+   # Reset timeout jobs for retry with longer time limit
+   python -m oact_utilities.workflows.dashboard workflow.db --reset-timeout
+
+   # Reset both failed and timeout jobs together
+   python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --include-timeout-in-reset
 
    # Reset only jobs that haven't failed too many times
    python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-retries 3

@@ -1,5 +1,8 @@
 """Tests for status checking utilities."""
 
+import os
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -56,8 +59,8 @@ def test_check_file_termination_regular():
         pytest.skip("No regular .out files found in test directory")
 
     status = check_file_termination(str(out_files[0]))
-    # Status can be 0, 1, or -1 depending on the test file
-    assert status in [0, 1, -1], f"Unexpected status value: {status}"
+    # Status can be 0, 1, -1, or -2 depending on the test file
+    assert status in [0, 1, -1, -2], f"Unexpected status value: {status}"
 
 
 def test_check_job_termination_regular():
@@ -69,5 +72,84 @@ def test_check_job_termination_regular():
         pytest.skip("Regular ORCA test directory not found")
 
     status = check_job_termination(str(orca_dir))
-    # Status can be 0, 1, or -1 depending on the test file
-    assert status in [0, 1, -1], f"Unexpected status value: {status}"
+    # Status can be 0, 1, -1, or -2 depending on the test file
+    assert status in [0, 1, -1, -2], f"Unexpected status value: {status}"
+
+
+def test_check_file_termination_timeout():
+    """Test that check_file_termination detects timeout (file not modified in 6+ hours)."""
+    # Create a temporary file with old modification time
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".out") as f:
+        f.write("Test ORCA output\nSome calculation output\n")
+        temp_file = f.name
+
+    try:
+        # Set file modification time to 7 hours ago
+        seven_hours_ago = time.time() - (7 * 3600)
+        os.utime(temp_file, (seven_hours_ago, seven_hours_ago))
+
+        # Check that it's detected as timeout
+        status = check_file_termination(temp_file)
+        assert status == -2, f"Expected status -2 (timeout), got {status}"
+
+    finally:
+        # Clean up
+        if os.path.exists(temp_file):
+            os.unlink(temp_file)
+
+
+def test_check_file_termination_not_timeout():
+    """Test that check_file_termination does NOT timeout for recently modified files."""
+    # Create a temporary file with recent modification time
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".out") as f:
+        f.write("Test ORCA output\nSome calculation output\n")
+        temp_file = f.name
+
+    try:
+        # File should have recent modification time by default
+        # Check that it's NOT detected as timeout (should be 0 = still running)
+        status = check_file_termination(temp_file)
+        assert status == 0, f"Expected status 0 (still running), got {status}"
+
+    finally:
+        # Clean up
+        if os.path.exists(temp_file):
+            os.unlink(temp_file)
+
+
+def test_check_file_termination_success():
+    """Test that check_file_termination correctly detects successful termination."""
+    # Create a temporary file with ORCA success message
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".out") as f:
+        f.write("Test ORCA output\n")
+        f.write("Some calculation output\n")
+        f.write("ORCA TERMINATED NORMALLY\n")
+        temp_file = f.name
+
+    try:
+        status = check_file_termination(temp_file)
+        assert status == 1, f"Expected status 1 (success), got {status}"
+
+    finally:
+        # Clean up
+        if os.path.exists(temp_file):
+            os.unlink(temp_file)
+
+
+def test_check_file_termination_abort():
+    """Test that check_file_termination correctly detects aborted jobs."""
+    # Create a temporary file with ORCA abort message
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".out") as f:
+        f.write("Test ORCA output\n")
+        f.write("Some calculation output\n")
+        f.write("Error: aborting the run\n")
+        temp_file = f.name
+
+    try:
+        status = check_file_termination(temp_file)
+        assert status == -1, f"Expected status -1 (abort), got {status}"
+
+    finally:
+        # Clean up
+        if os.path.exists(temp_file):
+            os.unlink(temp_file)
