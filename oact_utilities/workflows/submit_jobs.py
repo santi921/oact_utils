@@ -315,7 +315,6 @@ if PARSL_AVAILABLE:
         job_id: int,
         job_dir: str,
         orca_config: dict,
-        n_cores: int,
         timeout_seconds: int = 7200,
     ) -> dict:
         """Execute ORCA job within Parsl worker.
@@ -323,18 +322,31 @@ if PARSL_AVAILABLE:
         This runs as a Parsl python_app, executing directly on the worker node.
         Parsl handles CPU affinity and worker management automatically.
 
+        ORCA output is written to files (orca.out / orca.err) instead of being
+        captured via pipes.  Pipe-based capture can deadlock when ORCA's
+        internal MPI processes fill the OS pipe buffer (~64 KB) during the
+        atomic SCF initial-guess phase.
+
+        Each worker also gets a private TMPDIR so that concurrent ORCA instances
+        on the same node don't collide on temporary files or OpenMPI
+        shared-memory segments.
+
+        Core count is already baked into orca.inp by prepare_job_directory().
+
         Args:
             job_id: Workflow database job ID
             job_dir: Absolute path to job directory
             orca_config: ORCA configuration dictionary
-            n_cores: Number of cores for ORCA
-            timeout_seconds: Job timeout in seconds (default: 7200 = 2 hours)
+            timeout_seconds: Job timeout in seconds (default: 7200 = 2 hours).
 
         Returns:
             Dict with job_id, status, metrics
         """
         import os
+        import shutil
+        import signal
         import subprocess
+        import tempfile
         import time
         from pathlib import Path
 
@@ -352,49 +364,96 @@ if PARSL_AVAILABLE:
         # Get ORCA path from config
         orca_cmd = orca_config.get("orca_path", "orca")
 
-        # Let Parsl handle CPU affinity - no manual pinning needed
-        os.environ["OMP_NUM_THREADS"] = "1"
+        # --- Environment isolation for concurrent ORCA instances ---
+        env = os.environ.copy()
+        env["OMP_NUM_THREADS"] = "1"
+
+        # Give each worker a private TMPDIR inside the job directory so that
+        # ORCA's temp files (orca_atom*.out/.gbw, MPI shared-memory segments)
+        # don't collide between concurrent jobs on the same node.
+        tmp_dir = tempfile.mkdtemp(prefix="orca_tmp_", dir=job_dir)
+        env["TMPDIR"] = tmp_dir
+
+        # Prevent OpenMPI from using shared-memory transport between unrelated
+        # ORCA instances that happen to share the same node.  vader (or sm)
+        # uses /dev/shm files whose names can collide.
+        env["OMPI_MCA_btl"] = "self,tcp"
 
         start_time = time.time()
 
+        stdout_path = job_dir_path / "orca.out"
+        stderr_path = job_dir_path / "orca.err"
+
+        proc = None
         try:
-            # Run ORCA
-            result = subprocess.run(
+            # Write ORCA output directly to files to avoid pipe buffer deadlocks.
+            # start_new_session=True puts ORCA + its MPI children in a new
+            # process group so we can kill the entire tree on timeout.
+            f_out = open(stdout_path, "w")
+            f_err = open(stderr_path, "w")
+
+            proc = subprocess.Popen(
                 [orca_cmd, str(input_file)],
                 cwd=job_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
+                stdout=f_out,
+                stderr=f_err,
+                env=env,
+                start_new_session=True,
             )
+
+            try:
+                proc.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                # Kill the entire process group (ORCA + mpirun + orca_main workers)
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.wait()
+                return {
+                    "job_id": job_id,
+                    "status": "timeout",
+                    "error": f"Job exceeded {timeout_seconds}s timeout",
+                }
+            finally:
+                f_out.close()
+                f_err.close()
 
             elapsed = time.time() - start_time
 
-            if result.returncode == 0:
+            if proc.returncode == 0:
                 return {
                     "job_id": job_id,
                     "status": "completed",
                     "wall_time": elapsed,
                 }
             else:
+                # Read tail of stderr for error reporting
+                err_tail = ""
+                try:
+                    err_tail = stderr_path.read_text()[-500:]
+                except Exception:
+                    pass
                 return {
                     "job_id": job_id,
                     "status": "failed",
-                    "error": f"ORCA exited with code {result.returncode}",
-                    "stderr": result.stderr[:500] if result.stderr else "",
+                    "error": f"ORCA exited with code {proc.returncode}",
+                    "stderr": err_tail,
                 }
 
-        except subprocess.TimeoutExpired:
-            return {
-                "job_id": job_id,
-                "status": "timeout",
-                "error": f"Job exceeded {timeout_seconds}s timeout",
-            }
         except Exception as e:
+            # Kill process tree if it's still alive
+            if proc is not None and proc.poll() is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.wait()
+                except Exception:
+                    pass
             return {
                 "job_id": job_id,
                 "status": "failed",
                 "error": str(e),
             }
+        finally:
+            # Clean up the per-job TMPDIR
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def build_parsl_config_flux(
@@ -445,7 +504,7 @@ export JAX_PLATFORMS=cpu
     executor = HighThroughputExecutor(
         label="flux_htex",
         cores_per_worker=cores_per_worker,
-        max_workers=max_workers,
+        max_workers_per_node=max_workers,
         provider=provider,
     )
 
@@ -486,7 +545,7 @@ def submit_batch_parsl(
         ld_library_path: Override LD_LIBRARY_PATH
         dry_run: Prepare but don't submit
         max_fail_count: Skip jobs with fail_count >= this value
-        timeout_seconds: Job timeout in seconds (default: 7200 = 2 hours)
+        timeout_seconds: Job timeout in seconds (default: 72000 = 20 hours)
 
     Returns:
         List of submitted job IDs
@@ -503,6 +562,16 @@ def submit_batch_parsl(
 
     root_dir = Path(root_dir)
     root_dir.mkdir(parents=True, exist_ok=True)
+
+    # Auto-correct n_cores to match cores_per_worker for proper resource allocation
+    if n_cores != cores_per_worker:
+        print(
+            f"Warning: n_cores ({n_cores}) doesn't match cores_per_worker ({cores_per_worker})"
+        )
+        print(
+            f"   Auto-setting n_cores = {cores_per_worker} for proper resource allocation"
+        )
+        n_cores = cores_per_worker
 
     # Merge ORCA config
     config: OrcaConfig = {**DEFAULT_ORCA_CONFIG, **(orca_config or {})}
@@ -575,7 +644,6 @@ def submit_batch_parsl(
             job_id=job.id,
             job_dir=str(job_dir_abs),
             orca_config=dict(config),
-            n_cores=n_cores,
             timeout_seconds=timeout_seconds,
         )
         futures.append((job.id, future))
@@ -639,6 +707,18 @@ def submit_batch_parsl(
         print("\n\nGraceful shutdown requested...")
 
     finally:
+        # Reset any jobs that are still RUNNING back to READY so they can be
+        # re-submitted in the next batch (e.g. after Ctrl+C or crash).
+        resolved_ids = set(completed_ids) | set(failed_ids)
+        orphaned_ids = [jid for jid in submitted_ids if jid not in resolved_ids]
+        if orphaned_ids:
+            for jid in orphaned_ids:
+                try:
+                    workflow.update_status(jid, JobStatus.READY)
+                except Exception:
+                    pass
+            print(f"Reset {len(orphaned_ids)} in-flight jobs back to READY")
+
         # Cleanup Parsl
         print("\nCleaning up Parsl executor...")
         try:
@@ -654,8 +734,8 @@ def submit_batch_parsl(
             pass
 
     print("\nSubmission complete:")
-    print(f"  ✓ Completed: {len(completed_ids)}")
-    print(f"  ✗ Failed: {len(failed_ids)}")
+    print(f"  Completed: {len(completed_ids)}")
+    print(f"  Failed: {len(failed_ids)}")
     print(f"  Total: {len(submitted_ids)}")
 
     return submitted_ids
@@ -884,8 +964,8 @@ def main():
     parsl_group.add_argument(
         "--job-timeout",
         type=int,
-        default=7200,
-        help="Job timeout in seconds for Parsl mode (default: 7200 = 2 hours)",
+        default=72000,
+        help="Job timeout in seconds for Parsl mode (default: 72000 = 20 hours)",
     )
     parser.add_argument(
         "--max-fail-count",

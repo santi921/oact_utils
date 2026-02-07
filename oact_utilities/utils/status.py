@@ -1,6 +1,15 @@
 import gzip
 import os
+import re
 import time
+
+# Pattern matching ORCA's atomic SCF guess files (e.g. orca_atom0.out, orca_atom12.out)
+_ORCA_ATOM_RE = re.compile(r"^orca_atom\d+\.out$")
+
+
+def _is_orca_atom_scf(filename: str) -> bool:
+    """Return True if filename is an ORCA atomic SCF initial-guess output."""
+    return _ORCA_ATOM_RE.match(os.path.basename(filename)) is not None
 
 
 def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
@@ -86,8 +95,8 @@ def check_job_termination(
     if flux_tf:
         files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
     else:
-        # Check for regular .out files
-        files_out = [f for f in files if f.endswith("out")]
+        # Check for regular .out files (skip ORCA atomic SCF guess files)
+        files_out = [f for f in files if f.endswith("out") and not _is_orca_atom_scf(f)]
         # Check for gzipped .out.gz files (e.g., from quacc)
         if not files_out:
             files_out = [f for f in files if f.endswith(".out.gz")]
@@ -147,7 +156,7 @@ def check_geometry_steps(
     if flux_tf:
         files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
     else:
-        files_out = [f for f in files if f.endswith("out")]
+        files_out = [f for f in files if f.endswith("out") and not _is_orca_atom_scf(f)]
         # also check slurm-*.log files
         files_out += [f for f in files if f.startswith("slurm-") and f.endswith(".log")]
         if not files_out:
@@ -218,9 +227,9 @@ def pull_log_file(root_dir: str) -> str:
     # Try to find .logs files first
     log_file = [f for f in files if f.endswith("logs")]
 
-    # If none, try .out files
+    # If none, try .out files (skip ORCA atomic SCF guess files)
     if len(log_file) == 0:
-        log_file = [f for f in files if f.endswith(".out")]
+        log_file = [f for f in files if f.endswith(".out") and not _is_orca_atom_scf(f)]
 
     # If none, try .out.gz files (e.g., from quacc)
     if len(log_file) == 0:

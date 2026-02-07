@@ -9,6 +9,7 @@ This module provides utilities to manage large-scale architector job campaigns:
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -501,7 +502,11 @@ def update_job_status(
                 # Find the log file for timing extraction
                 log_file = None
                 for pattern in ["*.out", "orca.out", "*.log"]:
-                    matches = list(job_dir.glob(pattern))
+                    matches = [
+                        m
+                        for m in job_dir.glob(pattern)
+                        if not re.match(r"^orca_atom\d+\.out$", m.name)
+                    ]
                     if matches:
                         log_file = str(matches[0])
                         break

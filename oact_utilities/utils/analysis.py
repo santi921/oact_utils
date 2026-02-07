@@ -18,6 +18,7 @@ from oact_utilities.utils.create import (
     read_xyz_single_file,
 )
 from oact_utilities.utils.status import (
+    _is_orca_atom_scf,
     check_file_termination,
     check_job_termination,
     check_sella_complete,
@@ -420,7 +421,9 @@ def get_full_info_all_jobs(
                     f for f in files if f.startswith("flux") and f.endswith("out")
                 ]
             else:
-                files_out = [f for f in files if f.endswith("out")]
+                files_out = [
+                    f for f in files if f.endswith("out") and not _is_orca_atom_scf(f)
+                ]
                 if not files_out:
                     files_out = [f for f in files if f.endswith("logs")]
 
@@ -629,7 +632,9 @@ def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> list:
                     f for f in files if f.startswith("flux") and f.endswith("out")
                 ]
             else:
-                files_out = [f for f in files if f.endswith("out")]
+                files_out = [
+                    f for f in files if f.endswith("out") and not _is_orca_atom_scf(f)
+                ]
                 if not files_out:
                     files_out = [f for f in files if f.endswith("logs")]
 
@@ -801,8 +806,10 @@ def parse_job_metrics(
                     pass
 
             # Check if job completed successfully
-            termination = check_job_termination(str(job_dir))
-            success = termination == 1
+            # Simply check for "ORCA TERMINATED NORMALLY" in output file
+            with open(output_file) as f:
+                content = f.read()
+            success = "ORCA TERMINATED NORMALLY" in content
 
         return {
             "max_forces": max_forces,
