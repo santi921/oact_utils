@@ -343,7 +343,6 @@ if PARSL_AVAILABLE:
             Dict with job_id, status, metrics
         """
         import os
-        import shutil
         import signal
         import subprocess
         import tempfile
@@ -452,8 +451,10 @@ if PARSL_AVAILABLE:
                 "error": str(e),
             }
         finally:
-            # Clean up the per-job TMPDIR
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            # NOTE: we intentionally keep tmp_dir (orca_tmp_*/) around — it
+            # contains atomic SCF guess files that are useful for debugging
+            # failed jobs and for ORCA restarts.
+            pass
 
 
 def build_parsl_config_flux(
