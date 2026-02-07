@@ -506,6 +506,7 @@ export JAX_PLATFORMS=cpu
         label="flux_htex",
         cores_per_worker=cores_per_worker,
         max_workers_per_node=max_workers,
+        cpu_affinity="block",
         provider=provider,
     )
 
