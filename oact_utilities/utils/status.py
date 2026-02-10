@@ -12,7 +12,9 @@ def _is_orca_atom_scf(filename: str) -> bool:
     return _ORCA_ATOM_RE.match(os.path.basename(filename)) is not None
 
 
-def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
+def check_file_termination(
+    file_path: str, is_gzipped: bool = False, hours_cutoff=6
+) -> int:
     """Check if an ORCA calculation terminated successfully.
 
     Args:
@@ -43,9 +45,11 @@ def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
         # also check if there is a line that says "Error" at all within the last 5 lines
         if "Error" in line:
             return -1
-    # check if the file was modified within the last six hours, if not, consider it timed out
-    if os.path.getmtime(file_path) < (time.time() - 6 * 3600):
+
+    # check if the file was modified within the last hours_cutoff hours, if not, consider it timed out
+    if os.path.getmtime(file_path) < (time.time() - hours_cutoff * 3600):
         return -2
+
     return 0
 
 
@@ -78,7 +82,7 @@ def done_geo_opt_ase(opt_log_file, fmax_cutoff=0.01):
 
 
 def check_job_termination(
-    dir: str, check_many: bool = False, flux_tf: bool = False
+    dir: str, check_many: bool = False, flux_tf: bool = False, hours_cutoff=6
 ) -> int:
     """
     Utility function to check if a job in a given directory has terminated successfully.
@@ -115,6 +119,9 @@ def check_job_termination(
             files_out = files_out[:1]
 
     if len(files_out) == 0:
+        # No output files found — check if the directory itself is stale
+        if os.path.getmtime(dir) < (time.time() - hours_cutoff * 3600):
+            return -2
         return 0
 
     if check_many and len(files_out) > 1:
@@ -122,7 +129,7 @@ def check_job_termination(
         for file_out in files_out:
             output_file = os.path.join(str(dir), file_out)
             # Use check_file_termination which handles both regular and gzipped files
-            file_status = check_file_termination(output_file)
+            file_status = check_file_termination(output_file, hours_cutoff=hours_cutoff)
             status_list.append(file_status)
         # check all these files, if most recent file edit is more than 24 hours ago, then consider it failed
 
@@ -138,11 +145,11 @@ def check_job_termination(
     else:
         output_file = os.path.join(str(dir), files_out[0])
         # Use check_file_termination which auto-detects gzipped files
-        return check_file_termination(output_file)
+        return check_file_termination(output_file, hours_cutoff=hours_cutoff)
 
 
 def check_geometry_steps(
-    dir: str, check_many: bool = False, flux_tf: bool = False
+    dir: str, check_many: bool = False, flux_tf: bool = False, hours_cutoff=6
 ) -> int:
     """
     Utility function to check if a job in a given directory has gone beyond 1 geometry optimization step.
@@ -180,7 +187,7 @@ def check_geometry_steps(
         for file_out in files_out:
             output_file = dir + "/" + file_out
             # read last line of output_file
-            file_status = check_file_termination(output_file)
+            file_status = check_file_termination(output_file, hours_cutoff=hours_cutoff)
 
             status_list.append(file_status)
         if all(status == 1 for status in status_list):

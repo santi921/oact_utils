@@ -351,6 +351,7 @@ def update_all_statuses(
     unzip: bool = False,
     workers: int = 4,
     recheck_completed: bool = False,
+    hours_cutoff: float = 6,
 ):
     """Scan job directories and update statuses in bulk.
 
@@ -364,11 +365,14 @@ def update_all_statuses(
         unzip: If True, handle gzipped output files (quacc).
         workers: Number of parallel worker threads for metrics extraction.
         recheck_completed: If True, also re-verify jobs marked as completed.
+        hours_cutoff: Hours of inactivity before a job is considered timed out.
     """
+    from functools import partial
+
     from ..utils.status import check_job_termination
 
     if check_func is None:
-        check_func = check_job_termination
+        check_func = partial(check_job_termination, hours_cutoff=hours_cutoff)
 
     root_dir = Path(root_dir)
     if not root_dir.exists():
@@ -664,6 +668,12 @@ def main():
         action="store_true",
         help="Re-verify completed jobs during --update (catches tampered outputs or status checker changes)",
     )
+    parser.add_argument(
+        "--hours-cutoff",
+        type=float,
+        default=6,
+        help="Hours of inactivity before a job is considered timed out (default: 6)",
+    )
 
     args = parser.parse_args()
 
@@ -685,6 +695,7 @@ def main():
             unzip=args.unzip,
             workers=args.workers,
             recheck_completed=args.recheck_completed,
+            hours_cutoff=args.hours_cutoff,
         )
 
         # Backfill metrics for previously completed jobs missing them
