@@ -40,6 +40,9 @@ def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
             return 1
         if "aborting the run" in line:
             return -1
+        # also check if there is a line that says "Error" at all within the last 5 lines
+        if "Error" in line:
+            return -1
     # check if the file was modified within the last six hours, if not, consider it timed out
     if os.path.getmtime(file_path) < (time.time() - 6 * 3600):
         return -2

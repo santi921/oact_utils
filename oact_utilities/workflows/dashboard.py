@@ -163,14 +163,15 @@ def _extract_metrics_from_dir(
 
         wall_time = None
         n_cores = None
+        timing_warning = None
         try:
             log_file = pull_log_file(str(job_dir))
             n_cores_val, time_dict = find_timings_and_cores(log_file)
             if time_dict and "Total" in time_dict:
                 wall_time = time_dict["Total"]
             n_cores = n_cores_val
-        except Exception:
-            pass
+        except Exception as e:
+            timing_warning = f"Timing extraction failed: {e}"
 
         return {
             "max_forces": metrics.get("max_forces"),
@@ -179,6 +180,7 @@ def _extract_metrics_from_dir(
             "wall_time": wall_time,
             "n_cores": n_cores,
             "error": None,
+            "timing_warning": timing_warning,
         }
 
     except Exception as e:
@@ -249,6 +251,8 @@ def _parallel_extract_metrics(
                         f"scf={result['scf_steps']}, "
                         f"energy={result['final_energy']}"
                     )
+                    if result.get("timing_warning"):
+                        print(f"      Warning: {result['timing_warning']}")
             else:
                 failed_jobs.append((job_id, result["error"]))
                 if verbose:
@@ -346,6 +350,7 @@ def update_all_statuses(
     extract_metrics: bool = False,
     unzip: bool = False,
     workers: int = 4,
+    recheck_completed: bool = False,
 ):
     """Scan job directories and update statuses in bulk.
 
@@ -358,6 +363,7 @@ def update_all_statuses(
         extract_metrics: If True, extract computational metrics for newly completed jobs.
         unzip: If True, handle gzipped output files (quacc).
         workers: Number of parallel worker threads for metrics extraction.
+        recheck_completed: If True, also re-verify jobs marked as completed.
     """
     from ..utils.status import check_job_termination
 
@@ -369,10 +375,17 @@ def update_all_statuses(
         print(f"Error: root directory {root_dir} does not exist")
         return
 
-    # Get all running and ready jobs (these might have changed)
-    jobs = workflow.get_jobs_by_status(
-        [JobStatus.RUNNING, JobStatus.READY, JobStatus.FAILED, JobStatus.TO_RUN]
-    )
+    # Get jobs to check — optionally include completed for re-verification
+    statuses_to_check = [
+        JobStatus.RUNNING,
+        JobStatus.READY,
+        JobStatus.FAILED,
+        JobStatus.TO_RUN,
+    ]
+    if recheck_completed:
+        statuses_to_check.append(JobStatus.COMPLETED)
+
+    jobs = workflow.get_jobs_by_status(statuses_to_check)
 
     if verbose:
         print(f"\nScanning {len(jobs)} jobs for status updates...")
@@ -622,6 +635,11 @@ def main():
         default=4,
         help="Number of parallel workers for metrics extraction (default: 4)",
     )
+    parser.add_argument(
+        "--recheck-completed",
+        action="store_true",
+        help="Re-verify completed jobs during --update (catches tampered outputs or status checker changes)",
+    )
 
     args = parser.parse_args()
 
@@ -642,6 +660,7 @@ def main():
             extract_metrics=args.extract_metrics,
             unzip=args.unzip,
             workers=args.workers,
+            recheck_completed=args.recheck_completed,
         )
 
         # Backfill metrics for previously completed jobs missing them
