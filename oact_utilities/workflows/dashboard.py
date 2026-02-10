@@ -140,27 +140,20 @@ def print_progress_bar(
     print(f"{label}: [{bar}] {pct:.1f}% ({completed}/{total})")
 
 
-def _extract_and_store_metrics(
-    workflow: ArchitectorWorkflow,
-    job_id: int,
+def _extract_metrics_from_dir(
     job_dir: Path,
     unzip: bool = False,
-    verbose: bool = False,
-    mark_failed_on_error: bool = True,
-) -> bool:
-    """Extract metrics from a job directory and store in the database.
+) -> dict:
+    """Extract metrics from a job directory (pure I/O, no DB writes).
+
+    This function is safe to call from worker threads.
 
     Args:
-        workflow: ArchitectorWorkflow instance.
-        job_id: Database ID of the job.
         job_dir: Path to job directory containing ORCA output.
         unzip: If True, handle gzipped output files (quacc).
-        verbose: Print details of extracted metrics.
-        mark_failed_on_error: If True, set the job status to FAILED and
-            increment fail_count when metrics extraction fails.
 
     Returns:
-        True if metrics were successfully extracted.
+        Dictionary with extracted metrics and an 'error' key (None on success).
     """
     from ..utils.analysis import find_timings_and_cores, parse_job_metrics
     from ..utils.status import pull_log_file
@@ -179,35 +172,106 @@ def _extract_and_store_metrics(
         except Exception:
             pass
 
-        workflow.update_job_metrics(
-            job_id,
-            job_dir=str(job_dir),
-            max_forces=metrics.get("max_forces"),
-            scf_steps=metrics.get("scf_steps"),
-            final_energy=metrics.get("final_energy"),
-            wall_time=wall_time,
-            n_cores=n_cores,
-        )
-
-        if verbose:
-            print(
-                f"    Metrics: forces={metrics.get('max_forces')}, "
-                f"scf={metrics.get('scf_steps')}, "
-                f"energy={metrics.get('final_energy')}"
-            )
-        return True
+        return {
+            "max_forces": metrics.get("max_forces"),
+            "scf_steps": metrics.get("scf_steps"),
+            "final_energy": metrics.get("final_energy"),
+            "wall_time": wall_time,
+            "n_cores": n_cores,
+            "error": None,
+        }
 
     except Exception as e:
-        if verbose:
-            print(f"    Failed to extract metrics: {e}")
-        if mark_failed_on_error:
+        return {"error": str(e)}
+
+
+def _parallel_extract_metrics(
+    workflow: ArchitectorWorkflow,
+    work_items: list[tuple[int, Path]],
+    unzip: bool = False,
+    verbose: bool = False,
+    workers: int = 4,
+    mark_failed_on_error: bool = True,
+) -> tuple[int, int]:
+    """Extract metrics in parallel, then batch-write results to DB.
+
+    File I/O happens in a thread pool; DB writes happen in a single
+    transaction after all extractions complete.
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        work_items: List of (job_id, job_dir) tuples.
+        unzip: If True, handle gzipped output files (quacc).
+        verbose: Print detailed progress messages.
+        workers: Number of parallel worker threads.
+        mark_failed_on_error: If True, mark jobs as FAILED when parsing fails.
+
+    Returns:
+        Tuple of (extracted_count, failed_count).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not work_items:
+        return 0, 0
+
+    # Phase 1: extract metrics in parallel (pure I/O, no DB)
+    success_metrics: list[dict] = []
+    failed_jobs: list[tuple[int, str]] = []
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_job = {
+            executor.submit(_extract_metrics_from_dir, job_dir, unzip): (
+                job_id,
+                job_dir,
+            )
+            for job_id, job_dir in work_items
+        }
+
+        for future in as_completed(future_to_job):
+            job_id, job_dir = future_to_job[future]
+            result = future.result()
+
+            if result.get("error") is None:
+                success_metrics.append(
+                    {
+                        "job_id": job_id,
+                        "job_dir": str(job_dir),
+                        "max_forces": result["max_forces"],
+                        "scf_steps": result["scf_steps"],
+                        "final_energy": result["final_energy"],
+                        "wall_time": result["wall_time"],
+                        "n_cores": result["n_cores"],
+                    }
+                )
+                if verbose:
+                    print(
+                        f"    Job {job_id}: forces={result['max_forces']}, "
+                        f"scf={result['scf_steps']}, "
+                        f"energy={result['final_energy']}"
+                    )
+            else:
+                failed_jobs.append((job_id, result["error"]))
+                if verbose:
+                    print(
+                        f"    Job {job_id}: failed to extract metrics: "
+                        f"{result['error']}"
+                    )
+
+    # Phase 2: batch-write all successful metrics in one transaction
+    if success_metrics:
+        workflow.update_job_metrics_bulk(success_metrics)
+
+    # Phase 3: mark failed jobs
+    if mark_failed_on_error:
+        for job_id, error_msg in failed_jobs:
             workflow.update_status(
                 job_id,
                 JobStatus.FAILED,
-                error_message=f"Metrics parse error: {e}",
+                error_message=f"Metrics parse error: {error_msg}",
                 increment_fail_count=True,
             )
-        return False
+
+    return len(success_metrics), len(failed_jobs)
 
 
 def backfill_metrics(
@@ -216,6 +280,7 @@ def backfill_metrics(
     job_dir_pattern: str = "job_{orig_index}",
     unzip: bool = False,
     verbose: bool = False,
+    workers: int = 4,
 ):
     """Extract metrics for completed jobs that don't have them yet.
 
@@ -225,6 +290,7 @@ def backfill_metrics(
         job_dir_pattern: Pattern for job directory names.
         unzip: If True, handle gzipped output files (quacc).
         verbose: Print detailed progress messages.
+        workers: Number of parallel worker threads for extraction.
     """
     root_dir = Path(root_dir)
 
@@ -241,11 +307,9 @@ def backfill_metrics(
         print("\nAll completed jobs already have metrics.")
         return
 
-    print(f"\nBackfilling metrics for {len(rows)} completed jobs...")
-    extracted = 0
-    failed = 0
+    # Build work items, filtering out missing directories
+    work_items = []
     skipped = 0
-
     for job_id, orig_index in rows:
         job_dir_name = job_dir_pattern.format(orig_index=orig_index, id=job_id)
         job_dir = root_dir / job_dir_name
@@ -256,10 +320,16 @@ def backfill_metrics(
                 print(f"  Job {job_id}: directory {job_dir} not found, skipping")
             continue
 
-        if _extract_and_store_metrics(workflow, job_id, job_dir, unzip, verbose):
-            extracted += 1
-        else:
-            failed += 1
+        work_items.append((job_id, job_dir))
+
+    print(
+        f"\nBackfilling metrics for {len(work_items)} completed jobs "
+        f"({workers} workers)..."
+    )
+
+    extracted, failed = _parallel_extract_metrics(
+        workflow, work_items, unzip=unzip, verbose=verbose, workers=workers
+    )
 
     print(
         f"Backfill metrics: {extracted} extracted, "
@@ -275,6 +345,7 @@ def update_all_statuses(
     verbose: bool = False,
     extract_metrics: bool = False,
     unzip: bool = False,
+    workers: int = 4,
 ):
     """Scan job directories and update statuses in bulk.
 
@@ -286,6 +357,7 @@ def update_all_statuses(
         verbose: Print detailed progress messages.
         extract_metrics: If True, extract computational metrics for newly completed jobs.
         unzip: If True, handle gzipped output files (quacc).
+        workers: Number of parallel worker threads for metrics extraction.
     """
     from ..utils.status import check_job_termination
 
@@ -311,8 +383,7 @@ def update_all_statuses(
         JobStatus.TIMEOUT: 0,
         JobStatus.RUNNING: 0,
     }
-    metrics_extracted = 0
-    metrics_failed = 0
+    completed_for_metrics: list[tuple[int, Path]] = []
 
     for i, job in enumerate(jobs):
         # Format job directory name
@@ -348,15 +419,9 @@ def update_all_statuses(
                     f"  [{i+1}/{len(jobs)}] Job {job.id}: {job.status.value} -> {new_status.value}"
                 )
 
-            # Extract metrics for newly completed jobs
+            # Collect newly completed jobs for parallel metrics extraction
             if extract_metrics and new_status == JobStatus.COMPLETED:
-                success = _extract_and_store_metrics(
-                    workflow, job.id, job_dir, unzip=unzip, verbose=verbose
-                )
-                if success:
-                    metrics_extracted += 1
-                else:
-                    metrics_failed += 1
+                completed_for_metrics.append((job.id, job_dir))
 
     # Print update summary
     print(
@@ -365,7 +430,20 @@ def update_all_statuses(
         f"{updated_counts[JobStatus.TIMEOUT]} timeout, "
         f"{updated_counts[JobStatus.RUNNING]} running"
     )
-    if extract_metrics and (metrics_extracted > 0 or metrics_failed > 0):
+
+    # Extract metrics in parallel for newly completed jobs
+    if completed_for_metrics:
+        print(
+            f"Extracting metrics for {len(completed_for_metrics)} newly completed "
+            f"jobs ({workers} workers)..."
+        )
+        metrics_extracted, metrics_failed = _parallel_extract_metrics(
+            workflow,
+            completed_for_metrics,
+            unzip=unzip,
+            verbose=verbose,
+            workers=workers,
+        )
         print(
             f"Metrics extraction: {metrics_extracted} succeeded, "
             f"{metrics_failed} failed"
@@ -538,6 +616,12 @@ def main():
         action="store_true",
         help="Handle gzipped output files (e.g., from quacc)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of parallel workers for metrics extraction (default: 4)",
+    )
 
     args = parser.parse_args()
 
@@ -557,6 +641,7 @@ def main():
             verbose=args.verbose,
             extract_metrics=args.extract_metrics,
             unzip=args.unzip,
+            workers=args.workers,
         )
 
         # Backfill metrics for previously completed jobs missing them
@@ -567,6 +652,7 @@ def main():
                 job_dir_pattern=args.job_dir_pattern,
                 unzip=args.unzip,
                 verbose=args.verbose,
+                workers=args.workers,
             )
 
     # Reset failed jobs if requested

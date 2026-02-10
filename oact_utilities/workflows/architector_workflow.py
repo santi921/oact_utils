@@ -257,6 +257,46 @@ class ArchitectorWorkflow:
             self._execute_with_retry(query, tuple(values))
             self.conn.commit()
 
+    def update_job_metrics_bulk(self, metrics_list: list[dict]):
+        """Update metrics for multiple jobs in a single transaction.
+
+        Each dict in metrics_list must have a 'job_id' key and may have:
+        job_dir, max_forces, scf_steps, final_energy, error_message,
+        wall_time, n_cores.
+
+        Args:
+            metrics_list: List of dicts with job_id and metric values.
+        """
+        if not metrics_list:
+            return
+
+        cur = self.conn.cursor()
+        for metrics in metrics_list:
+            updates = []
+            values = []
+            job_id = metrics["job_id"]
+
+            for col in (
+                "job_dir",
+                "max_forces",
+                "scf_steps",
+                "final_energy",
+                "error_message",
+                "wall_time",
+                "n_cores",
+            ):
+                if metrics.get(col) is not None:
+                    updates.append(f"{col} = ?")
+                    values.append(metrics[col])
+
+            if updates:
+                updates.append("updated_at = CURRENT_TIMESTAMP")
+                query = f"UPDATE structures SET {', '.join(updates)} WHERE id = ?"
+                values.append(job_id)
+                cur.execute(query, tuple(values))
+
+        self.conn.commit()
+
     def update_status_bulk(
         self,
         job_ids: list[int],
