@@ -128,12 +128,123 @@ def print_progress_bar(
     print(f"{label}: [{bar}] {pct:.1f}% ({completed}/{total})")
 
 
+def _extract_and_store_metrics(
+    workflow: ArchitectorWorkflow,
+    job_id: int,
+    job_dir: Path,
+    unzip: bool = False,
+    verbose: bool = False,
+) -> bool:
+    """Extract metrics from a job directory and store in the database.
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        job_id: Database ID of the job.
+        job_dir: Path to job directory containing ORCA output.
+        unzip: If True, handle gzipped output files (quacc).
+        verbose: Print details of extracted metrics.
+
+    Returns:
+        True if metrics were successfully extracted.
+    """
+    from ..utils.analysis import find_timings_and_cores, parse_job_metrics
+    from ..utils.status import pull_log_file
+
+    try:
+        metrics = parse_job_metrics(job_dir, unzip=unzip)
+
+        wall_time = None
+        n_cores = None
+        try:
+            log_file = pull_log_file(str(job_dir))
+            n_cores_val, time_dict = find_timings_and_cores(log_file)
+            if time_dict and "Total" in time_dict:
+                wall_time = time_dict["Total"]
+            n_cores = n_cores_val
+        except Exception:
+            pass
+
+        workflow.update_job_metrics(
+            job_id,
+            job_dir=str(job_dir),
+            max_forces=metrics.get("max_forces"),
+            scf_steps=metrics.get("scf_steps"),
+            final_energy=metrics.get("final_energy"),
+            wall_time=wall_time,
+            n_cores=n_cores,
+        )
+
+        if verbose:
+            print(
+                f"    Metrics: forces={metrics.get('max_forces')}, "
+                f"scf={metrics.get('scf_steps')}, "
+                f"energy={metrics.get('final_energy')}"
+            )
+        return True
+
+    except Exception as e:
+        if verbose:
+            print(f"    Failed to extract metrics: {e}")
+        return False
+
+
+def backfill_metrics(
+    workflow: ArchitectorWorkflow,
+    root_dir: str | Path,
+    job_dir_pattern: str = "job_{orig_index}",
+    unzip: bool = False,
+    verbose: bool = False,
+):
+    """Extract metrics for completed jobs that don't have them yet.
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        root_dir: Root directory containing job subdirectories.
+        job_dir_pattern: Pattern for job directory names.
+        unzip: If True, handle gzipped output files (quacc).
+        verbose: Print detailed progress messages.
+    """
+    root_dir = Path(root_dir)
+
+    cur = workflow._execute_with_retry(
+        """
+        SELECT id, orig_index
+        FROM structures
+        WHERE status = 'completed' AND max_forces IS NULL
+        """
+    )
+    rows = cur.fetchall()
+
+    if not rows:
+        print("\nAll completed jobs already have metrics.")
+        return
+
+    print(f"\nBackfilling metrics for {len(rows)} completed jobs...")
+    extracted = 0
+
+    for job_id, orig_index in rows:
+        job_dir_name = job_dir_pattern.format(orig_index=orig_index, id=job_id)
+        job_dir = root_dir / job_dir_name
+
+        if not job_dir.exists():
+            if verbose:
+                print(f"  Job {job_id}: directory {job_dir} not found, skipping")
+            continue
+
+        if _extract_and_store_metrics(workflow, job_id, job_dir, unzip, verbose):
+            extracted += 1
+
+    print(f"Extracted metrics for {extracted}/{len(rows)} jobs.")
+
+
 def update_all_statuses(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
     job_dir_pattern: str = "job_{orig_index}",
     check_func: Callable | None = None,
     verbose: bool = False,
+    extract_metrics: bool = False,
+    unzip: bool = False,
 ):
     """Scan job directories and update statuses in bulk.
 
@@ -143,6 +254,8 @@ def update_all_statuses(
         job_dir_pattern: Pattern for job directory names. Use {orig_index} or {id}.
         check_func: Optional custom status checking function.
         verbose: Print detailed progress messages.
+        extract_metrics: If True, extract computational metrics for newly completed jobs.
+        unzip: If True, handle gzipped output files (quacc).
     """
     from ..utils.status import check_job_termination
 
@@ -201,6 +314,12 @@ def update_all_statuses(
             if verbose:
                 print(
                     f"  [{i+1}/{len(jobs)}] Job {job.id}: {job.status.value} -> {new_status.value}"
+                )
+
+            # Extract metrics for newly completed jobs
+            if extract_metrics and new_status == JobStatus.COMPLETED:
+                _extract_and_store_metrics(
+                    workflow, job.id, job_dir, unzip=unzip, verbose=verbose
                 )
 
     # Print update summary
@@ -368,6 +487,16 @@ def main():
         action="store_true",
         help="Show computational metrics (forces, SCF steps)",
     )
+    parser.add_argument(
+        "--extract-metrics",
+        action="store_true",
+        help="Extract metrics (forces, SCF steps, energy, timing) for completed jobs during --update",
+    )
+    parser.add_argument(
+        "--unzip",
+        action="store_true",
+        help="Handle gzipped output files (e.g., from quacc)",
+    )
 
     args = parser.parse_args()
 
@@ -385,7 +514,19 @@ def main():
             args.update,
             job_dir_pattern=args.job_dir_pattern,
             verbose=args.verbose,
+            extract_metrics=args.extract_metrics,
+            unzip=args.unzip,
         )
+
+        # Backfill metrics for previously completed jobs missing them
+        if args.extract_metrics:
+            backfill_metrics(
+                workflow,
+                args.update,
+                job_dir_pattern=args.job_dir_pattern,
+                unzip=args.unzip,
+                verbose=args.verbose,
+            )
 
     # Reset failed jobs if requested
     if args.reset_failed:
