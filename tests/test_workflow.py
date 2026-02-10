@@ -441,3 +441,95 @@ def test_reset_failed_with_timeout(tmp_path):
         assert len(failed) == 0
         assert len(timeout) == 0
         assert len(to_run) == 2
+
+
+def test_update_status_increment_fail_count(tmp_path):
+    """Test that increment_fail_count atomically increments fail_count with status."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+        fail_count=0,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.update_status(1, JobStatus.FAILED, increment_fail_count=True)
+
+        jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
+        assert len(jobs) == 1
+        assert jobs[0].fail_count == 1
+
+        # Increment again
+        workflow.update_status(1, JobStatus.FAILED, increment_fail_count=True)
+        jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
+        assert jobs[0].fail_count == 2
+
+
+def test_update_status_increment_fail_count_with_error(tmp_path):
+    """Test increment_fail_count works together with error_message."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+        fail_count=1,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.update_status(
+            1,
+            JobStatus.FAILED,
+            error_message="ORCA crashed",
+            increment_fail_count=True,
+        )
+
+        jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
+        assert len(jobs) == 1
+        assert jobs[0].fail_count == 2
+        assert jobs[0].error_message == "ORCA crashed"
+
+
+def test_update_status_default_no_increment(tmp_path):
+    """Test that default update_status does NOT change fail_count."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+        fail_count=3,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.update_status(1, JobStatus.FAILED)
+
+        jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
+        assert len(jobs) == 1
+        assert jobs[0].fail_count == 3  # Unchanged

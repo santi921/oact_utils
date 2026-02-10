@@ -27,6 +27,10 @@ db_path = create_workflow_db(
 
 ### 2. Submit jobs on HPC
 
+**Two submission modes:**
+
+#### A. Traditional Mode (Individual Flux/SLURM Jobs)
+
 ```bash
 # Basic submission (uses default ORCA settings)
 python -m oact_utilities.workflows.submit_jobs \\
@@ -54,6 +58,60 @@ This creates `jobs/job_0/`, `job_1/`, etc. with:
 - Auto-submits and marks as "running"
 
 **ORCA options:** `--functional`, `--simple-input {omol,x2c,dk3}`, `--actinide-basis`, `--nbo`, `--opt`, etc.
+
+#### B. Parsl Mode (Concurrent Execution on Exclusive Node)
+
+Use Parsl to run multiple ORCA jobs concurrently on a single allocated node. More efficient for high-throughput on exclusive nodes:
+
+```bash
+# Request exclusive node via Flux, then run Parsl inside
+flux alloc -N 1 -n 64 -q pbatch -t 8h
+
+# Inside allocation: Run jobs concurrently with Parsl
+python -m oact_utilities.workflows.submit_jobs \\
+    workflow.db \\
+    jobs/ \\
+    --use-parsl \\
+    --batch-size 100 \\
+    --max-workers 4 \\
+    --cores-per-worker 16 \\
+    --n-cores 16 \\
+    --job-timeout 7200
+
+# Example with custom ORCA settings
+python -m oact_utilities.workflows.submit_jobs \\
+    workflow.db \\
+    jobs/ \\
+    --use-parsl \\
+    --batch-size 200 \\
+    --max-workers 4 \\
+    --cores-per-worker 16 \\
+    --functional wB97M-V \\
+    --opt
+```
+
+**Parsl Mode Benefits:**
+
+- ✅ **Concurrent execution**: Run 4+ jobs simultaneously on one node
+- ✅ **Real-time status updates**: Database updated as each job completes
+- ✅ **Efficient resource use**: Better throughput on exclusive nodes
+- ✅ **Automatic retries**: Parsl handles worker failures gracefully
+- ✅ **Live monitoring**: See jobs complete in real-time
+
+**Parsl Options:**
+
+- `--use-parsl`: Enable Parsl mode
+- `--max-workers`: Number of concurrent workers (default: 4)
+- `--cores-per-worker`: CPU cores per worker (default: 16)
+- `--job-timeout`: Per-job timeout in seconds (default: 7200 = 2 hours)
+- `--conda-base`: Conda installation path (default: /usr/WS1/vargas58/miniconda3)
+
+**When to use Parsl mode:**
+
+- You have an exclusive node allocation
+- Running many short-medium jobs (< 2 hours each)
+- Want to maximize node utilization
+- Need real-time progress monitoring
 
 ### 3. Monitor with dashboard
 
@@ -145,7 +203,7 @@ python -m oact_utilities.workflows.dashboard workflow.db --show-metrics
 
 ```python
 from oact_utilities.workflows import ArchitectorWorkflow, JobStatus, update_job_status
-from oact_utilities.workflows.submit_jobs import submit_batch, OrcaConfig
+from oact_utilities.workflows.submit_jobs import submit_batch, submit_batch_parsl, OrcaConfig
 
 # Programmatic job submission with custom ORCA config
 orca_config: OrcaConfig = {
@@ -155,13 +213,24 @@ orca_config: OrcaConfig = {
 }
 
 with ArchitectorWorkflow("workflow.db") as wf:
-    # Submit batch with ORCA config
+    # Traditional mode: Submit batch with ORCA config
     submitted = submit_batch(
         workflow=wf,
         root_dir="jobs/",
         batch_size=100,
         orca_config=orca_config,
         n_cores=8,
+    )
+
+    # OR use Parsl mode for concurrent execution (NEW!)
+    submitted = submit_batch_parsl(
+        workflow=wf,
+        root_dir="jobs/",
+        num_jobs=100,
+        max_workers=4,
+        cores_per_worker=16,
+        orca_config=orca_config,
+        n_cores=16,
     )
 
     # Get jobs
@@ -257,6 +326,7 @@ project/
 ✅ **Multiple Sources**: Tries `.engrad` file if text parsing fails
 ✅ **Error Handling**: Gracefully handles missing files and parse failures
 ✅ **Flux & SLURM**: Compatible with existing HPC job generation utilities
+✅ **Parsl Mode**: NEW! Concurrent execution on exclusive nodes with real-time updates
 ✅ **Real-time Dashboard**: Monitor progress with metrics display
 ✅ **Easy Retry**: Reset failed jobs with one command
 ✅ **Failure Tracking**: `fail_count` tracks retries; skip chronic failures automatically

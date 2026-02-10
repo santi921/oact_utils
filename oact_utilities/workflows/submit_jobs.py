@@ -599,20 +599,43 @@ def submit_batch_parsl(
         print("No jobs available for submission after filtering")
         return []
 
+    # Claim jobs atomically BEFORE slow directory preparation to prevent
+    # concurrent submitters from grabbing the same jobs (TOCTOU fix).
+    submitted_ids = [j.id for j in jobs_to_submit]
+    if not dry_run:
+        workflow.mark_jobs_as_running(submitted_ids)
+        print(f"Claimed {len(submitted_ids)} jobs as RUNNING in database")
+
     print(f"\nPreparing {len(jobs_to_submit)} jobs for Parsl submission...")
 
-    # Prepare job directories
+    # Prepare job directories, tracking any failures
+    failed_prep_ids: list[int] = []
     print("Setting up job directories...")
     for i, job in enumerate(jobs_to_submit, 1):
-        job_dir = prepare_job_directory(
-            job,
-            root_dir,
-            job_dir_pattern=job_dir_pattern,
-            orca_config=config,
-            n_cores=n_cores,
-            setup_func=setup_func,
-        )
-        print(f"  [{i}/{len(jobs_to_submit)}] Prepared {job_dir}")
+        try:
+            job_dir = prepare_job_directory(
+                job,
+                root_dir,
+                job_dir_pattern=job_dir_pattern,
+                orca_config=config,
+                n_cores=n_cores,
+                setup_func=setup_func,
+            )
+            print(f"  [{i}/{len(jobs_to_submit)}] Prepared {job_dir}")
+        except Exception as e:
+            print(f"  [{i}/{len(jobs_to_submit)}] FAILED to prepare job {job.id}: {e}")
+            failed_prep_ids.append(job.id)
+
+    # Reset any jobs that failed during preparation back to READY
+    if failed_prep_ids:
+        for jid in failed_prep_ids:
+            try:
+                workflow.update_status(jid, JobStatus.READY)
+            except Exception:
+                pass
+        jobs_to_submit = [j for j in jobs_to_submit if j.id not in set(failed_prep_ids)]
+        submitted_ids = [j.id for j in jobs_to_submit]
+        print(f"Reset {len(failed_prep_ids)} jobs back to READY due to prep failure")
 
     if dry_run:
         print("\n[DRY RUN] Would submit to Parsl executor")
@@ -638,6 +661,13 @@ def submit_batch_parsl(
     except Exception as e:
         print(f"Failed to initialize Parsl: {e}")
         print("Check your conda environment and ORCA installation")
+        # Reset claimed jobs back to READY since we can't run them
+        for jid in submitted_ids:
+            try:
+                workflow.update_status(jid, JobStatus.READY)
+            except Exception:
+                pass
+        print(f"Reset {len(submitted_ids)} claimed jobs back to READY")
         return []
 
     # Submit futures
@@ -657,11 +687,6 @@ def submit_batch_parsl(
             timeout_seconds=timeout_seconds,
         )
         futures.append((job.id, future))
-
-    # Mark jobs as running
-    submitted_ids = [j.id for j in jobs_to_submit]
-    workflow.mark_jobs_as_running(submitted_ids)
-    print(f"Marked {len(submitted_ids)} jobs as RUNNING in database")
 
     # Monitor futures concurrently (CRITICAL: use as_completed, not sequential loop)
     print("\nMonitoring job execution...")
@@ -694,21 +719,21 @@ def submit_batch_parsl(
                     print(f"Job {job_id} timeout")
                 else:
                     workflow.update_status(
-                        job_id, JobStatus.FAILED, error_message=result.get("error")
-                    )
-                    workflow._execute_with_retry(
-                        "UPDATE structures SET fail_count = COALESCE(fail_count, 0) + 1 WHERE id = ?",
-                        (job_id,),
+                        job_id,
+                        JobStatus.FAILED,
+                        error_message=result.get("error"),
+                        increment_fail_count=True,
                     )
                     failed_ids.append(job_id)
                     error_msg = result.get("error", "Unknown error")[:100]
                     print(f"Job {job_id} failed: {error_msg}")
 
             except Exception as e:
-                workflow.update_status(job_id, JobStatus.FAILED, error_message=str(e))
-                workflow._execute_with_retry(
-                    "UPDATE structures SET fail_count = COALESCE(fail_count, 0) + 1 WHERE id = ?",
-                    (job_id,),
+                workflow.update_status(
+                    job_id,
+                    JobStatus.FAILED,
+                    error_message=str(e),
+                    increment_fail_count=True,
                 )
                 failed_ids.append(job_id)
                 print(f"Job {job_id} exception: {str(e)[:100]}")
@@ -822,52 +847,59 @@ def submit_batch(
         jobs_to_submit = ready_jobs[:batch_size]
     print(f"Preparing {len(jobs_to_submit)} jobs for submission...")
 
+    # Claim jobs atomically BEFORE slow directory preparation to prevent
+    # concurrent submitters from grabbing the same jobs (TOCTOU fix).
+    all_claimed_ids = [j.id for j in jobs_to_submit]
+    if not dry_run:
+        workflow.mark_jobs_as_running(all_claimed_ids)
+        print(f"Claimed {len(all_claimed_ids)} jobs as RUNNING in database")
+
     submitted_ids = []
 
     for i, job in enumerate(jobs_to_submit):
-        # Prepare job directory with ORCA input
-        job_dir = prepare_job_directory(
-            job,
-            root_dir,
-            job_dir_pattern=job_dir_pattern,
-            orca_config=config,
-            n_cores=n_cores,
-            setup_func=setup_func,
-        )
-
-        # Write job submission script
-        orca_path = config.get("orca_path", DEFAULT_ORCA_PATHS["flux"])
-        if scheduler.lower() == "flux":
-            job_script = write_flux_job_file(
-                job_dir,
+        try:
+            # Prepare job directory with ORCA input
+            job_dir = prepare_job_directory(
+                job,
+                root_dir,
+                job_dir_pattern=job_dir_pattern,
+                orca_config=config,
                 n_cores=n_cores,
-                n_hours=n_hours,
-                queue=queue,
-                allocation=allocation,
-                orca_path=orca_path,
-                conda_env=conda_env,
+                setup_func=setup_func,
             )
-            submit_cmd = ["flux", "batch", job_script.name]
 
-        elif scheduler.lower() == "slurm":
-            job_script = write_slurm_job_file(
-                job_dir,
-                n_cores=n_cores,
-                n_hours=n_hours,
-                queue=queue,
-                allocation=allocation,
-                orca_path=orca_path,
-                conda_env=conda_env,
-            )
-            submit_cmd = ["sbatch", job_script.name]
-        else:
-            raise ValueError(f"Unknown scheduler: {scheduler}")
+            # Write job submission script
+            orca_path = config.get("orca_path", DEFAULT_ORCA_PATHS["flux"])
+            if scheduler.lower() == "flux":
+                job_script = write_flux_job_file(
+                    job_dir,
+                    n_cores=n_cores,
+                    n_hours=n_hours,
+                    queue=queue,
+                    allocation=allocation,
+                    orca_path=orca_path,
+                    conda_env=conda_env,
+                )
+                submit_cmd = ["flux", "batch", job_script.name]
 
-        print(f"  [{i+1}/{len(jobs_to_submit)}] Prepared job {job.id} in {job_dir}")
+            elif scheduler.lower() == "slurm":
+                job_script = write_slurm_job_file(
+                    job_dir,
+                    n_cores=n_cores,
+                    n_hours=n_hours,
+                    queue=queue,
+                    allocation=allocation,
+                    orca_path=orca_path,
+                    conda_env=conda_env,
+                )
+                submit_cmd = ["sbatch", job_script.name]
+            else:
+                raise ValueError(f"Unknown scheduler: {scheduler}")
 
-        # Submit job
-        if not dry_run:
-            try:
+            print(f"  [{i+1}/{len(jobs_to_submit)}] Prepared job {job.id} in {job_dir}")
+
+            # Submit job
+            if not dry_run:
                 result = subprocess.run(
                     submit_cmd,
                     cwd=job_dir,
@@ -877,17 +909,29 @@ def submit_batch(
                 )
                 print(f"    Submitted: {result.stdout.strip()}")
                 submitted_ids.append(job.id)
-            except subprocess.CalledProcessError as e:
-                print(f"    Error submitting job: {e.stderr}")
-                continue
-        else:
-            print(f"    [DRY RUN] Would submit: {' '.join(submit_cmd)}")
-            submitted_ids.append(job.id)
+            else:
+                print(f"    [DRY RUN] Would submit: {' '.join(submit_cmd)}")
+                submitted_ids.append(job.id)
 
-    # Mark jobs as running
-    if submitted_ids and not dry_run:
-        workflow.mark_jobs_as_running(submitted_ids)
-        print(f"\nMarked {len(submitted_ids)} jobs as running")
+        except Exception as e:
+            print(f"  [{i+1}/{len(jobs_to_submit)}] Error for job {job.id}: {e}")
+            if not dry_run:
+                try:
+                    workflow.update_status(job.id, JobStatus.READY)
+                except Exception:
+                    pass
+            continue
+
+    # Reset any claimed-but-not-submitted jobs back to READY
+    if not dry_run:
+        not_submitted = set(all_claimed_ids) - set(submitted_ids)
+        if not_submitted:
+            for jid in not_submitted:
+                try:
+                    workflow.update_status(jid, JobStatus.READY)
+                except Exception:
+                    pass
+            print(f"Reset {len(not_submitted)} unclaimed jobs back to READY")
 
     return submitted_ids
 

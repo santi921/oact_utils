@@ -47,8 +47,7 @@ def print_metrics_summary(workflow: ArchitectorWorkflow):
     import pandas as pd
 
     # Query completed jobs with metrics
-    cur = workflow.conn.cursor()
-    cur.execute(
+    cur = workflow._execute_with_retry(
         """
         SELECT max_forces, scf_steps, wall_time, n_cores
         FROM structures

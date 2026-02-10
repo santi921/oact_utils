@@ -9,6 +9,7 @@ This module provides utilities to manage large-scale architector job campaigns:
 
 from __future__ import annotations
 
+import random
 import re
 import sqlite3
 import time
@@ -84,8 +85,13 @@ class ArchitectorWorkflow:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
-    def _execute_with_retry(self, query: str, params: tuple = (), max_retries: int = 3):
+    def _execute_with_retry(
+        self, query: str, params: tuple = (), max_retries: int = 10
+    ):
         """Execute a query with retry logic for handling database locks.
+
+        Uses exponential backoff with jitter to handle concurrent access
+        during long-running Parsl workflows.
 
         Args:
             query: SQL query string.
@@ -102,7 +108,9 @@ class ArchitectorWorkflow:
                 return cur
             except sqlite3.OperationalError as e:
                 if "locked" in str(e).lower() and attempt < max_retries - 1:
-                    time.sleep(0.1 * (2**attempt))  # Exponential backoff
+                    delay = min(0.5 * (2**attempt), 5.0)
+                    jitter = random.uniform(0, 0.5)
+                    time.sleep(delay + jitter)
                     continue
                 raise
 
@@ -169,6 +177,7 @@ class ArchitectorWorkflow:
         job_id: int,
         new_status: JobStatus,
         error_message: str | None = None,
+        increment_fail_count: bool = False,
     ):
         """Update the status of a single job.
 
@@ -176,13 +185,21 @@ class ArchitectorWorkflow:
             job_id: Database ID of the job.
             new_status: New status value.
             error_message: Optional error message.
+            increment_fail_count: If True, atomically increment fail_count by 1.
         """
+        set_clauses = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+        values: list = [new_status.value]
+
         if error_message is not None:
-            query = "UPDATE structures SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-            self._execute_with_retry(query, (new_status.value, error_message, job_id))
-        else:
-            query = "UPDATE structures SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-            self._execute_with_retry(query, (new_status.value, job_id))
+            set_clauses.append("error_message = ?")
+            values.append(error_message)
+
+        if increment_fail_count:
+            set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+
+        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
+        values.append(job_id)
+        self._execute_with_retry(query, tuple(values))
         self.conn.commit()
 
     def update_job_metrics(
