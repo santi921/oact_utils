@@ -7,6 +7,7 @@ to HPC systems (Flux or SLURM). Jobs generate ORCA input files directly.
 from __future__ import annotations
 
 import argparse
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -278,6 +279,7 @@ def filter_jobs_for_submission(
     workflow: ArchitectorWorkflow,
     num_jobs: int,
     max_fail_count: int | None = None,
+    randomize: bool = True,
 ) -> list:
     """Filter jobs that are ready to submit.
 
@@ -301,7 +303,10 @@ def filter_jobs_for_submission(
             print(f"Skipped {skipped} jobs with fail_count >= {max_fail_count}")
 
     # Limit to requested count
-    jobs_to_submit = ready_jobs[:num_jobs]
+    if randomize:
+        jobs_to_submit = random.sample(ready_jobs, min(num_jobs, len(ready_jobs)))
+    else:
+        jobs_to_submit = ready_jobs[:num_jobs]
 
     print(f"Found {len(ready_jobs)} ready jobs, submitting {len(jobs_to_submit)}")
     return jobs_to_submit
@@ -491,12 +496,12 @@ def build_parsl_config_flux(
     # Worker initialization commands
     ld_lib = ld_library_path or DEFAULT_LD_LIBRARY_PATHS.get("flux", "")
     worker_init = f"""
-source ~/.bashrc
-conda activate {conda_env}
-export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH
-export OMP_NUM_THREADS=1
-export JAX_PLATFORMS=cpu
-"""
+        source ~/.bashrc
+        conda activate {conda_env}
+        export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH
+        export OMP_NUM_THREADS=1
+        export JAX_PLATFORMS=cpu
+    """
 
     provider = LocalProvider(
         worker_init=worker_init,
@@ -529,6 +534,7 @@ def submit_batch_parsl(
     dry_run: bool = False,
     max_fail_count: int | None = None,
     timeout_seconds: int = 72000,
+    randomize: bool = True,
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -548,6 +554,7 @@ def submit_batch_parsl(
         dry_run: Prepare but don't submit
         max_fail_count: Skip jobs with fail_count >= this value
         timeout_seconds: Job timeout in seconds (default: 72000 = 20 hours)
+        randomize: Randomize job selection order (default: True)
 
     Returns:
         List of submitted job IDs
@@ -585,6 +592,7 @@ def submit_batch_parsl(
         workflow,
         num_jobs=num_jobs,
         max_fail_count=max_fail_count,
+        randomize=randomize,
     )
 
     if not jobs_to_submit:
@@ -676,14 +684,14 @@ def submit_batch_parsl(
                     workflow.update_status(job_id, JobStatus.COMPLETED)
                     completed_ids.append(job_id)
                     print(
-                        f"✓ Job {job_id} completed ({len(completed_ids)}/{len(futures)} done)"
+                        f" Job {job_id} completed ({len(completed_ids)}/{len(futures)} done)"
                     )
                 elif result["status"] == "timeout":
                     workflow.update_status(
                         job_id, JobStatus.TIMEOUT, error_message=result.get("error")
                     )
                     failed_ids.append(job_id)
-                    print(f"⏱ Job {job_id} timeout")
+                    print(f"Job {job_id} timeout")
                 else:
                     workflow.update_status(
                         job_id, JobStatus.FAILED, error_message=result.get("error")
@@ -694,7 +702,7 @@ def submit_batch_parsl(
                     )
                     failed_ids.append(job_id)
                     error_msg = result.get("error", "Unknown error")[:100]
-                    print(f"✗ Job {job_id} failed: {error_msg}")
+                    print(f"Job {job_id} failed: {error_msg}")
 
             except Exception as e:
                 workflow.update_status(job_id, JobStatus.FAILED, error_message=str(e))
@@ -703,7 +711,7 @@ def submit_batch_parsl(
                     (job_id,),
                 )
                 failed_ids.append(job_id)
-                print(f"✗ Job {job_id} exception: {str(e)[:100]}")
+                print(f"Job {job_id} exception: {str(e)[:100]}")
 
     except KeyboardInterrupt:
         print("\n\nGraceful shutdown requested...")
@@ -758,6 +766,7 @@ def submit_batch(
     conda_env: str = "py10mpi",
     dry_run: bool = False,
     max_fail_count: int | None = None,
+    randomize: bool = True,
 ) -> list[int]:
     """Submit a batch of ready jobs to the HPC scheduler.
 
@@ -776,6 +785,7 @@ def submit_batch(
         conda_env: Conda environment to activate.
         dry_run: If True, prepare directories but don't submit.
         max_fail_count: If specified, skip jobs with fail_count >= this value.
+        randomize: Randomize job selection order (default: True).
 
     Returns:
         List of job IDs that were submitted.
@@ -806,7 +816,10 @@ def submit_batch(
         return []
 
     # Limit to batch size
-    jobs_to_submit = ready_jobs[:batch_size]
+    if randomize:
+        jobs_to_submit = random.sample(ready_jobs, min(batch_size, len(ready_jobs)))
+    else:
+        jobs_to_submit = ready_jobs[:batch_size]
     print(f"Preparing {len(jobs_to_submit)} jobs for submission...")
 
     submitted_ids = []
@@ -1066,6 +1079,7 @@ def main():
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             timeout_seconds=args.job_timeout,
+            randomize=True,
         )
     else:
         # Traditional mode: one job script per job
@@ -1083,6 +1097,7 @@ def main():
             conda_env=args.conda_env,
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
+            randomize=True,
         )
 
     print(f"\nTotal jobs submitted: {len(submitted_ids)}")
