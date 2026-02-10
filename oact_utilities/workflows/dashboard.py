@@ -49,7 +49,7 @@ def print_metrics_summary(workflow: ArchitectorWorkflow):
     # Query completed jobs with metrics
     cur = workflow._execute_with_retry(
         """
-        SELECT max_forces, scf_steps, wall_time, n_cores
+        SELECT max_forces, scf_steps, wall_time, n_cores, final_energy
         FROM structures
         WHERE status = 'completed' AND max_forces IS NOT NULL
         """
@@ -60,9 +60,21 @@ def print_metrics_summary(workflow: ArchitectorWorkflow):
         print("\nNo metrics data available yet.")
         return
 
-    df = pd.DataFrame(rows, columns=["max_forces", "scf_steps", "wall_time", "n_cores"])
+    df = pd.DataFrame(
+        rows,
+        columns=["max_forces", "scf_steps", "wall_time", "n_cores", "final_energy"],
+    )
 
     print_header("Computational Metrics (Completed Jobs)")
+
+    # Energy statistics
+    energy_data = df["final_energy"].dropna()
+    if len(energy_data) > 0:
+        print("\nFinal Energy (Eh):")
+        print(f"  Mean:   {energy_data.mean():.6f}")
+        print(f"  Median: {energy_data.median():.6f}")
+        print(f"  Min:    {energy_data.min():.6f}")
+        print(f"  Max:    {energy_data.max():.6f}")
 
     # Forces statistics
     print("\nMax Forces (Eh/Bohr):")
@@ -134,6 +146,7 @@ def _extract_and_store_metrics(
     job_dir: Path,
     unzip: bool = False,
     verbose: bool = False,
+    mark_failed_on_error: bool = True,
 ) -> bool:
     """Extract metrics from a job directory and store in the database.
 
@@ -143,6 +156,8 @@ def _extract_and_store_metrics(
         job_dir: Path to job directory containing ORCA output.
         unzip: If True, handle gzipped output files (quacc).
         verbose: Print details of extracted metrics.
+        mark_failed_on_error: If True, set the job status to FAILED and
+            increment fail_count when metrics extraction fails.
 
     Returns:
         True if metrics were successfully extracted.
@@ -185,6 +200,13 @@ def _extract_and_store_metrics(
     except Exception as e:
         if verbose:
             print(f"    Failed to extract metrics: {e}")
+        if mark_failed_on_error:
+            workflow.update_status(
+                job_id,
+                JobStatus.FAILED,
+                error_message=f"Metrics parse error: {e}",
+                increment_fail_count=True,
+            )
         return False
 
 
@@ -221,20 +243,28 @@ def backfill_metrics(
 
     print(f"\nBackfilling metrics for {len(rows)} completed jobs...")
     extracted = 0
+    failed = 0
+    skipped = 0
 
     for job_id, orig_index in rows:
         job_dir_name = job_dir_pattern.format(orig_index=orig_index, id=job_id)
         job_dir = root_dir / job_dir_name
 
         if not job_dir.exists():
+            skipped += 1
             if verbose:
                 print(f"  Job {job_id}: directory {job_dir} not found, skipping")
             continue
 
         if _extract_and_store_metrics(workflow, job_id, job_dir, unzip, verbose):
             extracted += 1
+        else:
+            failed += 1
 
-    print(f"Extracted metrics for {extracted}/{len(rows)} jobs.")
+    print(
+        f"Backfill metrics: {extracted} extracted, "
+        f"{failed} failed, {skipped} skipped (no directory)"
+    )
 
 
 def update_all_statuses(
@@ -281,6 +311,8 @@ def update_all_statuses(
         JobStatus.TIMEOUT: 0,
         JobStatus.RUNNING: 0,
     }
+    metrics_extracted = 0
+    metrics_failed = 0
 
     for i, job in enumerate(jobs):
         # Format job directory name
@@ -318,9 +350,13 @@ def update_all_statuses(
 
             # Extract metrics for newly completed jobs
             if extract_metrics and new_status == JobStatus.COMPLETED:
-                _extract_and_store_metrics(
+                success = _extract_and_store_metrics(
                     workflow, job.id, job_dir, unzip=unzip, verbose=verbose
                 )
+                if success:
+                    metrics_extracted += 1
+                else:
+                    metrics_failed += 1
 
     # Print update summary
     print(
@@ -329,6 +365,11 @@ def update_all_statuses(
         f"{updated_counts[JobStatus.TIMEOUT]} timeout, "
         f"{updated_counts[JobStatus.RUNNING]} running"
     )
+    if extract_metrics and (metrics_extracted > 0 or metrics_failed > 0):
+        print(
+            f"Metrics extraction: {metrics_extracted} succeeded, "
+            f"{metrics_failed} failed"
+        )
 
 
 def show_failed_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
