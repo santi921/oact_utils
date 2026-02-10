@@ -1090,7 +1090,9 @@ def main():
         "functional": args.functional,
         "simple_input": args.simple_input,
         "actinide_basis": args.actinide_basis,
-        "actinide_ecp": args.actinide_ecp,
+        "actinide_ecp": (
+            args.actinide_ecp if args.actinide_ecp.lower() != "none" else None
+        ),  # deal with None string, convert to NoneType
         "non_actinide_basis": args.non_actinide_basis,
         "scf_MaxIter": args.scf_maxiter,
         "nbo": args.nbo,
