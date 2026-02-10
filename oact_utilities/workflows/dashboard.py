@@ -544,6 +544,25 @@ def show_ready_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
         print(f"\n... and {len(ready) - limit} more ready jobs")
 
 
+def show_running_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
+    """Display jobs that are currently running."""
+    running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+
+    if not running:
+        print("\nNo jobs currently running.")
+        return
+
+    print_header(f"Running Jobs (showing up to {limit})")
+    print(f"\n{'ID':<8} {'Orig Index':<12} {'N Atoms':<10}")
+    print("-" * 60)
+
+    for job in running[:limit]:
+        print(f"{job.id:<8} {job.orig_index:<12} {job.natoms:<10}")
+
+    if len(running) > limit:
+        print(f"\n... and {len(running) - limit} more running jobs")
+
+
 def main():
     """Main dashboard entry point."""
     parser = argparse.ArgumentParser(
@@ -574,6 +593,11 @@ def main():
         "--show-ready",
         action="store_true",
         help="Show jobs ready to run",
+    )
+    parser.add_argument(
+        "--show-running",
+        action="store_true",
+        help="Show jobs currently running",
     )
     parser.add_argument(
         "--reset-failed",
@@ -725,6 +749,9 @@ def main():
     # Show timeout jobs if requested
     if args.show_timeout:
         show_timeout_jobs(workflow, limit=args.limit)
+
+    if args.show_running:
+        show_running_jobs(workflow, limit=args.limit)
 
     # Show ready jobs if requested
     if args.show_ready:
