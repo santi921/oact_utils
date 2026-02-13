@@ -51,6 +51,7 @@ class OrcaConfig(TypedDict, total=False):
     nbo: bool
     opt: bool
     orca_path: str
+    diis_option: str | None
 
 
 DEFAULT_ORCA_CONFIG: OrcaConfig = {
@@ -62,6 +63,7 @@ DEFAULT_ORCA_CONFIG: OrcaConfig = {
     "scf_MaxIter": None,
     "nbo": False,
     "opt": False,
+    "diis_option": None,
 }
 
 DEFAULT_ORCA_PATHS = {
@@ -136,6 +138,7 @@ def prepare_job_directory(
             charge=charge,
             mult=mult,
             nbo=config.get("nbo", False),
+            diis_option=config.get("diis_option"),
             cores=n_cores,
             opt=config.get("opt", False),
             functional=config.get("functional", "wB97M-V"),
@@ -1073,6 +1076,11 @@ def main():
         help="Enable NBO analysis",
     )
     orca_group.add_argument(
+        "--kdiis",
+        action="store_true",
+        help="Enable KDIIS SCF convergence acceleration",
+    )
+    orca_group.add_argument(
         "--opt",
         action="store_true",
         help="Enable geometry optimization",
@@ -1097,6 +1105,7 @@ def main():
         "scf_MaxIter": args.scf_maxiter,
         "nbo": args.nbo,
         "opt": args.opt,
+        "diis_option": "KDIIS" if args.kdiis else None,
     }
     if args.orca_path:
         orca_config["orca_path"] = args.orca_path
