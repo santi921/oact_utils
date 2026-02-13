@@ -521,12 +521,96 @@ def build_parsl_config_flux(
     return Config(executors=[executor])
 
 
+def build_parsl_config_slurm(
+    max_workers: int = 4,
+    cores_per_worker: int = 16,
+    max_blocks: int = 10,
+    init_blocks: int = 2,
+    min_blocks: int = 1,
+    walltime_hours: int = 2,
+    qos: str = "frontier",
+    account: str = "ODEFN5169CYFZ",
+    conda_env: str = "py10mpi",
+    conda_base: str = "/usr/WS1/vargas58/miniconda3",
+    ld_library_path: str | None = None,
+):
+    """Build Parsl Config for SLURM multi-node execution.
+
+    Uses SlurmProvider to auto-provision worker nodes via SLURM.
+    Each node runs multiple ORCA workers concurrently.
+
+    Args:
+        max_workers: Maximum concurrent workers per node.
+        cores_per_worker: CPU cores per worker (must match ORCA nprocs).
+        max_blocks: Maximum number of SLURM nodes to provision.
+        init_blocks: Number of nodes to request at startup.
+        min_blocks: Minimum number of nodes to keep alive.
+        walltime_hours: Walltime per node allocation in hours.
+        qos: SLURM QOS.
+        account: SLURM account/allocation.
+        conda_env: Conda environment name.
+        conda_base: Conda base path.
+        ld_library_path: Override LD_LIBRARY_PATH.
+
+    Returns:
+        Parsl Config object
+    """
+    if not PARSL_AVAILABLE:
+        raise ImportError(
+            "Parsl is not installed. Please install with: pip install 'parsl>=2024.1'"
+        )
+
+    from parsl.config import Config
+    from parsl.executors import HighThroughputExecutor
+    from parsl.launchers import SimpleLauncher
+    from parsl.providers import SlurmProvider
+
+    ld_lib = ld_library_path or f"{conda_base}/envs/{conda_env}/lib"
+    worker_init = (
+        f"source ~/.bashrc\n"
+        f"conda activate {conda_env}\n"
+        f"export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH\n"
+        f"export JAX_PLATFORMS=cpu\n"
+        f"export OMP_NUM_THREADS=1\n"
+    )
+
+    ntasks = cores_per_worker * max_workers
+    scheduler_options = (
+        f"#SBATCH --ntasks-per-node={ntasks}\n" f"#SBATCH --cpus-per-task=1\n"
+    )
+
+    provider = SlurmProvider(
+        qos=qos,
+        account=account,
+        nodes_per_block=1,
+        init_blocks=init_blocks,
+        min_blocks=min_blocks,
+        max_blocks=max_blocks,
+        walltime=f"{walltime_hours:02d}:00:00",
+        worker_init=worker_init,
+        scheduler_options=scheduler_options,
+        exclusive=True,
+        launcher=SimpleLauncher(),  # Not SrunLauncher — ORCA uses internal mpirun
+        parallelism=1.0,
+    )
+
+    executor = HighThroughputExecutor(
+        label="slurm_htex",
+        cores_per_worker=cores_per_worker,
+        max_workers_per_node=max_workers,
+        provider=provider,
+    )
+
+    return Config(executors=[executor])
+
+
 def submit_batch_parsl(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
     num_jobs: int,
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    scheduler: str = "flux",
     job_dir_pattern: str = "job_{orig_index}",
     orca_config: OrcaConfig | None = None,
     setup_func: Callable | None = None,
@@ -538,6 +622,12 @@ def submit_batch_parsl(
     max_fail_count: int | None = None,
     timeout_seconds: int = 72000,
     randomize: bool = True,
+    max_blocks: int = 10,
+    init_blocks: int = 2,
+    min_blocks: int = 1,
+    walltime_hours: int = 2,
+    qos: str = "frontier",
+    account: str = "ODEFN5169CYFZ",
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -547,6 +637,8 @@ def submit_batch_parsl(
         num_jobs: Total number of jobs to submit
         max_workers: Maximum number of concurrent workers
         cores_per_worker: CPU cores per worker
+        scheduler: Parsl provider backend ("flux" for LocalProvider,
+            "slurm" for SlurmProvider multi-node).
         job_dir_pattern: Pattern for job directory names
         orca_config: ORCA configuration
         setup_func: Optional setup function per job
@@ -558,6 +650,12 @@ def submit_batch_parsl(
         max_fail_count: Skip jobs with fail_count >= this value
         timeout_seconds: Job timeout in seconds (default: 72000 = 20 hours)
         randomize: Randomize job selection order (default: True)
+        max_blocks: (SLURM) Maximum SLURM nodes to provision.
+        init_blocks: (SLURM) Nodes to request at startup.
+        min_blocks: (SLURM) Minimum nodes to keep alive.
+        walltime_hours: (SLURM) Walltime per node allocation in hours.
+        qos: (SLURM) SLURM QOS.
+        account: (SLURM) SLURM account/allocation.
 
     Returns:
         List of submitted job IDs
@@ -588,7 +686,9 @@ def submit_batch_parsl(
     # Merge ORCA config
     config: OrcaConfig = {**DEFAULT_ORCA_CONFIG, **(orca_config or {})}
     if "orca_path" not in config or config.get("orca_path") is None:
-        config["orca_path"] = DEFAULT_ORCA_PATHS.get("flux", DEFAULT_ORCA_PATHS["flux"])
+        config["orca_path"] = DEFAULT_ORCA_PATHS.get(
+            scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
+        )
 
     # Filter jobs for submission (DB status only)
     jobs_to_submit = filter_jobs_for_submission(
@@ -647,14 +747,32 @@ def submit_batch_parsl(
         return [j.id for j in jobs_to_submit]
 
     # Build Parsl configuration
-    print("\nBuilding Parsl config (Flux single-node)...")
-    parsl_config = build_parsl_config_flux(
-        max_workers=max_workers,
-        cores_per_worker=cores_per_worker,
-        conda_env=conda_env,
-        conda_base=conda_base,
-        ld_library_path=ld_library_path,
-    )
+    if scheduler.lower() == "slurm":
+        print(
+            f"\nBuilding Parsl config (SLURM multi-node, up to {max_blocks} nodes)..."
+        )
+        parsl_config = build_parsl_config_slurm(
+            max_workers=max_workers,
+            cores_per_worker=cores_per_worker,
+            max_blocks=max_blocks,
+            init_blocks=init_blocks,
+            min_blocks=min_blocks,
+            walltime_hours=walltime_hours,
+            qos=qos,
+            account=account,
+            conda_env=conda_env,
+            conda_base=conda_base,
+            ld_library_path=ld_library_path,
+        )
+    else:
+        print("\nBuilding Parsl config (Flux single-node)...")
+        parsl_config = build_parsl_config_flux(
+            max_workers=max_workers,
+            cores_per_worker=cores_per_worker,
+            conda_env=conda_env,
+            conda_base=conda_base,
+            ld_library_path=ld_library_path,
+        )
 
     # Initialize Parsl
     try:
@@ -1029,6 +1147,46 @@ def main():
         default=72000,
         help="Job timeout in seconds for Parsl mode (default: 72000 = 20 hours)",
     )
+
+    # SLURM multi-node Parsl options (--use-parsl --scheduler slurm)
+    slurm_parsl_group = parser.add_argument_group(
+        "SLURM Parsl Options (--use-parsl --scheduler slurm)"
+    )
+    slurm_parsl_group.add_argument(
+        "--max-blocks",
+        type=int,
+        default=10,
+        help="Maximum SLURM nodes to provision (default: 10)",
+    )
+    slurm_parsl_group.add_argument(
+        "--init-blocks",
+        type=int,
+        default=2,
+        help="Number of SLURM nodes to request at startup (default: 2)",
+    )
+    slurm_parsl_group.add_argument(
+        "--min-blocks",
+        type=int,
+        default=1,
+        help="Minimum SLURM nodes to keep alive (default: 1)",
+    )
+    slurm_parsl_group.add_argument(
+        "--walltime-hours",
+        type=int,
+        default=2,
+        help="Walltime per SLURM node allocation in hours (default: 2)",
+    )
+    slurm_parsl_group.add_argument(
+        "--qos",
+        default="frontier",
+        help="SLURM QOS (default: frontier)",
+    )
+    slurm_parsl_group.add_argument(
+        "--account",
+        default="ODEFN5169CYFZ",
+        help="SLURM account/allocation (default: ODEFN5169CYFZ)",
+    )
+
     parser.add_argument(
         "--max-fail-count",
         type=int,
@@ -1119,13 +1277,14 @@ def main():
 
     # Submit based on mode
     if args.use_parsl:
-        # Parsl mode: concurrent execution on single node
+        # Parsl mode: concurrent execution (single-node or multi-node)
         submitted_ids = submit_batch_parsl(
             workflow=workflow,
             root_dir=args.root_dir,
             num_jobs=args.batch_size,
             max_workers=args.max_workers,
             cores_per_worker=args.cores_per_worker,
+            scheduler=args.scheduler,
             job_dir_pattern=args.job_dir_pattern,
             orca_config=orca_config,
             n_cores=args.n_cores,
@@ -1135,6 +1294,12 @@ def main():
             max_fail_count=args.max_fail_count,
             timeout_seconds=args.job_timeout,
             randomize=True,
+            max_blocks=args.max_blocks,
+            init_blocks=args.init_blocks,
+            min_blocks=args.min_blocks,
+            walltime_hours=args.walltime_hours,
+            qos=args.qos,
+            account=args.account,
         )
     else:
         # Traditional mode: one job script per job
