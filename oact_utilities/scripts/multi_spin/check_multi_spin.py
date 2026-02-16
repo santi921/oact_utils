@@ -131,8 +131,163 @@ def truncate_str(value: Any, max_len: int = 30) -> str:
     return s
 
 
+# Schema versioning constants and functions
+SCHEMA_VERSION = 2
+
+
+def _init_schema_version_table(conn: sqlite3.Connection) -> None:
+    """Create schema_version table if it doesn't exist.
+
+    Args:
+        conn: SQLite database connection.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL,
+            description TEXT
+        )
+    """
+    )
+    conn.commit()
+
+
+def _get_schema_version(conn: sqlite3.Connection) -> int:
+    """Get current database schema version.
+
+    Args:
+        conn: SQLite database connection.
+
+    Returns:
+        Current schema version (0 for legacy databases).
+    """
+    try:
+        result = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        return result[0] if result[0] is not None else 0
+    except sqlite3.OperationalError:
+        # schema_version table doesn't exist - this is a legacy database
+        return 0
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check if a column exists in a table.
+
+    Args:
+        conn: SQLite database connection.
+        table: Table name to check.
+        column: Column name to check.
+
+    Returns:
+        True if column exists, False otherwise.
+    """
+    cursor = conn.execute(f"PRAGMA table_info({table})")
+    columns = [row[1] for row in cursor.fetchall()]
+    return column in columns
+
+
+def _apply_migration_v1(conn: sqlite3.Connection) -> None:
+    """Apply migration to version 1 (add analysis fields).
+
+    Adds columns for ORCA analysis results to existing databases.
+
+    Args:
+        conn: SQLite database connection.
+    """
+    # Analysis columns added in version 1
+    columns_v1 = [
+        ("run_type", "TEXT"),
+        ("final_energy", "REAL"),
+        ("max_force", "REAL"),
+        ("rmsd_start_final", "REAL"),
+        ("has_final_geometry", "INTEGER DEFAULT 0"),
+        ("n_opt_steps", "INTEGER"),
+        ("final_rms_force", "REAL"),
+        ("final_coords", "TEXT"),
+        ("final_elements", "TEXT"),
+    ]
+
+    for col, col_type in columns_v1:
+        if not _column_exists(conn, "jobs", col):
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
+
+    # Record migration
+    conn.execute(
+        "INSERT INTO schema_version (version, applied_at, description) VALUES (?, datetime('now'), ?)",
+        (1, "Add analysis fields (run_type, final_energy, max_force, etc.)"),
+    )
+    conn.commit()
+
+
+def _apply_migration_v2(conn: sqlite3.Connection) -> None:
+    """Apply migration to version 2 (add Mulliken/Loewdin columns).
+
+    Adds columns for Mulliken and Loewdin population analysis.
+
+    Args:
+        conn: SQLite database connection.
+    """
+    # Mulliken/Loewdin columns added in version 2
+    columns_v2 = [
+        ("mulliken_charges", "TEXT"),
+        ("mulliken_spins", "TEXT"),
+        ("loewdin_charges", "TEXT"),
+        ("loewdin_spins", "TEXT"),
+    ]
+
+    for col, col_type in columns_v2:
+        if not _column_exists(conn, "jobs", col):
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
+
+    # Record migration
+    conn.execute(
+        "INSERT INTO schema_version (version, applied_at, description) VALUES (?, datetime('now'), ?)",
+        (2, "Add Mulliken/Loewdin population analysis columns"),
+    )
+    conn.commit()
+
+
+def _migrate_database(conn: sqlite3.Connection) -> None:
+    """Migrate database to current schema version.
+
+    Detects current version and applies all necessary migrations sequentially.
+    Handles legacy databases (version 0) gracefully.
+
+    Args:
+        conn: SQLite database connection.
+
+    Raises:
+        ValueError: If database version is newer than code version.
+    """
+    _init_schema_version_table(conn)
+    current_version = _get_schema_version(conn)
+
+    if current_version > SCHEMA_VERSION:
+        raise ValueError(
+            f"Database schema version {current_version} is newer than code version {SCHEMA_VERSION}. "
+            "Please update the code."
+        )
+
+    # Apply migrations sequentially
+    if current_version < 1:
+        _apply_migration_v1(conn)
+
+    if current_version < 2:
+        _apply_migration_v2(conn)
+
+
 def _ensure_db(conn: sqlite3.Connection) -> None:
+    """Ensure database schema is initialized and up-to-date.
+
+    Creates the jobs table if it doesn't exist, then applies any pending
+    migrations to bring the schema to the current version.
+
+    Args:
+        conn: SQLite database connection.
+    """
     c = conn.cursor()
+
+    # Create base table (version 0 schema)
     c.execute(
         """
         CREATE TABLE IF NOT EXISTS jobs (
@@ -144,44 +299,14 @@ def _ensure_db(conn: sqlite3.Connection) -> None:
             spin TEXT,
             status INTEGER,
             note TEXT,
-            checked_at REAL,
-            run_type TEXT,
-            final_energy REAL,
-            max_force REAL,
-            rmsd_start_final REAL,
-            has_final_geometry INTEGER DEFAULT 0,
-            n_opt_steps INTEGER,
-            final_rms_force REAL,
-            final_coords TEXT,
-            final_elements TEXT,
-            mulliken_charges TEXT,
-            mulliken_spins TEXT,
-            loewdin_charges TEXT,
-            loewdin_spins TEXT
+            checked_at REAL
         )
         """
     )
-    # Add columns if they don't exist (for older databases)
-    for col, col_type in [
-        ("run_type", "TEXT"),
-        ("final_energy", "REAL"),
-        ("max_force", "REAL"),
-        ("rmsd_start_final", "REAL"),
-        ("has_final_geometry", "INTEGER DEFAULT 0"),
-        ("n_opt_steps", "INTEGER"),
-        ("final_rms_force", "REAL"),
-        ("final_coords", "TEXT"),
-        ("final_elements", "TEXT"),
-        ("mulliken_charges", "TEXT"),
-        ("mulliken_spins", "TEXT"),
-        ("loewdin_charges", "TEXT"),
-        ("loewdin_spins", "TEXT"),
-    ]:
-        try:
-            c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
     conn.commit()
+
+    # Apply migrations to add additional columns
+    _migrate_database(conn)
 
 
 def extract_orca_analysis(
