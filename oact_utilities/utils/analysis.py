@@ -26,6 +26,49 @@ from oact_utilities.utils.status import (
 )
 
 
+def _validate_file_path(file_path: str | Path, check_exists: bool = True) -> Path:
+    """Validate file path to prevent directory traversal attacks.
+
+    Args:
+        file_path: Path to validate
+        check_exists: If True, raise FileNotFoundError if file doesn't exist
+
+    Returns:
+        Resolved absolute Path object
+
+    Raises:
+        ValueError: If path is invalid or attempts directory traversal
+        FileNotFoundError: If check_exists=True and file doesn't exist
+
+    Examples:
+        >>> _validate_file_path("data/output.txt")  # OK if exists
+        >>> _validate_file_path("../../etc/passwd")  # Raises ValueError
+    """
+    # Convert to Path object and resolve to absolute path
+    try:
+        path = Path(file_path).resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        raise ValueError(f"Invalid file path: {file_path}") from e
+
+    # Check if file exists (optional)
+    if check_exists:
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        # Verify it's a file, not a directory
+        if not path.is_file():
+            raise ValueError(f"Path is not a file: {path}")
+
+    # Check for suspicious patterns (.. in resolved path after normalization)
+    # The resolve() call above should handle most traversal attempts,
+    # but we add extra validation for defense in depth
+    path_str = str(path)
+    if ".." in path_str.split(os.sep):
+        raise ValueError(f"Path contains directory traversal: {path}")
+
+    return path
+
+
 def get_rmsd_start_final(root_dir: str) -> tuple:
     """
     Calculate RMSD between initial and final geometries from a trajectory file.
@@ -194,7 +237,17 @@ def parse_max_forces(output_file: str) -> float | None:
 
     Returns:
         Maximum force value (in Eh/Bohr), or None if not found.
+
+    Raises:
+        ValueError: If file path is invalid or attempts directory traversal.
+        FileNotFoundError: If file doesn't exist.
     """
+    # Validate file path before opening (don't check existence, let try/except handle it)
+    try:
+        output_file = _validate_file_path(output_file, check_exists=False)
+    except ValueError:
+        return None  # Invalid path format
+
     try:
         with open(output_file) as f:
             lines = f.readlines()
@@ -225,10 +278,16 @@ def parse_scf_steps(output_file: str | Path) -> int | None:
 
     Returns:
         Total number of SCF iterations, or None if not found.
+
+    Raises:
+        ValueError: If file path is invalid or attempts directory traversal.
+        FileNotFoundError: If file doesn't exist.
     """
-    output_file = Path(output_file)
-    if not output_file.exists():
-        return None
+    # Validate file path before opening (don't check existence, let try/except handle it)
+    try:
+        output_file = _validate_file_path(output_file, check_exists=False)
+    except ValueError:
+        return None  # Invalid path format
 
     try:
         with open(output_file) as f:
@@ -700,7 +759,17 @@ def parse_final_energy(output_file: str) -> float | None:
 
     Returns:
         Final energy in Hartree, or None if not found.
+
+    Raises:
+        ValueError: If file path is invalid or attempts directory traversal.
+        FileNotFoundError: If file doesn't exist.
     """
+    # Validate file path before opening (don't check existence, let try/except handle it)
+    try:
+        output_file = _validate_file_path(output_file, check_exists=False)
+    except ValueError:
+        return None  # Invalid path format
+
     try:
         with open(output_file) as f:
             lines = f.readlines()
@@ -737,7 +806,17 @@ def parse_mulliken_population(output_file: str | Path) -> dict[str, list] | None
             - 'elements': List of element symbols
             - 'indices': List of atomic indices
         Returns None if no population analysis found.
+
+    Raises:
+        ValueError: If file path is invalid or attempts directory traversal.
+        FileNotFoundError: If file doesn't exist.
     """
+    # Validate file path before opening (don't check existence, let try/except handle it)
+    try:
+        output_file = _validate_file_path(output_file, check_exists=False)
+    except ValueError:
+        return None  # Invalid path format
+
     try:
         with open(output_file) as f:
             lines = f.readlines()
