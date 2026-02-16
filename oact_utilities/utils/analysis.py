@@ -720,6 +720,105 @@ def parse_final_energy(output_file: str) -> float | None:
         return None
 
 
+def parse_mulliken_population(output_file: str | Path) -> dict[str, list] | None:
+    """Extract Mulliken population analysis from an ORCA output file.
+
+    Parses both Mulliken and Loewdin atomic charges and spin populations.
+
+    Args:
+        output_file: Path to ORCA .out file.
+
+    Returns:
+        Dictionary with keys:
+            - 'mulliken_charges': List of atomic charges
+            - 'mulliken_spins': List of spin populations
+            - 'loewdin_charges': List of atomic charges (if available)
+            - 'loewdin_spins': List of spin populations (if available)
+            - 'elements': List of element symbols
+            - 'indices': List of atomic indices
+        Returns None if no population analysis found.
+    """
+    try:
+        with open(output_file) as f:
+            lines = f.readlines()
+
+        result: dict[str, list] = {
+            "mulliken_charges": [],
+            "mulliken_spins": [],
+            "loewdin_charges": [],
+            "loewdin_spins": [],
+            "elements": [],
+            "indices": [],
+        }
+
+        # Parse both Mulliken and Loewdin sections
+        for analysis_type in ["MULLIKEN", "LOEWDIN"]:
+            header = f"{analysis_type} ATOMIC CHARGES AND SPIN POPULATIONS"
+            i = 0
+            while i < len(lines):
+                if header in lines[i]:
+                    # Skip the header and separator line
+                    i += 2
+                    # Parse data lines until we hit the sum line
+                    temp_indices = []
+                    temp_elements = []
+                    temp_charges = []
+                    temp_spins = []
+
+                    while i < len(lines) and not lines[i].startswith("Sum of"):
+                        line = lines[i].strip()
+                        if line and not line.startswith("-"):
+                            parts = line.split()
+                            # Handle both "Np:" and "F :" formats
+                            if len(parts) >= 4:
+                                try:
+                                    idx = int(parts[0])
+                                    # Element can be in parts[1] (like "Np:") or parts[1]+parts[2] (like "F" ":")
+                                    if parts[1].endswith(":"):
+                                        element = parts[1].rstrip(":")
+                                        charge = float(parts[2])
+                                        spin = float(parts[3])
+                                    elif len(parts) >= 5 and parts[2] == ":":
+                                        element = parts[1]
+                                        charge = float(parts[3])
+                                        spin = float(parts[4])
+                                    else:
+                                        i += 1
+                                        continue
+                                    temp_indices.append(idx)
+                                    temp_elements.append(element)
+                                    temp_charges.append(charge)
+                                    temp_spins.append(spin)
+                                except (ValueError, IndexError):
+                                    pass
+                        i += 1
+
+                    # Store results based on analysis type
+                    if analysis_type == "MULLIKEN" and temp_charges:
+                        result["mulliken_charges"] = temp_charges
+                        result["mulliken_spins"] = temp_spins
+                        result["elements"] = temp_elements
+                        result["indices"] = temp_indices
+                    elif analysis_type == "LOEWDIN" and temp_charges:
+                        result["loewdin_charges"] = temp_charges
+                        result["loewdin_spins"] = temp_spins
+                        # Only store elements/indices if not already stored
+                        if not result["elements"]:
+                            result["elements"] = temp_elements
+                            result["indices"] = temp_indices
+                    break
+                i += 1
+
+        # Return None if no population analysis found
+        if not result["mulliken_charges"] and not result["loewdin_charges"]:
+            return None
+
+        return result
+
+    except Exception:
+        return None
+
+
 def parse_job_metrics(
     job_dir: str | Path, unzip: bool = False
 ) -> dict[str, float | int | None]:
@@ -734,7 +833,8 @@ def parse_job_metrics(
         unzip: If True, look for gzipped files (e.g., quacc output).
 
     Returns:
-        Dictionary with keys: max_forces, scf_steps, final_energy, success.
+        Dictionary with keys: max_forces, scf_steps, final_energy, success,
+        mulliken_population (dict with charges/spins if available).
     """
     job_dir = Path(job_dir)
 
@@ -811,11 +911,21 @@ def parse_job_metrics(
                 content = f.read()
             success = "ORCA TERMINATED NORMALLY" in content
 
+        # Try to parse Mulliken population analysis
+        mulliken_pop = None
+        if unzip:
+            # For gzipped files, use the temp file
+            mulliken_pop = parse_mulliken_population(output_file)
+        else:
+            # For regular files
+            mulliken_pop = parse_mulliken_population(output_file)
+
         return {
             "max_forces": max_forces,
             "scf_steps": scf_steps,
             "final_energy": final_energy,
             "success": success,
+            "mulliken_population": mulliken_pop,
         }
 
     except Exception as e:
@@ -824,6 +934,7 @@ def parse_job_metrics(
             "scf_steps": None,
             "final_energy": None,
             "success": False,
+            "mulliken_population": None,
             "error": str(e),
         }
 

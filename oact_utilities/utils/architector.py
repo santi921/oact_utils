@@ -167,12 +167,15 @@ def xyz_string_to_atoms(xyz_str: str) -> Atoms:
     return Atoms(symbols=symbols, positions=positions)
 
 
-def _init_db(db_path: Path, timeout: float = 30.0) -> sqlite3.Connection:
+def _init_db(
+    db_path: Path, timeout: float = 30.0, extra_columns: dict[str, str] | None = None
+) -> sqlite3.Connection:
     """Initialize SQLite database with WAL mode for better concurrency.
 
     Args:
         db_path: Path to database file.
         timeout: Timeout in seconds for database locks.
+        extra_columns: Dictionary mapping column names to SQL types (e.g., {"metal": "TEXT", "ligand_count": "INTEGER"}).
 
     Returns:
         SQLite connection object.
@@ -184,10 +187,8 @@ def _init_db(db_path: Path, timeout: float = 30.0) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")  # Faster writes with WAL
 
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS structures (
+    # Build the CREATE TABLE statement with extra columns
+    base_columns = """
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             orig_index INTEGER,
             elements TEXT,
@@ -205,10 +206,19 @@ def _init_db(db_path: Path, timeout: float = 30.0) -> sqlite3.Connection:
             wall_time REAL,
             n_cores INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"""
+
+    # Add extra columns if provided
+    if extra_columns:
+        for col_name, col_type in extra_columns.items():
+            base_columns += f",\n            {col_name} {col_type}"
+
+    create_table_sql = (
+        f"CREATE TABLE IF NOT EXISTS structures ({base_columns}\n        )"
     )
+
+    cur = conn.cursor()
+    cur.execute(create_table_sql)
 
     # Create indexes for common queries
     cur.execute("CREATE INDEX IF NOT EXISTS idx_status ON structures(status)")
@@ -233,6 +243,7 @@ def _insert_row(
     final_energy: float | None = None,
     error_message: str | None = None,
     fail_count: int = 0,
+    extra_values: dict[str, any] | None = None,
 ):
     """Insert a structure row into the database.
 
@@ -251,29 +262,53 @@ def _insert_row(
         final_energy: Final energy in Hartree.
         error_message: Error message if failed.
         fail_count: Number of times the job has failed.
+        extra_values: Dictionary of extra column values to insert.
     """
+    # Base columns and values
+    columns = [
+        "orig_index",
+        "elements",
+        "natoms",
+        "status",
+        "charge",
+        "spin",
+        "geometry",
+        "job_dir",
+        "max_forces",
+        "scf_steps",
+        "final_energy",
+        "error_message",
+        "fail_count",
+    ]
+    values = [
+        orig_index,
+        elements,
+        natoms,
+        status,
+        charge,
+        spin,
+        geometry,
+        job_dir,
+        max_forces,
+        scf_steps,
+        final_energy,
+        error_message,
+        fail_count,
+    ]
+
+    # Add extra columns if provided
+    if extra_values:
+        for col_name, col_value in extra_values.items():
+            columns.append(col_name)
+            values.append(col_value)
+
+    # Build the INSERT statement
+    columns_str = ", ".join(columns)
+    placeholders = ", ".join(["?"] * len(columns))
+    sql = f"INSERT INTO structures ({columns_str}) VALUES ({placeholders})"
+
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO structures (orig_index, elements, natoms, status, charge, spin, geometry, job_dir, max_forces, scf_steps, final_energy, error_message, fail_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            orig_index,
-            elements,
-            natoms,
-            status,
-            charge,
-            spin,
-            geometry,
-            job_dir,
-            max_forces,
-            scf_steps,
-            final_energy,
-            error_message,
-            fail_count,
-        ),
-    )
+    cur.execute(sql, values)
 
 
 def chunk_architector_csv(
@@ -365,6 +400,7 @@ def create_workflow_db(
     spin_column: str | None = "uhf",
     batch_size: int = 10000,
     debug: bool = False,
+    extra_columns: dict[str, str] | None = None,
 ) -> Path:
     """Create a workflow database directly from an architector CSV.
 
@@ -379,6 +415,8 @@ def create_workflow_db(
         spin_column: Name of column containing unpaired electrons for spin (optional).
         batch_size: Number of rows to process at a time (for memory efficiency).
         debug: If True, print debug information.
+        extra_columns: Dictionary mapping CSV column names to SQL types (e.g., {"metal": "TEXT", "ligand_count": "INTEGER"}).
+                      These columns will be added to the database schema and populated from the CSV.
 
     Returns:
         Path to the created database.
@@ -389,8 +427,8 @@ def create_workflow_db(
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
-    # Initialize database
-    conn = _init_db(db_path)
+    # Initialize database with extra columns if provided
+    conn = _init_db(db_path, extra_columns=extra_columns)
 
     # Read CSV in chunks for memory efficiency
     total_inserted = 0
@@ -404,6 +442,8 @@ def create_workflow_db(
                 print(f"Using charge column: {charge_column}")
             if spin_column:
                 print(f"Using spin column: {spin_column}")
+            if extra_columns:
+                print(f"Extra columns to store: {list(extra_columns.keys())}")
             print(f"Processing in batches of {batch_size} rows")
 
         for ind, chunk in enumerate(pd.read_csv(csv_path, chunksize=batch_size)):
@@ -414,6 +454,17 @@ def create_workflow_db(
                     break
             if geometry_column not in chunk.columns:
                 raise ValueError(f"Column '{geometry_column}' not found in CSV")
+
+            # Validate extra columns exist (only check on first chunk)
+            if ind == 0 and extra_columns:
+                missing_cols = [
+                    col for col in extra_columns.keys() if col not in chunk.columns
+                ]
+                if missing_cols:
+                    raise ValueError(
+                        f"Extra columns not found in CSV: {missing_cols}. "
+                        f"Available columns: {list(chunk.columns)}"
+                    )
 
             for idx, row in chunk.iterrows():
                 xyz_str = row.get(geometry_column)
@@ -436,12 +487,30 @@ def create_workflow_db(
                 if spin_column and spin_column in chunk.columns:
                     spin_val = row.get(spin_column)
                     if not pd.isna(spin_val):
-                        # Convert unpaired electrons to spin multiplicity (2S+1)
+                        # Convert unpaired electrons (uhf) to spin multiplicity (2S+1)
+                        # uhf=0 -> singlet (spin=1), uhf=2 -> triplet (spin=3), etc.
                         spin = int(spin_val) + 1
+
+                # Extract extra column values
+                extra_values = None
+                if extra_columns:
+                    extra_values = {}
+                    for col_name in extra_columns.keys():
+                        if col_name in chunk.columns:
+                            val = row.get(col_name)
+                            # Store None for NaN values, otherwise convert to appropriate type
+                            if pd.isna(val):
+                                extra_values[col_name] = None
+                            else:
+                                extra_values[col_name] = val
+
                 if debug:
                     print(
                         f"  Inserting structure idx={idx}, natoms={natoms}, charge={charge}, spin={spin}"
                     )
+                    if extra_values:
+                        print(f"  Extra columns: {extra_values}")
+
                 # Insert into database
                 _insert_row(
                     conn,
@@ -452,6 +521,7 @@ def create_workflow_db(
                     status="ready",
                     charge=charge,
                     spin=spin,
+                    extra_values=extra_values,
                 )
 
                 total_inserted += 1

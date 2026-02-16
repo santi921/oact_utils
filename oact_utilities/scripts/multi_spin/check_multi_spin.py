@@ -13,6 +13,7 @@ The script accepts a single positional argument (root folder). Optional flags:
     --print-table    : print the full jobs table
     --truncate N     : truncate table values to N characters (default: 30)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,6 +29,7 @@ from oact_utilities.utils.analysis import (
     get_geo_forces,
     get_rmsd_between_traj_frames,
     get_rmsd_start_final,
+    parse_mulliken_population,
     parse_sella_log,
 )
 from oact_utilities.utils.status import (
@@ -151,7 +153,11 @@ def _ensure_db(conn: sqlite3.Connection) -> None:
             n_opt_steps INTEGER,
             final_rms_force REAL,
             final_coords TEXT,
-            final_elements TEXT
+            final_elements TEXT,
+            mulliken_charges TEXT,
+            mulliken_spins TEXT,
+            loewdin_charges TEXT,
+            loewdin_spins TEXT
         )
         """
     )
@@ -166,6 +172,10 @@ def _ensure_db(conn: sqlite3.Connection) -> None:
         ("final_rms_force", "REAL"),
         ("final_coords", "TEXT"),
         ("final_elements", "TEXT"),
+        ("mulliken_charges", "TEXT"),
+        ("mulliken_spins", "TEXT"),
+        ("loewdin_charges", "TEXT"),
+        ("loewdin_spins", "TEXT"),
     ]:
         try:
             c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
@@ -200,6 +210,10 @@ def extract_orca_analysis(
         "final_rms_force": None,
         "final_coords": None,
         "final_elements": None,
+        "mulliken_charges": None,
+        "mulliken_spins": None,
+        "loewdin_charges": None,
+        "loewdin_spins": None,
     }
 
     try:
@@ -241,6 +255,25 @@ def extract_orca_analysis(
                 last_forces = geo_forces[-1]
                 result["max_force"] = last_forces.get("Max_Gradient")
                 result["final_rms_force"] = last_forces.get("RMS_Gradient")
+
+            # Parse Mulliken population analysis
+            mulliken_data = parse_mulliken_population(log_file)
+            if mulliken_data:
+                # Store as JSON strings for database
+                result["mulliken_charges"] = json.dumps(
+                    mulliken_data.get("mulliken_charges", [])
+                )
+                result["mulliken_spins"] = json.dumps(
+                    mulliken_data.get("mulliken_spins", [])
+                )
+                if mulliken_data.get("loewdin_charges"):
+                    result["loewdin_charges"] = json.dumps(
+                        mulliken_data.get("loewdin_charges", [])
+                    )
+                if mulliken_data.get("loewdin_spins"):
+                    result["loewdin_spins"] = json.dumps(
+                        mulliken_data.get("loewdin_spins", [])
+                    )
     except Exception:
         pass
 
@@ -285,6 +318,10 @@ def extract_sella_analysis(
         "final_rms_force": None,
         "final_coords": None,
         "final_elements": None,
+        "mulliken_charges": None,
+        "mulliken_spins": None,
+        "loewdin_charges": None,
+        "loewdin_spins": None,
     }
 
     # Try to get trajectory info (preferred for Sella)
@@ -382,6 +419,30 @@ def extract_sella_analysis(
                     )
         except Exception:
             pass
+
+    # Parse Mulliken population analysis from ORCA output
+    try:
+        log_file = pull_log_file(job_dir)
+        if log_file:
+            mulliken_data = parse_mulliken_population(log_file)
+            if mulliken_data:
+                # Store as JSON strings for database
+                result["mulliken_charges"] = json.dumps(
+                    mulliken_data.get("mulliken_charges", [])
+                )
+                result["mulliken_spins"] = json.dumps(
+                    mulliken_data.get("mulliken_spins", [])
+                )
+                if mulliken_data.get("loewdin_charges"):
+                    result["loewdin_charges"] = json.dumps(
+                        mulliken_data.get("loewdin_charges", [])
+                    )
+                if mulliken_data.get("loewdin_spins"):
+                    result["loewdin_spins"] = json.dumps(
+                        mulliken_data.get("loewdin_spins", [])
+                    )
+    except Exception:
+        pass
 
     if verbose_results:
         non_none_keys = [
@@ -485,8 +546,9 @@ def find_and_get_status(
                 INSERT INTO jobs (path, lot, category, name, spin, status, note, checked_at,
                                   run_type, final_energy, max_force, rmsd_start_final,
                                   has_final_geometry, n_opt_steps, final_rms_force,
-                                  final_coords, final_elements)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  final_coords, final_elements, mulliken_charges, mulliken_spins,
+                                  loewdin_charges, loewdin_spins)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     lot=excluded.lot,
                     category=excluded.category,
@@ -503,7 +565,11 @@ def find_and_get_status(
                     n_opt_steps=excluded.n_opt_steps,
                     final_rms_force=excluded.final_rms_force,
                     final_coords=excluded.final_coords,
-                    final_elements=excluded.final_elements
+                    final_elements=excluded.final_elements,
+                    mulliken_charges=excluded.mulliken_charges,
+                    mulliken_spins=excluded.mulliken_spins,
+                    loewdin_charges=excluded.loewdin_charges,
+                    loewdin_spins=excluded.loewdin_spins
                 """,
                 (
                     d,
@@ -523,6 +589,10 @@ def find_and_get_status(
                     analysis_data.get("final_rms_force"),
                     analysis_data.get("final_coords"),
                     analysis_data.get("final_elements"),
+                    analysis_data.get("mulliken_charges"),
+                    analysis_data.get("mulliken_spins"),
+                    analysis_data.get("loewdin_charges"),
+                    analysis_data.get("loewdin_spins"),
                 ),
             )
             conn.commit()
