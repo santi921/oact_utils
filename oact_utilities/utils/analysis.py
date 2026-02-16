@@ -912,13 +912,7 @@ def parse_job_metrics(
             success = "ORCA TERMINATED NORMALLY" in content
 
         # Try to parse Mulliken population analysis
-        mulliken_pop = None
-        if unzip:
-            # For gzipped files, use the temp file
-            mulliken_pop = parse_mulliken_population(output_file)
-        else:
-            # For regular files
-            mulliken_pop = parse_mulliken_population(output_file)
+        mulliken_pop = parse_mulliken_population(output_file)
 
         return {
             "max_forces": max_forces,
