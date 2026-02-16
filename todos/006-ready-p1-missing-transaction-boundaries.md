@@ -1,5 +1,5 @@
 ---
-status: pending
+status: ready
 priority: p1
 issue_id: "006"
 tags: [data-integrity, database, transactions, critical]
@@ -149,7 +149,7 @@ finally:
 
 ## Recommended Action
 
-**To be filled during triage.**
+**Option 1: Context Manager with Transactions** - Use Python's `with conn:` pattern for automatic transaction handling. This provides clean, Pythonic code with automatic commit/rollback semantics. Apply to all multi-row operations in check_multi_spin.py.
 
 ## Technical Details
 
@@ -211,6 +211,21 @@ finally:
 - Context managers provide clean transaction semantics
 - IMMEDIATE isolation better for write-heavy workloads
 - Need to test rollback scenarios explicitly
+
+### 2026-02-16 - Approved for Work
+
+**By:** Claude Triage System
+
+**Actions:**
+- Issue approved during triage session
+- Status changed from pending → ready
+- Recommended Option 1 (Context Manager with Transactions)
+- Ready to be picked up and worked on
+
+**Learnings:**
+- Critical for data integrity in production workflows
+- Especially important for batch operations
+- Should be standard pattern across codebase
 
 ## Notes
 
