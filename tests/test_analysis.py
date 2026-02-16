@@ -12,12 +12,9 @@ from oact_utilities.utils.analysis import (
 
 
 def test_get_rmsd_start_final():
-    res_no_traj = get_rmsd_start_final(
-        "/Users/santiagovargas/dev/oact_utils/tests/files/no_traj"
-    )
-    res_traj = get_rmsd_start_final(
-        "/Users/santiagovargas/dev/oact_utils/tests/files/traj/"
-    )
+    test_dir = Path(__file__).parent / "files"
+    res_no_traj = get_rmsd_start_final(str(test_dir / "no_traj"))
+    res_traj = get_rmsd_start_final(str(test_dir / "traj"))
     np.testing.assert_array_almost_equal(
         res_no_traj["energies_frames"],
         res_traj["energies_frames"],
@@ -29,9 +26,8 @@ def test_get_rmsd_start_final():
 def test_parse_mulliken_population():
     """Test parsing Mulliken population analysis from ORCA output."""
     # Test with gzipped quacc example
-    gz_file = Path(
-        "/Users/santiagovargas/dev/oact_utils/tests/files/quacc_example/orca.out.gz"
-    )
+    test_dir = Path(__file__).parent / "files"
+    gz_file = test_dir / "quacc_example" / "orca.out.gz"
 
     # Unzip to temp file for testing
     with gzip.open(gz_file, "rt") as f_in:
@@ -89,7 +85,8 @@ def test_parse_mulliken_population():
 
 def test_parse_job_metrics_with_mulliken():
     """Test that parse_job_metrics includes Mulliken population analysis."""
-    job_dir = Path("/Users/santiagovargas/dev/oact_utils/tests/files/quacc_example")
+    test_dir = Path(__file__).parent / "files"
+    job_dir = test_dir / "quacc_example"
 
     result = parse_job_metrics(job_dir, unzip=True)
 
