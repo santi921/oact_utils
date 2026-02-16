@@ -210,36 +210,33 @@ def parsl_wave2(
 
             ase_format_tf = True
             df_multiplicity = process_multiplicity_file(mult_file)
-            folder_dict_geoms = process_geometry_file(
-                geom_file, ase_format_tf=ase_format_tf
-            )
-            dict_geoms.update(folder_dict_geoms)
+            dict_geoms = process_geometry_file(geom_file, ase_format_tf=ase_format_tf)
 
-            dict_unified.update(
-                {
-                    k: {
-                        "geometry": folder_dict_geoms[k],
-                        "multiplicity": df_multiplicity[k]["multiplicity"],
-                        "charge": df_multiplicity[k]["charge"],
+            dict_unified = {}
+            for k in dict_geoms.keys():
+                if k not in df_multiplicity:
+                    continue
+                for spin_entry in df_multiplicity[k]:
+                    mult = spin_entry["multiplicity"]
+                    charge = spin_entry["charge"]
+                    key = f"{k}_{mult}"
+                    dict_unified[key] = {
+                        "geometry": dict_geoms[k],
+                        "multiplicity": mult,
+                        "charge": charge,
                     }
-                    for k in folder_dict_geoms.keys()
-                    if k in df_multiplicity.keys()
-                }
-            )
 
-        print(f"Number of unified geometries in folder {base_dir}: {len(dict_unified)}")
-
-        for mol_name, _ in dict_geoms.items():
-            folder_mol = os.path.join(folder_out_base, mol_name)
-            dict_unified[mol_name]["dir_name"] = folder_mol
-            os.makedirs(folder_mol, exist_ok=True)
-            # this is running with orca that creates another folder inside, find the latest sub sub dir to check status
-            folder_check = folder_mol
-            # get list of subdirs
-            sub_dirs = [f.path for f in os.scandir(folder_mol) if f.is_dir()]
-            if len(sub_dirs) > 0:
-                latest_subdir = max(sub_dirs, key=os.path.getmtime)
-                folder_check = latest_subdir
+            for job_key, vals in dict_unified.items():
+                folder_mol = os.path.join(folder_out_base, job_key)
+                vals["dir_name"] = folder_mol
+                os.makedirs(folder_mol, exist_ok=True)
+                # this is running with orca that creates another folder inside, find the latest sub sub dir to check status
+                # get list of subdirs
+                folder_check = folder_mol
+                sub_dirs = [f.path for f in os.scandir(folder_mol) if f.is_dir()]
+                if len(sub_dirs) > 0:
+                    latest_subdir = max(sub_dirs, key=os.path.getmtime)
+                    folder_check = latest_subdir
 
                 error_code = check_job_termination(folder_check)
                 if skip_done and error_code == 1:
@@ -249,8 +246,9 @@ def parsl_wave2(
                 if dry_run:
                     continue
 
-            if ("orca.inp" not in os.listdir(folder_mol)) or overwrite:
-                dict_full_set[mol_name] = dict_unified[mol_name]
+                if ("orca.inp" not in os.listdir(folder_mol)) and (overwrite is False):
+                    full_key = f"{base_dir}{folder_name}/{job_key}"
+                    dict_full_set[full_key] = vals
 
     print(f"Total jobs to run: {len(dict_full_set)}")
     exit()

@@ -27,6 +27,10 @@ db_path = create_workflow_db(
 
 ### 2. Submit jobs on HPC
 
+**Two submission modes:**
+
+#### A. Traditional Mode (Individual Flux/SLURM Jobs)
+
 ```bash
 # Basic submission (uses default ORCA settings)
 python -m oact_utilities.workflows.submit_jobs \\
@@ -55,6 +59,60 @@ This creates `jobs/job_0/`, `job_1/`, etc. with:
 
 **ORCA options:** `--functional`, `--simple-input {omol,x2c,dk3}`, `--actinide-basis`, `--nbo`, `--opt`, etc.
 
+#### B. Parsl Mode (Concurrent Execution on Exclusive Node)
+
+Use Parsl to run multiple ORCA jobs concurrently on a single allocated node. More efficient for high-throughput on exclusive nodes:
+
+```bash
+# Request exclusive node via Flux, then run Parsl inside
+flux alloc -N 1 -n 64 -q pbatch -t 8h
+
+# Inside allocation: Run jobs concurrently with Parsl
+python -m oact_utilities.workflows.submit_jobs \\
+    workflow.db \\
+    jobs/ \\
+    --use-parsl \\
+    --batch-size 100 \\
+    --max-workers 4 \\
+    --cores-per-worker 16 \\
+    --n-cores 16 \\
+    --job-timeout 7200
+
+# Example with custom ORCA settings
+python -m oact_utilities.workflows.submit_jobs \\
+    workflow.db \\
+    jobs/ \\
+    --use-parsl \\
+    --batch-size 200 \\
+    --max-workers 4 \\
+    --cores-per-worker 16 \\
+    --functional wB97M-V \\
+    --opt
+```
+
+**Parsl Mode Benefits:**
+
+- ✅ **Concurrent execution**: Run 4+ jobs simultaneously on one node
+- ✅ **Real-time status updates**: Database updated as each job completes
+- ✅ **Efficient resource use**: Better throughput on exclusive nodes
+- ✅ **Automatic retries**: Parsl handles worker failures gracefully
+- ✅ **Live monitoring**: See jobs complete in real-time
+
+**Parsl Options:**
+
+- `--use-parsl`: Enable Parsl mode
+- `--max-workers`: Number of concurrent workers (default: 4)
+- `--cores-per-worker`: CPU cores per worker (default: 16)
+- `--job-timeout`: Per-job timeout in seconds (default: 7200 = 2 hours)
+- `--conda-base`: Conda installation path (default: /usr/WS1/vargas58/miniconda3)
+
+**When to use Parsl mode:**
+
+- You have an exclusive node allocation
+- Running many short-medium jobs (< 2 hours each)
+- Want to maximize node utilization
+- Need real-time progress monitoring
+
 ### 3. Monitor with dashboard
 
 ```bash
@@ -73,10 +131,11 @@ python -m oact_utilities.workflows.dashboard workflow.db --show-metrics
 ```
 Workflow Status Summary
 Status          Count    Percent
-ready            850      85.0%
+to_run           850      85.0%
 running          120      12.0%
 completed         25       2.5%
-failed             5       0.5%
+failed             3       0.3%
+timeout            2       0.2%
 
 Completion: [██░░░░░░...] 2.5% (25/1000)
 
@@ -89,10 +148,16 @@ SCF Steps:  mean=12.3, median=11
 
 The SQLite DB automatically tracks:
 
-- **Status tracking**: `status` (ready/running/completed/failed)
+- **Status tracking**: `status` (to_run/ready/running/completed/failed/timeout)
+  - `to_run`: Job ready to be submitted (default for new jobs)
+  - `ready`: Legacy status, use `to_run` instead
+  - `running`: Job currently executing
+  - `completed`: Job finished successfully
+  - `failed`: Job failed (abort, error, etc.)
+  - `timeout`: Job timed out (no file updates in 6+ hours)
 - **Metrics**: `max_forces`, `scf_steps`, `final_energy` (auto-extracted from ORCA outputs)
 - **Performance**: `wall_time` (seconds), `n_cores` (CPU cores used) - for tracking compute usage
-- **Failure tracking**: `fail_count` (incremented each time a job is reset from failed to ready)
+- **Failure tracking**: `fail_count` (incremented each time a job is reset from failed/timeout to ready)
 - **Metadata**: `job_dir`, `error_message`, `charge`, `spin`, `created_at`, `updated_at`
 - **Structure info**: `elements`, `natoms`, `geometry` (XYZ string)
 - **CSV reference**: `orig_index` (original CSV row number)
@@ -112,8 +177,17 @@ python -m oact_utilities.workflows.dashboard workflow.db --update jobs/
 # Show failed jobs (includes fail count)
 python -m oact_utilities.workflows.dashboard workflow.db --show-failed
 
+# Show timeout jobs
+python -m oact_utilities.workflows.dashboard workflow.db --show-timeout
+
 # Reset failed jobs to retry (increments fail_count)
 python -m oact_utilities.workflows.dashboard workflow.db --reset-failed
+
+# Reset timeout jobs to retry (increments fail_count)
+python -m oact_utilities.workflows.dashboard workflow.db --reset-timeout
+
+# Reset both failed and timeout jobs together
+python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --include-timeout-in-reset
 
 # Reset only jobs that haven't failed 3+ times
 python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-retries 3
@@ -129,7 +203,7 @@ python -m oact_utilities.workflows.dashboard workflow.db --show-metrics
 
 ```python
 from oact_utilities.workflows import ArchitectorWorkflow, JobStatus, update_job_status
-from oact_utilities.workflows.submit_jobs import submit_batch, OrcaConfig
+from oact_utilities.workflows.submit_jobs import submit_batch, submit_batch_parsl, OrcaConfig
 
 # Programmatic job submission with custom ORCA config
 orca_config: OrcaConfig = {
@@ -139,13 +213,24 @@ orca_config: OrcaConfig = {
 }
 
 with ArchitectorWorkflow("workflow.db") as wf:
-    # Submit batch with ORCA config
+    # Traditional mode: Submit batch with ORCA config
     submitted = submit_batch(
         workflow=wf,
         root_dir="jobs/",
         batch_size=100,
         orca_config=orca_config,
         n_cores=8,
+    )
+
+    # OR use Parsl mode for concurrent execution (NEW!)
+    submitted = submit_batch_parsl(
+        workflow=wf,
+        root_dir="jobs/",
+        num_jobs=100,
+        max_workers=4,
+        cores_per_worker=16,
+        orca_config=orca_config,
+        n_cores=16,
     )
 
     # Get jobs
@@ -174,10 +259,16 @@ with ArchitectorWorkflow("workflow.db") as wf:
 
     # Count jobs
     counts = wf.count_by_status()
-    # {'ready': 850, 'running': 120, 'completed': 25, 'failed': 5}
+    # {'to_run': 850, 'running': 120, 'completed': 25, 'failed': 3, 'timeout': 2}
 
     # Reset failed jobs (increments fail_count)
     wf.reset_failed_jobs()
+
+    # Reset timeout jobs (increments fail_count)
+    wf.reset_timeout_jobs()
+
+    # Reset both failed and timeout jobs together
+    wf.reset_failed_jobs(include_timeout=True)
 
     # Reset only jobs that haven't failed too many times
     wf.reset_failed_jobs(max_fail_count=3)
@@ -235,10 +326,13 @@ project/
 ✅ **Multiple Sources**: Tries `.engrad` file if text parsing fails
 ✅ **Error Handling**: Gracefully handles missing files and parse failures
 ✅ **Flux & SLURM**: Compatible with existing HPC job generation utilities
+✅ **Parsl Mode**: NEW! Concurrent execution on exclusive nodes with real-time updates
 ✅ **Real-time Dashboard**: Monitor progress with metrics display
 ✅ **Easy Retry**: Reset failed jobs with one command
 ✅ **Failure Tracking**: `fail_count` tracks retries; skip chronic failures automatically
 ✅ **Performance Tracking**: `wall_time` and `n_cores` for compute usage analysis (core-hours)
+✅ **Timeout Detection**: Automatically detects jobs stuck for 6+ hours
+✅ **Rich Status System**: Separate tracking for failed vs. timeout vs. running jobs
 
 ## Supported ORCA Output Formats
 

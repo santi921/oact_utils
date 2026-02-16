@@ -47,10 +47,9 @@ def print_metrics_summary(workflow: ArchitectorWorkflow):
     import pandas as pd
 
     # Query completed jobs with metrics
-    cur = workflow.conn.cursor()
-    cur.execute(
+    cur = workflow._execute_with_retry(
         """
-        SELECT max_forces, scf_steps, wall_time, n_cores
+        SELECT max_forces, scf_steps, wall_time, n_cores, final_energy
         FROM structures
         WHERE status = 'completed' AND max_forces IS NOT NULL
         """
@@ -61,9 +60,21 @@ def print_metrics_summary(workflow: ArchitectorWorkflow):
         print("\nNo metrics data available yet.")
         return
 
-    df = pd.DataFrame(rows, columns=["max_forces", "scf_steps", "wall_time", "n_cores"])
+    df = pd.DataFrame(
+        rows,
+        columns=["max_forces", "scf_steps", "wall_time", "n_cores", "final_energy"],
+    )
 
     print_header("Computational Metrics (Completed Jobs)")
+
+    # Energy statistics
+    energy_data = df["final_energy"].dropna()
+    if len(energy_data) > 0:
+        print("\nFinal Energy (Eh):")
+        print(f"  Mean:   {energy_data.mean():.6f}")
+        print(f"  Median: {energy_data.median():.6f}")
+        print(f"  Min:    {energy_data.min():.6f}")
+        print(f"  Max:    {energy_data.max():.6f}")
 
     # Forces statistics
     print("\nMax Forces (Eh/Bohr):")
@@ -129,12 +140,218 @@ def print_progress_bar(
     print(f"{label}: [{bar}] {pct:.1f}% ({completed}/{total})")
 
 
+def _extract_metrics_from_dir(
+    job_dir: Path,
+    unzip: bool = False,
+) -> dict:
+    """Extract metrics from a job directory (pure I/O, no DB writes).
+
+    This function is safe to call from worker threads.
+
+    Args:
+        job_dir: Path to job directory containing ORCA output.
+        unzip: If True, handle gzipped output files (quacc).
+
+    Returns:
+        Dictionary with extracted metrics and an 'error' key (None on success).
+    """
+    from ..utils.analysis import find_timings_and_cores, parse_job_metrics
+    from ..utils.status import pull_log_file
+
+    try:
+        metrics = parse_job_metrics(job_dir, unzip=unzip)
+
+        wall_time = None
+        n_cores = None
+        timing_warning = None
+        try:
+            log_file = pull_log_file(str(job_dir))
+            n_cores_val, time_dict = find_timings_and_cores(log_file)
+            if time_dict and "Total" in time_dict:
+                wall_time = time_dict["Total"]
+            n_cores = n_cores_val
+        except Exception as e:
+            timing_warning = f"Timing extraction failed: {e}"
+
+        return {
+            "max_forces": metrics.get("max_forces"),
+            "scf_steps": metrics.get("scf_steps"),
+            "final_energy": metrics.get("final_energy"),
+            "wall_time": wall_time,
+            "n_cores": n_cores,
+            "error": None,
+            "timing_warning": timing_warning,
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _parallel_extract_metrics(
+    workflow: ArchitectorWorkflow,
+    work_items: list[tuple[int, Path]],
+    unzip: bool = False,
+    verbose: bool = False,
+    workers: int = 4,
+    mark_failed_on_error: bool = True,
+) -> tuple[int, int]:
+    """Extract metrics in parallel, then batch-write results to DB.
+
+    File I/O happens in a thread pool; DB writes happen in a single
+    transaction after all extractions complete.
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        work_items: List of (job_id, job_dir) tuples.
+        unzip: If True, handle gzipped output files (quacc).
+        verbose: Print detailed progress messages.
+        workers: Number of parallel worker threads.
+        mark_failed_on_error: If True, mark jobs as FAILED when parsing fails.
+
+    Returns:
+        Tuple of (extracted_count, failed_count).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not work_items:
+        return 0, 0
+
+    # Phase 1: extract metrics in parallel (pure I/O, no DB)
+    success_metrics: list[dict] = []
+    failed_jobs: list[tuple[int, str]] = []
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_job = {
+            executor.submit(_extract_metrics_from_dir, job_dir, unzip): (
+                job_id,
+                job_dir,
+            )
+            for job_id, job_dir in work_items
+        }
+
+        for future in as_completed(future_to_job):
+            job_id, job_dir = future_to_job[future]
+            result = future.result()
+
+            if result.get("error") is None:
+                success_metrics.append(
+                    {
+                        "job_id": job_id,
+                        "job_dir": str(job_dir),
+                        "max_forces": result["max_forces"],
+                        "scf_steps": result["scf_steps"],
+                        "final_energy": result["final_energy"],
+                        "wall_time": result["wall_time"],
+                        "n_cores": result["n_cores"],
+                    }
+                )
+                if verbose:
+                    print(
+                        f"    Job {job_id}: forces={result['max_forces']}, "
+                        f"scf={result['scf_steps']}, "
+                        f"energy={result['final_energy']}"
+                    )
+                    if result.get("timing_warning"):
+                        print(f"      Warning: {result['timing_warning']}")
+            else:
+                failed_jobs.append((job_id, result["error"]))
+                if verbose:
+                    print(
+                        f"    Job {job_id}: failed to extract metrics: "
+                        f"{result['error']}"
+                    )
+
+    # Phase 2: batch-write all successful metrics in one transaction
+    if success_metrics:
+        workflow.update_job_metrics_bulk(success_metrics)
+
+    # Phase 3: mark failed jobs
+    if mark_failed_on_error:
+        for job_id, error_msg in failed_jobs:
+            workflow.update_status(
+                job_id,
+                JobStatus.FAILED,
+                error_message=f"Metrics parse error: {error_msg}",
+                increment_fail_count=True,
+            )
+
+    return len(success_metrics), len(failed_jobs)
+
+
+def backfill_metrics(
+    workflow: ArchitectorWorkflow,
+    root_dir: str | Path,
+    job_dir_pattern: str = "job_{orig_index}",
+    unzip: bool = False,
+    verbose: bool = False,
+    workers: int = 4,
+):
+    """Extract metrics for completed jobs that don't have them yet.
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        root_dir: Root directory containing job subdirectories.
+        job_dir_pattern: Pattern for job directory names.
+        unzip: If True, handle gzipped output files (quacc).
+        verbose: Print detailed progress messages.
+        workers: Number of parallel worker threads for extraction.
+    """
+    root_dir = Path(root_dir)
+
+    cur = workflow._execute_with_retry(
+        """
+        SELECT id, orig_index
+        FROM structures
+        WHERE status = 'completed' AND max_forces IS NULL
+        """
+    )
+    rows = cur.fetchall()
+
+    if not rows:
+        print("\nAll completed jobs already have metrics.")
+        return
+
+    # Build work items, filtering out missing directories
+    work_items = []
+    skipped = 0
+    for job_id, orig_index in rows:
+        job_dir_name = job_dir_pattern.format(orig_index=orig_index, id=job_id)
+        job_dir = root_dir / job_dir_name
+
+        if not job_dir.exists():
+            skipped += 1
+            if verbose:
+                print(f"  Job {job_id}: directory {job_dir} not found, skipping")
+            continue
+
+        work_items.append((job_id, job_dir))
+
+    print(
+        f"\nBackfilling metrics for {len(work_items)} completed jobs "
+        f"({workers} workers)..."
+    )
+
+    extracted, failed = _parallel_extract_metrics(
+        workflow, work_items, unzip=unzip, verbose=verbose, workers=workers
+    )
+
+    print(
+        f"Backfill metrics: {extracted} extracted, "
+        f"{failed} failed, {skipped} skipped (no directory)"
+    )
+
+
 def update_all_statuses(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
     job_dir_pattern: str = "job_{orig_index}",
     check_func: Callable | None = None,
     verbose: bool = False,
+    extract_metrics: bool = False,
+    unzip: bool = False,
+    workers: int = 4,
+    recheck_completed: bool = False,
+    hours_cutoff: float = 6,
 ):
     """Scan job directories and update statuses in bulk.
 
@@ -144,21 +361,35 @@ def update_all_statuses(
         job_dir_pattern: Pattern for job directory names. Use {orig_index} or {id}.
         check_func: Optional custom status checking function.
         verbose: Print detailed progress messages.
+        extract_metrics: If True, extract computational metrics for newly completed jobs.
+        unzip: If True, handle gzipped output files (quacc).
+        workers: Number of parallel worker threads for metrics extraction.
+        recheck_completed: If True, also re-verify jobs marked as completed.
+        hours_cutoff: Hours of inactivity before a job is considered timed out.
     """
+    from functools import partial
+
     from ..utils.status import check_job_termination
 
     if check_func is None:
-        check_func = check_job_termination
+        check_func = partial(check_job_termination, hours_cutoff=hours_cutoff)
 
     root_dir = Path(root_dir)
     if not root_dir.exists():
         print(f"Error: root directory {root_dir} does not exist")
         return
 
-    # Get all running and ready jobs (these might have changed)
-    jobs = workflow.get_jobs_by_status(
-        [JobStatus.RUNNING, JobStatus.READY, JobStatus.FAILED]
-    )
+    # Get jobs to check — optionally include completed for re-verification
+    statuses_to_check = [
+        JobStatus.RUNNING,
+        JobStatus.READY,
+        JobStatus.FAILED,
+        JobStatus.TO_RUN,
+    ]
+    if recheck_completed:
+        statuses_to_check.append(JobStatus.COMPLETED)
+
+    jobs = workflow.get_jobs_by_status(statuses_to_check)
 
     if verbose:
         print(f"\nScanning {len(jobs)} jobs for status updates...")
@@ -166,8 +397,10 @@ def update_all_statuses(
     updated_counts = {
         JobStatus.COMPLETED: 0,
         JobStatus.FAILED: 0,
+        JobStatus.TIMEOUT: 0,
         JobStatus.RUNNING: 0,
     }
+    completed_for_metrics: list[tuple[int, Path]] = []
 
     for i, job in enumerate(jobs):
         # Format job directory name
@@ -186,6 +419,8 @@ def update_all_statuses(
 
         if result == 1:
             new_status = JobStatus.COMPLETED
+        elif result == -2:
+            new_status = JobStatus.TIMEOUT
         elif result == -1:
             new_status = JobStatus.FAILED
         else:
@@ -201,12 +436,35 @@ def update_all_statuses(
                     f"  [{i+1}/{len(jobs)}] Job {job.id}: {job.status.value} -> {new_status.value}"
                 )
 
+            # Collect newly completed jobs for parallel metrics extraction
+            if extract_metrics and new_status == JobStatus.COMPLETED:
+                completed_for_metrics.append((job.id, job_dir))
+
     # Print update summary
     print(
         f"\nStatus updates: {updated_counts[JobStatus.COMPLETED]} completed, "
         f"{updated_counts[JobStatus.FAILED]} failed, "
+        f"{updated_counts[JobStatus.TIMEOUT]} timeout, "
         f"{updated_counts[JobStatus.RUNNING]} running"
     )
+
+    # Extract metrics in parallel for newly completed jobs
+    if completed_for_metrics:
+        print(
+            f"Extracting metrics for {len(completed_for_metrics)} newly completed "
+            f"jobs ({workers} workers)..."
+        )
+        metrics_extracted, metrics_failed = _parallel_extract_metrics(
+            workflow,
+            completed_for_metrics,
+            unzip=unzip,
+            verbose=verbose,
+            workers=workers,
+        )
+        print(
+            f"Metrics extraction: {metrics_extracted} succeeded, "
+            f"{metrics_failed} failed"
+        )
 
 
 def show_failed_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
@@ -240,6 +498,37 @@ def show_failed_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
         print(f"\n... and {len(failed) - limit} more failed jobs")
 
 
+def show_timeout_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
+    """Display details of timed out jobs."""
+    timeout = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
+
+    if not timeout:
+        print("\nNo timeout jobs found.")
+        return
+
+    print_header(f"Timeout Jobs (showing up to {limit})")
+    print(f"\n{'ID':<8} {'Orig Index':<12} {'Fails':<6} {'Job Dir':<25} {'Error':<25}")
+    print("-" * 90)
+
+    for job in timeout[:limit]:
+        job_dir = (
+            (job.job_dir[:22] + "...")
+            if job.job_dir and len(job.job_dir) > 25
+            else (job.job_dir or "N/A")
+        )
+        error = (
+            (job.error_message[:22] + "...")
+            if job.error_message and len(job.error_message) > 25
+            else (job.error_message or "N/A")
+        )
+        print(
+            f"{job.id:<8} {job.orig_index:<12} {job.fail_count:<6} {job_dir:<25} {error:<25}"
+        )
+
+    if len(timeout) > limit:
+        print(f"\n... and {len(timeout) - limit} more timeout jobs")
+
+
 def show_ready_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
     """Display jobs that are ready to run."""
     ready = workflow.get_jobs_by_status(JobStatus.READY)
@@ -257,6 +546,25 @@ def show_ready_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
 
     if len(ready) > limit:
         print(f"\n... and {len(ready) - limit} more ready jobs")
+
+
+def show_running_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
+    """Display jobs that are currently running."""
+    running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+
+    if not running:
+        print("\nNo jobs currently running.")
+        return
+
+    print_header(f"Running Jobs (showing up to {limit})")
+    print(f"\n{'ID':<8} {'Orig Index':<12} {'N Atoms':<10}")
+    print("-" * 60)
+
+    for job in running[:limit]:
+        print(f"{job.id:<8} {job.orig_index:<12} {job.natoms:<10}")
+
+    if len(running) > limit:
+        print(f"\n... and {len(running) - limit} more running jobs")
 
 
 def main():
@@ -281,14 +589,34 @@ def main():
         help="Show details of failed jobs",
     )
     parser.add_argument(
+        "--show-timeout",
+        action="store_true",
+        help="Show details of timeout jobs",
+    )
+    parser.add_argument(
         "--show-ready",
         action="store_true",
         help="Show jobs ready to run",
     )
     parser.add_argument(
+        "--show-running",
+        action="store_true",
+        help="Show jobs currently running",
+    )
+    parser.add_argument(
         "--reset-failed",
         action="store_true",
         help="Reset all failed jobs to ready status",
+    )
+    parser.add_argument(
+        "--reset-timeout",
+        action="store_true",
+        help="Reset all timeout jobs to ready status",
+    )
+    parser.add_argument(
+        "--include-timeout-in-reset",
+        action="store_true",
+        help="When using --reset-failed, also reset timeout jobs",
     )
     parser.add_argument(
         "--max-retries",
@@ -319,6 +647,33 @@ def main():
         action="store_true",
         help="Show computational metrics (forces, SCF steps)",
     )
+    parser.add_argument(
+        "--extract-metrics",
+        action="store_true",
+        help="Extract metrics (forces, SCF steps, energy, timing) for completed jobs during --update",
+    )
+    parser.add_argument(
+        "--unzip",
+        action="store_true",
+        help="Handle gzipped output files (e.g., from quacc)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of parallel workers for metrics extraction (default: 4)",
+    )
+    parser.add_argument(
+        "--recheck-completed",
+        action="store_true",
+        help="Re-verify completed jobs during --update (catches tampered outputs or status checker changes)",
+    )
+    parser.add_argument(
+        "--hours-cutoff",
+        type=float,
+        default=6,
+        help="Hours of inactivity before a job is considered timed out (default: 6)",
+    )
 
     args = parser.parse_args()
 
@@ -336,7 +691,23 @@ def main():
             args.update,
             job_dir_pattern=args.job_dir_pattern,
             verbose=args.verbose,
+            extract_metrics=args.extract_metrics,
+            unzip=args.unzip,
+            workers=args.workers,
+            recheck_completed=args.recheck_completed,
+            hours_cutoff=args.hours_cutoff,
         )
+
+        # Backfill metrics for previously completed jobs missing them
+        if args.extract_metrics:
+            backfill_metrics(
+                workflow,
+                args.update,
+                job_dir_pattern=args.job_dir_pattern,
+                unzip=args.unzip,
+                verbose=args.verbose,
+                workers=args.workers,
+            )
 
     # Reset failed jobs if requested
     if args.reset_failed:
@@ -344,14 +715,34 @@ def main():
         if args.max_retries is not None:
             eligible = [j for j in failed_jobs if j.fail_count < args.max_retries]
             skipped = len(failed_jobs) - len(eligible)
-            workflow.reset_failed_jobs(max_fail_count=args.max_retries)
+            workflow.reset_failed_jobs(
+                max_fail_count=args.max_retries,
+                include_timeout=args.include_timeout_in_reset,
+            )
+            status_msg = "failed/timeout" if args.include_timeout_in_reset else "failed"
             print(
-                f"\nReset {len(eligible)} failed jobs to ready status "
+                f"\nReset {len(eligible)} {status_msg} jobs to ready status "
                 f"(skipped {skipped} jobs that have already failed {args.max_retries}+ times)"
             )
         else:
-            workflow.reset_failed_jobs()
-            print(f"\nReset {len(failed_jobs)} failed jobs to ready status")
+            workflow.reset_failed_jobs(include_timeout=args.include_timeout_in_reset)
+            status_msg = "failed/timeout" if args.include_timeout_in_reset else "failed"
+            print(f"\nReset {len(failed_jobs)} {status_msg} jobs to ready status")
+
+    # Reset timeout jobs if requested
+    if args.reset_timeout:
+        timeout_jobs = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
+        if args.max_retries is not None:
+            eligible = [j for j in timeout_jobs if j.fail_count < args.max_retries]
+            skipped = len(timeout_jobs) - len(eligible)
+            workflow.reset_timeout_jobs(max_fail_count=args.max_retries)
+            print(
+                f"\nReset {len(eligible)} timeout jobs to ready status "
+                f"(skipped {skipped} jobs that have already timed out {args.max_retries}+ times)"
+            )
+        else:
+            workflow.reset_timeout_jobs()
+            print(f"\nReset {len(timeout_jobs)} timeout jobs to ready status")
 
     # Always show summary
     print_summary(workflow)
@@ -365,6 +756,13 @@ def main():
     # Show failed jobs if requested
     if args.show_failed:
         show_failed_jobs(workflow, limit=args.limit)
+
+    # Show timeout jobs if requested
+    if args.show_timeout:
+        show_timeout_jobs(workflow, limit=args.limit)
+
+    if args.show_running:
+        show_running_jobs(workflow, limit=args.limit)
 
     # Show ready jobs if requested
     if args.show_ready:

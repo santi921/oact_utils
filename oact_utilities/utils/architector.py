@@ -15,6 +15,79 @@ from pathlib import Path
 import pandas as pd
 from ase import Atoms
 
+from oact_utilities.utils.analysis import validate_spin_multiplicity
+
+# Allowed SQLite column types for extra_columns validation
+ALLOWED_COLUMN_TYPES = {
+    "TEXT",
+    "INTEGER",
+    "REAL",
+    "BLOB",
+    "NUMERIC",
+    "TEXT NOT NULL",
+    "INTEGER NOT NULL",
+    "REAL NOT NULL",
+    "INTEGER PRIMARY KEY",
+    "TEXT UNIQUE",
+}
+
+
+def validate_extra_columns(extra_columns: dict[str, str] | None) -> dict[str, str]:
+    """Validate extra_columns against whitelist to prevent SQL injection.
+
+    Args:
+        extra_columns: Dictionary of {column_name: column_type}
+
+    Returns:
+        Validated dictionary with uppercase column types
+
+    Raises:
+        ValueError: If any column name or type is invalid
+
+    Examples:
+        >>> validate_extra_columns({"metal": "TEXT", "count": "INTEGER"})
+        {'metal': 'TEXT', 'count': 'INTEGER'}
+        >>> validate_extra_columns({"bad'; DROP TABLE": "TEXT"})
+        ValueError: Invalid column name...
+    """
+    if extra_columns is None:
+        return {}
+
+    validated = {}
+
+    for col_name, col_type in extra_columns.items():
+        # Validate column name: alphanumeric and underscore only
+        if not col_name.replace("_", "").isalnum():
+            raise ValueError(
+                f"Invalid column name: '{col_name}'. "
+                "Must contain only alphanumeric characters and underscores."
+            )
+
+        # Check for SQL keywords as column names
+        if col_name.upper() in (
+            "SELECT",
+            "DROP",
+            "INSERT",
+            "DELETE",
+            "UPDATE",
+            "TABLE",
+        ):
+            raise ValueError(
+                f"Column name '{col_name}' is a reserved SQL keyword and cannot be used"
+            )
+
+        # Validate column type against whitelist
+        col_type_upper = col_type.upper()
+        if col_type_upper not in ALLOWED_COLUMN_TYPES:
+            raise ValueError(
+                f"Invalid column type: '{col_type}'. "
+                f"Allowed types: {', '.join(sorted(ALLOWED_COLUMN_TYPES))}"
+            )
+
+        validated[col_name] = col_type_upper
+
+    return validated
+
 
 def chunk_architector_to_lmdb(
     csv_path: str | Path,
@@ -167,27 +240,35 @@ def xyz_string_to_atoms(xyz_str: str) -> Atoms:
     return Atoms(symbols=symbols, positions=positions)
 
 
-def _init_db(db_path: Path, timeout: float = 30.0) -> sqlite3.Connection:
+def _init_db(
+    db_path: Path, timeout: float = 30.0, extra_columns: dict[str, str] | None = None
+) -> sqlite3.Connection:
     """Initialize SQLite database with WAL mode for better concurrency.
 
     Args:
         db_path: Path to database file.
         timeout: Timeout in seconds for database locks.
+        extra_columns: Dictionary mapping column names to SQL types (e.g., {"metal": "TEXT", "ligand_count": "INTEGER"}).
 
     Returns:
         SQLite connection object.
+
+    Raises:
+        ValueError: If extra_columns contains invalid column names or types.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Validate extra_columns before using them in SQL
+    extra_columns = validate_extra_columns(extra_columns)
+
     conn = sqlite3.connect(str(db_path), timeout=timeout)
 
     # Enable WAL mode for better concurrent access
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")  # Faster writes with WAL
 
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS structures (
+    # Build the CREATE TABLE statement with extra columns
+    base_columns = """
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             orig_index INTEGER,
             elements TEXT,
@@ -205,10 +286,19 @@ def _init_db(db_path: Path, timeout: float = 30.0) -> sqlite3.Connection:
             wall_time REAL,
             n_cores INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"""
+
+    # Add extra columns if provided
+    if extra_columns:
+        for col_name, col_type in extra_columns.items():
+            base_columns += f",\n            {col_name} {col_type}"
+
+    create_table_sql = (
+        f"CREATE TABLE IF NOT EXISTS structures ({base_columns}\n        )"
     )
+
+    cur = conn.cursor()
+    cur.execute(create_table_sql)
 
     # Create indexes for common queries
     cur.execute("CREATE INDEX IF NOT EXISTS idx_status ON structures(status)")
@@ -233,6 +323,7 @@ def _insert_row(
     final_energy: float | None = None,
     error_message: str | None = None,
     fail_count: int = 0,
+    extra_values: dict[str, any] | None = None,
 ):
     """Insert a structure row into the database.
 
@@ -251,29 +342,53 @@ def _insert_row(
         final_energy: Final energy in Hartree.
         error_message: Error message if failed.
         fail_count: Number of times the job has failed.
+        extra_values: Dictionary of extra column values to insert.
     """
+    # Base columns and values
+    columns = [
+        "orig_index",
+        "elements",
+        "natoms",
+        "status",
+        "charge",
+        "spin",
+        "geometry",
+        "job_dir",
+        "max_forces",
+        "scf_steps",
+        "final_energy",
+        "error_message",
+        "fail_count",
+    ]
+    values = [
+        orig_index,
+        elements,
+        natoms,
+        status,
+        charge,
+        spin,
+        geometry,
+        job_dir,
+        max_forces,
+        scf_steps,
+        final_energy,
+        error_message,
+        fail_count,
+    ]
+
+    # Add extra columns if provided
+    if extra_values:
+        for col_name, col_value in extra_values.items():
+            columns.append(col_name)
+            values.append(col_value)
+
+    # Build the INSERT statement
+    columns_str = ", ".join(columns)
+    placeholders = ", ".join(["?"] * len(columns))
+    sql = f"INSERT INTO structures ({columns_str}) VALUES ({placeholders})"
+
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO structures (orig_index, elements, natoms, status, charge, spin, geometry, job_dir, max_forces, scf_steps, final_energy, error_message, fail_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            orig_index,
-            elements,
-            natoms,
-            status,
-            charge,
-            spin,
-            geometry,
-            job_dir,
-            max_forces,
-            scf_steps,
-            final_energy,
-            error_message,
-            fail_count,
-        ),
-    )
+    cur.execute(sql, values)
 
 
 def chunk_architector_csv(
@@ -365,6 +480,7 @@ def create_workflow_db(
     spin_column: str | None = "uhf",
     batch_size: int = 10000,
     debug: bool = False,
+    extra_columns: dict[str, str] | None = None,
 ) -> Path:
     """Create a workflow database directly from an architector CSV.
 
@@ -379,6 +495,8 @@ def create_workflow_db(
         spin_column: Name of column containing unpaired electrons for spin (optional).
         batch_size: Number of rows to process at a time (for memory efficiency).
         debug: If True, print debug information.
+        extra_columns: Dictionary mapping CSV column names to SQL types (e.g., {"metal": "TEXT", "ligand_count": "INTEGER"}).
+                      These columns will be added to the database schema and populated from the CSV.
 
     Returns:
         Path to the created database.
@@ -389,8 +507,8 @@ def create_workflow_db(
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
-    # Initialize database
-    conn = _init_db(db_path)
+    # Initialize database with extra columns if provided
+    conn = _init_db(db_path, extra_columns=extra_columns)
 
     # Read CSV in chunks for memory efficiency
     total_inserted = 0
@@ -404,6 +522,8 @@ def create_workflow_db(
                 print(f"Using charge column: {charge_column}")
             if spin_column:
                 print(f"Using spin column: {spin_column}")
+            if extra_columns:
+                print(f"Extra columns to store: {list(extra_columns.keys())}")
             print(f"Processing in batches of {batch_size} rows")
 
         for ind, chunk in enumerate(pd.read_csv(csv_path, chunksize=batch_size)):
@@ -414,6 +534,17 @@ def create_workflow_db(
                     break
             if geometry_column not in chunk.columns:
                 raise ValueError(f"Column '{geometry_column}' not found in CSV")
+
+            # Validate extra columns exist (only check on first chunk)
+            if ind == 0 and extra_columns:
+                missing_cols = [
+                    col for col in extra_columns.keys() if col not in chunk.columns
+                ]
+                if missing_cols:
+                    raise ValueError(
+                        f"Extra columns not found in CSV: {missing_cols}. "
+                        f"Available columns: {list(chunk.columns)}"
+                    )
 
             for idx, row in chunk.iterrows():
                 xyz_str = row.get(geometry_column)
@@ -436,12 +567,40 @@ def create_workflow_db(
                 if spin_column and spin_column in chunk.columns:
                     spin_val = row.get(spin_column)
                     if not pd.isna(spin_val):
-                        # Convert unpaired electrons to spin multiplicity (2S+1)
+                        # Convert unpaired electrons (uhf) to spin multiplicity (2S+1)
+                        # uhf=0 -> singlet (spin=1), uhf=2 -> triplet (spin=3), etc.
                         spin = int(spin_val) + 1
+
+                        # Validate spin multiplicity (Issue #014)
+                        try:
+                            spin = validate_spin_multiplicity(spin, n_electrons=None)
+                        except ValueError as e:
+                            if debug:
+                                print(
+                                    f"  Skipping row {idx}: Invalid spin multiplicity: {e}"
+                                )
+                            continue  # Skip this row
+
+                # Extract extra column values
+                extra_values = None
+                if extra_columns:
+                    extra_values = {}
+                    for col_name in extra_columns.keys():
+                        if col_name in chunk.columns:
+                            val = row.get(col_name)
+                            # Store None for NaN values, otherwise convert to appropriate type
+                            if pd.isna(val):
+                                extra_values[col_name] = None
+                            else:
+                                extra_values[col_name] = val
+
                 if debug:
                     print(
                         f"  Inserting structure idx={idx}, natoms={natoms}, charge={charge}, spin={spin}"
                     )
+                    if extra_values:
+                        print(f"  Extra columns: {extra_values}")
+
                 # Insert into database
                 _insert_row(
                     conn,
@@ -452,6 +611,7 @@ def create_workflow_db(
                     status="ready",
                     charge=charge,
                     spin=spin,
+                    extra_values=extra_values,
                 )
 
                 total_inserted += 1

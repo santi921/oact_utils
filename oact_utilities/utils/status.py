@@ -1,8 +1,20 @@
 import gzip
 import os
+import re
+import time
+
+# Pattern matching ORCA's atomic SCF guess files (e.g. orca_atom0.out, orca_atom12.out)
+_ORCA_ATOM_RE = re.compile(r"^orca_atom\d+\.out$")
 
 
-def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
+def _is_orca_atom_scf(filename: str) -> bool:
+    """Return True if filename is an ORCA atomic SCF initial-guess output."""
+    return _ORCA_ATOM_RE.match(os.path.basename(filename)) is not None
+
+
+def check_file_termination(
+    file_path: str, is_gzipped: bool = False, hours_cutoff=6
+) -> int:
     """Check if an ORCA calculation terminated successfully.
 
     Args:
@@ -10,7 +22,7 @@ def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
         is_gzipped: If True, decompress the file before reading. Auto-detected if None.
 
     Returns:
-        1 if terminated normally, -1 if aborted, 0 if still running/incomplete.
+        1 if terminated normally, -1 if aborted, -2 if timeout, 0 if still running/incomplete.
     """
     # Auto-detect gzipped files if not specified
     if is_gzipped is None:
@@ -30,6 +42,14 @@ def check_file_termination(file_path: str, is_gzipped: bool = False) -> int:
             return 1
         if "aborting the run" in line:
             return -1
+        # also check if there is a line that says "Error" at all within the last 5 lines
+        if "Error" in line:
+            return -1
+
+    # check if the file was modified within the last hours_cutoff hours, if not, consider it timed out
+    if os.path.getmtime(file_path) < (time.time() - hours_cutoff * 3600):
+        return -2
+
     return 0
 
 
@@ -62,7 +82,7 @@ def done_geo_opt_ase(opt_log_file, fmax_cutoff=0.01):
 
 
 def check_job_termination(
-    dir: str, check_many: bool = False, flux_tf: bool = False
+    dir: str, check_many: bool = False, flux_tf: bool = False, hours_cutoff=6
 ) -> int:
     """
     Utility function to check if a job in a given directory has terminated successfully.
@@ -74,7 +94,7 @@ def check_job_termination(
         check_many (bool, optional): Whether to check multiple output files. Defaults to False.
         flux_tf (bool, optional): Whether to check for flux output files. Defaults to False.
     Returns:
-        int: 1 if the job terminated successfully, -1 if it failed, 0 if still running or incomplete.
+        int: 1 if the job terminated successfully, -1 if it failed, -2 if timeout, 0 if still running or incomplete.
     """
     # sweep folder file for flux*out files
     files = os.listdir(dir)
@@ -82,8 +102,8 @@ def check_job_termination(
     if flux_tf:
         files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
     else:
-        # Check for regular .out files
-        files_out = [f for f in files if f.endswith("out")]
+        # Check for regular .out files (skip ORCA atomic SCF guess files)
+        files_out = [f for f in files if f.endswith("out") and not _is_orca_atom_scf(f)]
         # Check for gzipped .out.gz files (e.g., from quacc)
         if not files_out:
             files_out = [f for f in files if f.endswith(".out.gz")]
@@ -99,30 +119,37 @@ def check_job_termination(
             files_out = files_out[:1]
 
     if len(files_out) == 0:
+        # No output files found — check if the directory itself is stale
+        if os.path.getmtime(dir) < (time.time() - hours_cutoff * 3600):
+            return -2
         return 0
 
     if check_many and len(files_out) > 1:
         status_list = []
         for file_out in files_out:
-            output_file = dir + "/" + file_out
+            output_file = os.path.join(str(dir), file_out)
             # Use check_file_termination which handles both regular and gzipped files
-            file_status = check_file_termination(output_file)
+            file_status = check_file_termination(output_file, hours_cutoff=hours_cutoff)
             status_list.append(file_status)
+        # check all these files, if most recent file edit is more than 24 hours ago, then consider it failed
+
         if all(status == 1 for status in status_list):
             return 1
+        elif any(status == -2 for status in status_list):
+            return -2
         elif any(status == -1 for status in status_list):
             return -1
         else:
             return 0
 
     else:
-        output_file = dir + "/" + files_out[0]
+        output_file = os.path.join(str(dir), files_out[0])
         # Use check_file_termination which auto-detects gzipped files
-        return check_file_termination(output_file)
+        return check_file_termination(output_file, hours_cutoff=hours_cutoff)
 
 
 def check_geometry_steps(
-    dir: str, check_many: bool = False, flux_tf: bool = False
+    dir: str, check_many: bool = False, flux_tf: bool = False, hours_cutoff=6
 ) -> int:
     """
     Utility function to check if a job in a given directory has gone beyond 1 geometry optimization step.
@@ -139,7 +166,7 @@ def check_geometry_steps(
     if flux_tf:
         files_out = [f for f in files if f.startswith("flux") and f.endswith("out")]
     else:
-        files_out = [f for f in files if f.endswith("out")]
+        files_out = [f for f in files if f.endswith("out") and not _is_orca_atom_scf(f)]
         # also check slurm-*.log files
         files_out += [f for f in files if f.startswith("slurm-") and f.endswith(".log")]
         if not files_out:
@@ -160,7 +187,7 @@ def check_geometry_steps(
         for file_out in files_out:
             output_file = dir + "/" + file_out
             # read last line of output_file
-            file_status = check_file_termination(output_file)
+            file_status = check_file_termination(output_file, hours_cutoff=hours_cutoff)
 
             status_list.append(file_status)
         if all(status == 1 for status in status_list):
@@ -210,9 +237,9 @@ def pull_log_file(root_dir: str) -> str:
     # Try to find .logs files first
     log_file = [f for f in files if f.endswith("logs")]
 
-    # If none, try .out files
+    # If none, try .out files (skip ORCA atomic SCF guess files)
     if len(log_file) == 0:
-        log_file = [f for f in files if f.endswith(".out")]
+        log_file = [f for f in files if f.endswith(".out") and not _is_orca_atom_scf(f)]
 
     # If none, try .out.gz files (e.g., from quacc)
     if len(log_file) == 0:

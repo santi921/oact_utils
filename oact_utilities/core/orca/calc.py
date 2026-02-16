@@ -344,6 +344,7 @@ def get_orca_blocks(
     scf_MaxIter: int = None,
     functional: str = "wB97M-V",
     basis: str = None,
+    diis_option: str = None,
     actinide_basis: str = "ma-def-TZVP",
     actinide_ecp: str | None = None,
     non_actinide_basis: str = "def2-TZVPD",
@@ -403,6 +404,10 @@ def get_orca_blocks(
                 orcablocks[1] = (
                     "%scf \n  Convergence Medium\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  DIISMaxEq   7\n  Guess PModel\n Shift Shift 0.1 ErrOff 0.1 end\nend"
                 )
+
+    # Replace DIIS with KDIIS in the simple input line if requested
+    if diis_option == "KDIIS" and "DIIS" in simple:
+        simple[simple.index("DIIS")] = "KDIIS"
 
     if basis is not None:
         orcasimpleinput = " ".join([functional] + [basis] + simple)
@@ -489,6 +494,7 @@ def write_orca_inputs(
     actinide_basis: str = "ma-def-TZVP",
     actinide_ecp: str | None = None,
     non_actinide_basis: str = "def2-TZVPD",
+    diis_option: str = None,
     tight_two_e_int: bool = False,
     error_handle: bool = False,
     error_code: int = 0,
@@ -525,6 +531,7 @@ def write_orca_inputs(
         error_handle=error_handle,
         error_code=error_code,
         tight_two_e_int=tight_two_e_int,
+        diis_option=diis_option,
     )
 
     # print(orcablocks)

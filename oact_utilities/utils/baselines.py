@@ -57,7 +57,7 @@ def process_multiplicity_file(file: str) -> pd.DataFrame:
 
     # iterate through lines_cleaned, first word is molecule, second is zpve, third is multiplicity
 
-    data = {}
+    data: dict[str, list[dict[str, int]]] = {}
     for line in lines:
         # format is name, charge=0, mult=1
         if line.strip() == "":
@@ -68,7 +68,9 @@ def process_multiplicity_file(file: str) -> pd.DataFrame:
         mult_part = parts[2].strip()
         charge = int(charge_part.split("=")[1])
         multiplicity = int(mult_part.split("=")[1])
-        data[molecule] = {"charge": charge, "multiplicity": multiplicity}
+        data.setdefault(molecule, []).append(
+            {"charge": charge, "multiplicity": multiplicity}
+        )
     return data
 
 

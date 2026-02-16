@@ -9,6 +9,8 @@ This module provides utilities to manage large-scale architector job campaigns:
 
 from __future__ import annotations
 
+import random
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -23,10 +25,12 @@ from ..utils.architector import create_workflow_db
 class JobStatus(str, Enum):
     """Status values for jobs in the workflow."""
 
-    READY = "ready"  # Job is queued and ready to run
+    TO_RUN = "to_run"  # Job is ready to be submitted
+    READY = "ready"  # Job is queued and ready to run (legacy, use TO_RUN)
     RUNNING = "running"  # Job has been submitted and is running
     COMPLETED = "completed"  # Job finished successfully
     FAILED = "failed"  # Job failed or crashed
+    TIMEOUT = "timeout"  # Job timed out without completing
 
 
 @dataclass
@@ -81,8 +85,13 @@ class ArchitectorWorkflow:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
-    def _execute_with_retry(self, query: str, params: tuple = (), max_retries: int = 3):
+    def _execute_with_retry(
+        self, query: str, params: tuple = (), max_retries: int = 10
+    ):
         """Execute a query with retry logic for handling database locks.
+
+        Uses exponential backoff with jitter to handle concurrent access
+        during long-running Parsl workflows.
 
         Args:
             query: SQL query string.
@@ -99,7 +108,9 @@ class ArchitectorWorkflow:
                 return cur
             except sqlite3.OperationalError as e:
                 if "locked" in str(e).lower() and attempt < max_retries - 1:
-                    time.sleep(0.1 * (2**attempt))  # Exponential backoff
+                    delay = min(0.5 * (2**attempt), 5.0)
+                    jitter = random.uniform(0, 0.5)
+                    time.sleep(delay + jitter)
                     continue
                 raise
 
@@ -166,6 +177,7 @@ class ArchitectorWorkflow:
         job_id: int,
         new_status: JobStatus,
         error_message: str | None = None,
+        increment_fail_count: bool = False,
     ):
         """Update the status of a single job.
 
@@ -173,13 +185,21 @@ class ArchitectorWorkflow:
             job_id: Database ID of the job.
             new_status: New status value.
             error_message: Optional error message.
+            increment_fail_count: If True, atomically increment fail_count by 1.
         """
+        set_clauses = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+        values: list = [new_status.value]
+
         if error_message is not None:
-            query = "UPDATE structures SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-            self._execute_with_retry(query, (new_status.value, error_message, job_id))
-        else:
-            query = "UPDATE structures SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-            self._execute_with_retry(query, (new_status.value, job_id))
+            set_clauses.append("error_message = ?")
+            values.append(error_message)
+
+        if increment_fail_count:
+            set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+
+        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
+        values.append(job_id)
+        self._execute_with_retry(query, tuple(values))
         self.conn.commit()
 
     def update_job_metrics(
@@ -237,6 +257,46 @@ class ArchitectorWorkflow:
             self._execute_with_retry(query, tuple(values))
             self.conn.commit()
 
+    def update_job_metrics_bulk(self, metrics_list: list[dict]):
+        """Update metrics for multiple jobs in a single transaction.
+
+        Each dict in metrics_list must have a 'job_id' key and may have:
+        job_dir, max_forces, scf_steps, final_energy, error_message,
+        wall_time, n_cores.
+
+        Args:
+            metrics_list: List of dicts with job_id and metric values.
+        """
+        if not metrics_list:
+            return
+
+        cur = self.conn.cursor()
+        for metrics in metrics_list:
+            updates = []
+            values = []
+            job_id = metrics["job_id"]
+
+            for col in (
+                "job_dir",
+                "max_forces",
+                "scf_steps",
+                "final_energy",
+                "error_message",
+                "wall_time",
+                "n_cores",
+            ):
+                if metrics.get(col) is not None:
+                    updates.append(f"{col} = ?")
+                    values.append(metrics[col])
+
+            if updates:
+                updates.append("updated_at = CURRENT_TIMESTAMP")
+                query = f"UPDATE structures SET {', '.join(updates)} WHERE id = ?"
+                values.append(job_id)
+                cur.execute(query, tuple(values))
+
+        self.conn.commit()
+
     def update_status_bulk(
         self,
         job_ids: list[int],
@@ -290,7 +350,9 @@ class ArchitectorWorkflow:
         """
         self.update_status_bulk(job_ids, JobStatus.RUNNING)
 
-    def reset_failed_jobs(self, max_fail_count: int | None = None):
+    def reset_failed_jobs(
+        self, max_fail_count: int | None = None, include_timeout: bool = False
+    ):
         """Reset all failed jobs back to ready status for retry.
 
         Increments the fail_count for each job being reset.
@@ -298,6 +360,49 @@ class ArchitectorWorkflow:
         Args:
             max_fail_count: If specified, only reset jobs with fail_count < max_fail_count.
                 Jobs that have already failed this many times will remain in FAILED status.
+            include_timeout: If True, also reset TIMEOUT jobs along with FAILED jobs.
+        """
+        statuses_to_reset = [JobStatus.FAILED.value]
+        if include_timeout:
+            statuses_to_reset.append(JobStatus.TIMEOUT.value)
+
+        placeholders = ",".join("?" * len(statuses_to_reset))
+
+        if max_fail_count is not None:
+            query = f"""
+                UPDATE structures
+                SET status = ?,
+                    error_message = NULL,
+                    fail_count = COALESCE(fail_count, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status IN ({placeholders}) AND COALESCE(fail_count, 0) < ?
+            """
+            self._execute_with_retry(
+                query,
+                tuple([JobStatus.TO_RUN.value] + statuses_to_reset + [max_fail_count]),
+            )
+        else:
+            query = f"""
+                UPDATE structures
+                SET status = ?,
+                    error_message = NULL,
+                    fail_count = COALESCE(fail_count, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status IN ({placeholders})
+            """
+            self._execute_with_retry(
+                query, tuple([JobStatus.TO_RUN.value] + statuses_to_reset)
+            )
+        self.conn.commit()
+
+    def reset_timeout_jobs(self, max_fail_count: int | None = None):
+        """Reset all timeout jobs back to ready status for retry.
+
+        Increments the fail_count for each job being reset.
+
+        Args:
+            max_fail_count: If specified, only reset jobs with fail_count < max_fail_count.
+                Jobs that have already timed out this many times will remain in TIMEOUT status.
         """
         if max_fail_count is not None:
             query = """
@@ -309,7 +414,7 @@ class ArchitectorWorkflow:
                 WHERE status = ? AND COALESCE(fail_count, 0) < ?
             """
             self._execute_with_retry(
-                query, (JobStatus.READY.value, JobStatus.FAILED.value, max_fail_count)
+                query, (JobStatus.TO_RUN.value, JobStatus.TIMEOUT.value, max_fail_count)
             )
         else:
             query = """
@@ -321,7 +426,7 @@ class ArchitectorWorkflow:
                 WHERE status = ?
             """
             self._execute_with_retry(
-                query, (JobStatus.READY.value, JobStatus.FAILED.value)
+                query, (JobStatus.TO_RUN.value, JobStatus.TIMEOUT.value)
             )
         self.conn.commit()
 
@@ -454,7 +559,11 @@ def update_job_status(
                 # Find the log file for timing extraction
                 log_file = None
                 for pattern in ["*.out", "orca.out", "*.log"]:
-                    matches = list(job_dir.glob(pattern))
+                    matches = [
+                        m
+                        for m in job_dir.glob(pattern)
+                        if not re.match(r"^orca_atom\d+\.out$", m.name)
+                    ]
                     if matches:
                         log_file = str(matches[0])
                         break
@@ -493,6 +602,8 @@ def update_job_status(
 
         if result == 1:
             new_status = JobStatus.COMPLETED
+        elif result == -2:
+            new_status = JobStatus.TIMEOUT
         elif result == -1:
             new_status = JobStatus.FAILED
         else:

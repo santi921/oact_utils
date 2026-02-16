@@ -224,3 +224,312 @@ def test_create_workflow_db_directly(sample_csv, tmp_path):
     assert row[3] == 1  # spin (uhf=0 -> 2S+1 = 1)
 
     conn.close()
+
+
+def test_timeout_status(tmp_path):
+    """Test timeout status handling."""
+    db_path = tmp_path / "test.db"
+
+    # Use new db init
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+
+    # Insert test rows with different statuses
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="O;H;H",
+        natoms=3,
+        geometry="O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0",
+        status="timeout",
+    )
+    _insert_row(
+        conn,
+        orig_index=2,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="failed",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Check timeout jobs
+        timeout = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
+        assert len(timeout) == 1
+        assert timeout[0].orig_index == 1
+
+        # Update to timeout
+        workflow.update_status(1, JobStatus.TIMEOUT)
+        timeout = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
+        assert len(timeout) == 2
+
+
+def test_to_run_status(tmp_path):
+    """Test TO_RUN status handling."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+
+    # Insert test rows with TO_RUN status
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="O;H;H",
+        natoms=3,
+        geometry="O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0",
+        status="ready",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Check TO_RUN jobs
+        to_run = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(to_run) == 1
+
+        # Check that we can get both TO_RUN and READY jobs
+        ready_jobs = workflow.get_jobs_by_status([JobStatus.TO_RUN, JobStatus.READY])
+        assert len(ready_jobs) == 2
+
+
+def test_reset_timeout_jobs(tmp_path):
+    """Test resetting timeout jobs."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+
+    # Insert test rows with timeout status
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="timeout",
+        fail_count=0,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="O;H;H",
+        natoms=3,
+        geometry="O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0",
+        status="timeout",
+        fail_count=2,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Reset timeout jobs
+        workflow.reset_timeout_jobs()
+
+        # Check that all timeout jobs are now TO_RUN
+        timeout = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
+        to_run = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(timeout) == 0
+        assert len(to_run) == 2
+
+        # Check that fail_count was incremented
+        jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert jobs[0].fail_count == 1
+        assert jobs[1].fail_count == 3
+
+
+def test_reset_timeout_jobs_with_limit(tmp_path):
+    """Test resetting timeout jobs with max_fail_count limit."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+
+    # Insert test rows with timeout status and different fail counts
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="timeout",
+        fail_count=1,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="O;H;H",
+        natoms=3,
+        geometry="O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0",
+        status="timeout",
+        fail_count=3,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Reset timeout jobs, but only those with fail_count < 3
+        workflow.reset_timeout_jobs(max_fail_count=3)
+
+        # Check that only the first job was reset
+        timeout = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
+        to_run = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(timeout) == 1  # Job with fail_count=3 stays in timeout
+        assert len(to_run) == 1  # Job with fail_count=1 was reset
+
+
+def test_reset_failed_with_timeout(tmp_path):
+    """Test resetting failed jobs with include_timeout=True."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+
+    # Insert test rows with failed and timeout status
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="failed",
+        fail_count=0,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="O;H;H",
+        natoms=3,
+        geometry="O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0",
+        status="timeout",
+        fail_count=0,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Reset both failed and timeout jobs
+        workflow.reset_failed_jobs(include_timeout=True)
+
+        # Check that both are now TO_RUN
+        failed = workflow.get_jobs_by_status(JobStatus.FAILED)
+        timeout = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
+        to_run = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(failed) == 0
+        assert len(timeout) == 0
+        assert len(to_run) == 2
+
+
+def test_update_status_increment_fail_count(tmp_path):
+    """Test that increment_fail_count atomically increments fail_count with status."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+        fail_count=0,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.update_status(1, JobStatus.FAILED, increment_fail_count=True)
+
+        jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
+        assert len(jobs) == 1
+        assert jobs[0].fail_count == 1
+
+        # Increment again
+        workflow.update_status(1, JobStatus.FAILED, increment_fail_count=True)
+        jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
+        assert jobs[0].fail_count == 2
+
+
+def test_update_status_increment_fail_count_with_error(tmp_path):
+    """Test increment_fail_count works together with error_message."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+        fail_count=1,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.update_status(
+            1,
+            JobStatus.FAILED,
+            error_message="ORCA crashed",
+            increment_fail_count=True,
+        )
+
+        jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
+        assert len(jobs) == 1
+        assert jobs[0].fail_count == 2
+        assert jobs[0].error_message == "ORCA crashed"
+
+
+def test_update_status_default_no_increment(tmp_path):
+    """Test that default update_status does NOT change fail_count."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+        fail_count=3,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.update_status(1, JobStatus.FAILED)
+
+        jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
+        assert len(jobs) == 1
+        assert jobs[0].fail_count == 3  # Unchanged

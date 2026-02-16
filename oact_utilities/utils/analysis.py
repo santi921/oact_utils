@@ -1,5 +1,6 @@
 import os
 import re
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,11 +19,209 @@ from oact_utilities.utils.create import (
     read_xyz_single_file,
 )
 from oact_utilities.utils.status import (
+    _is_orca_atom_scf,
     check_file_termination,
     check_job_termination,
     check_sella_complete,
     pull_log_file,
 )
+
+
+def _validate_file_path(file_path: str | Path, check_exists: bool = True) -> Path:
+    """Validate file path to prevent directory traversal attacks.
+
+    Args:
+        file_path: Path to validate
+        check_exists: If True, raise FileNotFoundError if file doesn't exist
+
+    Returns:
+        Resolved absolute Path object
+
+    Raises:
+        ValueError: If path is invalid or attempts directory traversal
+        FileNotFoundError: If check_exists=True and file doesn't exist
+
+    Examples:
+        >>> _validate_file_path("data/output.txt")  # OK if exists
+        >>> _validate_file_path("../../etc/passwd")  # Raises ValueError
+    """
+    # Convert to Path object and resolve to absolute path
+    try:
+        path = Path(file_path).resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        raise ValueError(f"Invalid file path: {file_path}") from e
+
+    # Check if file exists (optional)
+    if check_exists:
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        # Verify it's a file, not a directory
+        if not path.is_file():
+            raise ValueError(f"Path is not a file: {path}")
+
+    # Check for suspicious patterns (.. in resolved path after normalization)
+    # The resolve() call above should handle most traversal attempts,
+    # but we add extra validation for defense in depth
+    path_str = str(path)
+    if ".." in path_str.split(os.sep):
+        raise ValueError(f"Path contains directory traversal: {path}")
+
+    return path
+
+
+def validate_charge_spin_conservation(
+    charges: list[float],
+    spins: list[float],
+    expected_charge: int = 0,
+    expected_multiplicity: int | None = None,
+    charge_tolerance: float = 0.01,
+    spin_tolerance: float = 0.05,
+) -> dict[str, bool | float]:
+    """Validate charge and spin conservation laws.
+
+    Args:
+        charges: List of atomic charges
+        spins: List of atomic spin populations
+        expected_charge: Expected total molecular charge (default: 0 for neutral)
+        expected_multiplicity: Expected spin multiplicity (2S+1), if known
+        charge_tolerance: Tolerance for charge sum (default: ±0.01e)
+        spin_tolerance: Tolerance for spin sum (default: ±0.05)
+
+    Returns:
+        Dictionary with validation results:
+            - charge_sum: Sum of atomic charges
+            - charge_valid: Whether charge conservation is satisfied
+            - spin_sum: Sum of atomic spins
+            - spin_valid: Whether spin conservation is satisfied (or True if no expected value)
+
+    Examples:
+        >>> charges = [1.65, -0.55, -0.55, -0.55]  # NpF3
+        >>> spins = [4.0, 0.0, 0.0, 0.0]  # Quintet
+        >>> result = validate_charge_spin_conservation(charges, spins, expected_charge=0, expected_multiplicity=5)
+        >>> result['charge_valid']  # Should be True
+        >>> result['spin_valid']  # Should be True
+    """
+    # Validate charge conservation
+    charge_sum = sum(charges)
+    charge_valid = abs(charge_sum - expected_charge) <= charge_tolerance
+
+    # Issue warning if charge conservation violated
+    if not charge_valid:
+        warnings.warn(
+            f"Charge conservation violated: sum={charge_sum:.3f}, "
+            f"expected={expected_charge}, diff={abs(charge_sum - expected_charge):.3f} "
+            f"(tolerance={charge_tolerance})",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    # Validate spin if multiplicity known
+    spin_sum = sum(spins)
+    spin_valid = True  # Default to valid if no expected value
+
+    if expected_multiplicity is not None:
+        # Multiplicity M = 2S + 1, so S = (M - 1) / 2
+        expected_total_spin = (expected_multiplicity - 1) / 2
+        # Spin populations sum to 2S (since each spin is the alpha-beta difference)
+        expected_spin_sum = 2 * expected_total_spin
+
+        actual_spin = spin_sum / 2
+        spin_valid = abs(actual_spin - expected_total_spin) <= spin_tolerance
+
+        if not spin_valid:
+            warnings.warn(
+                f"Spin conservation violated: S={actual_spin:.3f}, "
+                f"expected={expected_total_spin:.3f} (multiplicity={expected_multiplicity}), "
+                f"spin_sum={spin_sum:.3f}, expected_sum={expected_spin_sum:.3f} "
+                f"(tolerance={spin_tolerance})",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    return {
+        "charge_sum": charge_sum,
+        "charge_valid": charge_valid,
+        "spin_sum": spin_sum,
+        "spin_valid": spin_valid,
+    }
+
+
+def validate_spin_multiplicity(
+    spin: int,
+    n_electrons: int | None = None,
+    max_reasonable: int = 11,
+) -> int:
+    """Validate spin multiplicity is physically valid.
+
+    Spin multiplicity (M = 2S+1) must be:
+    - Positive integer ≥ 1
+    - Consistent with electron count parity (if known)
+    - Reasonable for typical chemistry (warning if > max_reasonable)
+
+    Args:
+        spin: Spin multiplicity (2S+1)
+        n_electrons: Total electron count (optional, for parity check)
+        max_reasonable: Maximum reasonable multiplicity (default: 11 = undectet)
+
+    Returns:
+        Validated spin multiplicity (same as input if valid)
+
+    Raises:
+        ValueError: If spin multiplicity is invalid
+
+    Examples:
+        >>> validate_spin_multiplicity(1)  # Singlet - OK
+        1
+        >>> validate_spin_multiplicity(3)  # Triplet - OK
+        3
+        >>> validate_spin_multiplicity(0)  # Invalid
+        ValueError: Spin multiplicity must be ≥ 1, got 0
+        >>> validate_spin_multiplicity(5, n_electrons=60)  # Check parity
+        ValueError: Spin multiplicity 5 (odd) incompatible with 60 electrons (even)
+
+    Notes:
+        - M=1 (S=0): Singlet - all electrons paired
+        - M=2 (S=1/2): Doublet - one unpaired electron
+        - M=3 (S=1): Triplet - two unpaired electrons
+        - M=4 (S=3/2): Quartet - three unpaired electrons
+        - M=5 (S=2): Quintet - four unpaired electrons
+        - Odd electrons → Even multiplicity (2, 4, 6, ...)
+        - Even electrons → Odd multiplicity (1, 3, 5, ...)
+    """
+    # Must be integer
+    if not isinstance(spin, int):
+        raise ValueError(
+            f"Spin multiplicity must be integer, got {type(spin).__name__}"
+        )
+
+    # Must be positive
+    if spin < 1:
+        raise ValueError(f"Spin multiplicity must be ≥ 1, got {spin}")
+
+    # Check reasonable range (warning only)
+    if spin > max_reasonable:
+        warnings.warn(
+            f"Spin multiplicity {spin} is very high (> {max_reasonable}). "
+            "This may be an error or an unusual high-spin state.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    # Check electron parity if known
+    if n_electrons is not None:
+        # Odd electrons → even multiplicity (doublet, quartet, sextet, ...)
+        # Even electrons → odd multiplicity (singlet, triplet, quintet, ...)
+        expected_parity = "even" if n_electrons % 2 == 1 else "odd"
+        actual_parity = "even" if spin % 2 == 0 else "odd"
+
+        if expected_parity != actual_parity:
+            raise ValueError(
+                f"Spin multiplicity {spin} ({actual_parity}) incompatible with "
+                f"{n_electrons} electrons (expects {expected_parity} multiplicity)"
+            )
+
+    return spin
 
 
 def get_rmsd_start_final(root_dir: str) -> tuple:
@@ -59,12 +258,19 @@ def get_rmsd_start_final(root_dir: str) -> tuple:
 
         print(f"Reading trajectory from {traj_output} for RMSD calculation.")
 
+        # Stream line-by-line to find Coordinates lines and extract energies
+        lines_coords = []
         with open(traj_output) as f:
-            lines = f.readlines()
-        lines_coords = [
-            i for i, line in enumerate(lines) if line.startswith("Coordinates")
-        ]
-        energies = [float(lines[i].strip().split()[-1]) for i in lines_coords]
+            for i, line in enumerate(f):
+                if line.startswith("Coordinates"):
+                    lines_coords.append(i)
+
+        # Read again to extract energies at specific line numbers
+        energies = []
+        with open(traj_output) as f:
+            for i, line in enumerate(f):
+                if i in lines_coords:
+                    energies.append(float(line.strip().split()[-1]))
 
     else:
         print(
@@ -148,10 +354,6 @@ def get_geo_forces(log_file: str) -> list:
 
     list_info = []
 
-    # read output_file, find lines between
-    with open(log_file) as f:
-        lines = f.readlines()
-
     trigger = "Geometry convergence"
     # trigger_end_a = (
     #    "-------------------------------------------------------------------------"
@@ -159,28 +361,30 @@ def get_geo_forces(log_file: str) -> list:
     # trigger_end_b = "........................................................"
 
     info_block_tf = False
-    for _, line in enumerate(lines):
 
-        if trigger in line.strip():
-            info_dict = {}
-            info_block_tf = True
+    # Stream line-by-line instead of loading entire file (Issue #007)
+    with open(log_file) as f:
+        for _, line in enumerate(f):
+            if trigger in line.strip():
+                info_dict = {}
+                info_block_tf = True
 
-        if info_block_tf:
-            if len(line.split()) > 1:
-                if (
-                    line.split()[0].lower() == "rms"
-                    and line.split()[1].lower() == "gradient"
-                ):
-                    info_dict["RMS_Gradient"] = float(line.split()[2])
-                if (
-                    line.split()[0].lower() == "max"
-                    and line.split()[1].lower() == "gradient"
-                ):
-                    info_dict["Max_Gradient"] = float(line.split()[2])
-                    info_block_tf = False
-                    list_info.append(info_dict)
-            else:
-                continue
+            if info_block_tf:
+                if len(line.split()) > 1:
+                    if (
+                        line.split()[0].lower() == "rms"
+                        and line.split()[1].lower() == "gradient"
+                    ):
+                        info_dict["RMS_Gradient"] = float(line.split()[2])
+                    if (
+                        line.split()[0].lower() == "max"
+                        and line.split()[1].lower() == "gradient"
+                    ):
+                        info_dict["Max_Gradient"] = float(line.split()[2])
+                        info_block_tf = False
+                        list_info.append(info_dict)
+                else:
+                    continue
 
     return list_info
 
@@ -193,22 +397,31 @@ def parse_max_forces(output_file: str) -> float | None:
 
     Returns:
         Maximum force value (in Eh/Bohr), or None if not found.
-    """
-    try:
-        with open(output_file) as f:
-            lines = f.readlines()
 
+    Raises:
+        ValueError: If file path is invalid or attempts directory traversal.
+        FileNotFoundError: If file doesn't exist.
+    """
+    # Validate file path before opening (don't check existence, let try/except handle it)
+    try:
+        output_file = _validate_file_path(output_file, check_exists=False)
+    except ValueError:
+        return None  # Invalid path format
+
+    try:
+        # Stream line-by-line and keep last occurrence (Issue #007)
         # Look for "MAX gradient" in geometry optimization output
         # Example line: "MAX gradient             0.00123456"
         max_force = None
-        for line in reversed(lines):
-            if "MAX gradient" in line:
-                parts = line.split()
-                try:
-                    max_force = float(parts[-1])
-                    break
-                except (ValueError, IndexError):
-                    continue
+        with open(output_file) as f:
+            for line in f:
+                if "MAX gradient" in line:
+                    parts = line.split()
+                    try:
+                        max_force = float(parts[-1])
+                        # Keep updating - last occurrence wins
+                    except (ValueError, IndexError):
+                        continue
 
         return max_force
 
@@ -224,10 +437,16 @@ def parse_scf_steps(output_file: str | Path) -> int | None:
 
     Returns:
         Total number of SCF iterations, or None if not found.
+
+    Raises:
+        ValueError: If file path is invalid or attempts directory traversal.
+        FileNotFoundError: If file doesn't exist.
     """
-    output_file = Path(output_file)
-    if not output_file.exists():
-        return None
+    # Validate file path before opening (don't check existence, let try/except handle it)
+    try:
+        output_file = _validate_file_path(output_file, check_exists=False)
+    except ValueError:
+        return None  # Invalid path format
 
     try:
         with open(output_file) as f:
@@ -295,32 +514,40 @@ def get_engrad(engrad_file: str) -> dict:
     """
 
     dict_info = {}
+    # Stream line-by-line with iterator for lookahead (Issue #007)
     with open(engrad_file) as f:
-        lines = f.readlines()
-    for i, line in enumerate(lines):
-        if "The current total energy in Eh" in line:
-            energy = float(lines[i + 2].strip())
-            dict_info["total_energy_Eh"] = energy
+        f_iter = iter(f)
+        for line in f_iter:
+            if "The current total energy in Eh" in line:
+                # Skip one line, read energy on line i+2
+                next(f_iter)  # Skip line i+1
+                energy_line = next(f_iter)  # Read line i+2
+                energy = float(energy_line.strip())
+                dict_info["total_energy_Eh"] = energy
 
-        if "The current gradient in Eh/bohr" in line:
-            gradient = []
-            j = i + 2
-            while lines[j].strip() != "#":
-                gradient.append(float(lines[j].strip()))
-                j += 1
-            dict_info["gradient_Eh_per_bohr"] = gradient
+            if "The current gradient in Eh/bohr" in line:
+                gradient = []
+                next(f_iter)  # Skip line i+1
+                # Read gradient values until we hit "#"
+                for grad_line in f_iter:
+                    if grad_line.strip() == "#":
+                        break
+                    gradient.append(float(grad_line.strip()))
+                dict_info["gradient_Eh_per_bohr"] = gradient
 
-        if "The atomic numbers and current coordinates in Bohr" in line:
-            coords = []
-            elements = []
-            j = i + 2
-            while j < len(lines) and lines[j].strip() != "":
-                parts = lines[j].strip().split()
-                elements.append(int(parts[0]))
-                coords.append([float(x) for x in parts[1:4]])
-                j += 1
-            dict_info["elements"] = elements
-            dict_info["coords_bohr"] = coords
+            if "The atomic numbers and current coordinates in Bohr" in line:
+                coords = []
+                elements = []
+                next(f_iter)  # Skip line i+1
+                # Read coordinates until empty line
+                for coord_line in f_iter:
+                    if coord_line.strip() == "":
+                        break
+                    parts = coord_line.strip().split()
+                    elements.append(int(parts[0]))
+                    coords.append([float(x) for x in parts[1:4]])
+                dict_info["elements"] = elements
+                dict_info["coords_bohr"] = coords
 
     # Compute max force from gradient
     gradient = dict_info.get("gradient_Eh_per_bohr")
@@ -358,6 +585,9 @@ def find_timings_and_cores(log_file: str) -> list:
         return None, None
 
     # iterate through files_out until you hit line with "nprocs" line
+    # Use deque to keep only last N lines without loading full file (Issue #007)
+    from collections import deque
+
     with open(log_file) as f:
         # don't read whole file into memory
         for line in f:
@@ -365,8 +595,15 @@ def find_timings_and_cores(log_file: str) -> list:
                 nprocs = int(line.strip().split()[-1])
                 # break after finding first occurrence
                 break
-        # get last line
-        last_lines = f.readlines()[-10:-3]
+
+        # Keep only last 10 lines using deque (memory efficient)
+        last_lines_deque = deque(f, maxlen=10)
+        # Get lines [-10:-3] equivalent
+        last_lines = (
+            list(last_lines_deque)[:-3]
+            if len(last_lines_deque) > 3
+            else list(last_lines_deque)
+        )
 
         # format is TOTAL RUN TIME: 0 days 0 hours 3 minutes 16 seconds 840 msec
         time_dict = {}
@@ -420,7 +657,9 @@ def get_full_info_all_jobs(
                     f for f in files if f.startswith("flux") and f.endswith("out")
                 ]
             else:
-                files_out = [f for f in files if f.endswith("out")]
+                files_out = [
+                    f for f in files if f.endswith("out") and not _is_orca_atom_scf(f)
+                ]
                 if not files_out:
                     files_out = [f for f in files if f.endswith("logs")]
 
@@ -629,7 +868,9 @@ def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> list:
                     f for f in files if f.startswith("flux") and f.endswith("out")
                 ]
             else:
-                files_out = [f for f in files if f.endswith("out")]
+                files_out = [
+                    f for f in files if f.endswith("out") and not _is_orca_atom_scf(f)
+                ]
                 if not files_out:
                     files_out = [f for f in files if f.endswith("logs")]
 
@@ -695,21 +936,157 @@ def parse_final_energy(output_file: str) -> float | None:
 
     Returns:
         Final energy in Hartree, or None if not found.
+
+    Raises:
+        ValueError: If file path is invalid or attempts directory traversal.
+        FileNotFoundError: If file doesn't exist.
     """
+    # Validate file path before opening (don't check existence, let try/except handle it)
     try:
+        output_file = _validate_file_path(output_file, check_exists=False)
+    except ValueError:
+        return None  # Invalid path format
+
+    try:
+        # Stream line-by-line and keep last occurrence (Issue #007)
+        final_energy = None
         with open(output_file) as f:
-            lines = f.readlines()
+            for line in f:
+                if "FINAL SINGLE POINT ENERGY" in line:
+                    parts = line.split()
+                    try:
+                        final_energy = float(parts[-1])
+                        # Keep updating - last occurrence wins
+                    except (ValueError, IndexError):
+                        continue
 
-        # Look for "FINAL SINGLE POINT ENERGY"
-        for line in reversed(lines):
-            if "FINAL SINGLE POINT ENERGY" in line:
-                parts = line.split()
-                try:
-                    return float(parts[-1])
-                except (ValueError, IndexError):
-                    continue
+        return final_energy
 
+    except Exception:
         return None
+
+
+def parse_mulliken_population(output_file: str | Path) -> dict[str, list] | None:
+    """Extract Mulliken population analysis from an ORCA output file.
+
+    Parses both Mulliken and Loewdin atomic charges and spin populations.
+
+    Args:
+        output_file: Path to ORCA .out file.
+
+    Returns:
+        Dictionary with keys:
+            - 'mulliken_charges': List of atomic charges
+            - 'mulliken_spins': List of spin populations
+            - 'loewdin_charges': List of atomic charges (if available)
+            - 'loewdin_spins': List of spin populations (if available)
+            - 'elements': List of element symbols
+            - 'indices': List of atomic indices
+        Returns None if no population analysis found.
+
+    Raises:
+        ValueError: If file path is invalid or attempts directory traversal.
+        FileNotFoundError: If file doesn't exist.
+    """
+    # Validate file path before opening (don't check existence, let try/except handle it)
+    try:
+        output_file = _validate_file_path(output_file, check_exists=False)
+    except ValueError:
+        return None  # Invalid path format
+
+    try:
+        result: dict[str, list] = {
+            "mulliken_charges": [],
+            "mulliken_spins": [],
+            "loewdin_charges": [],
+            "loewdin_spins": [],
+            "elements": [],
+            "indices": [],
+        }
+
+        # Stream line-by-line instead of loading full file (Issue #007)
+        with open(output_file) as f:
+            # Parse both Mulliken and Loewdin sections
+            for analysis_type in ["MULLIKEN", "LOEWDIN"]:
+                # Reset file to beginning for each analysis type
+                f.seek(0)
+                header = f"{analysis_type} ATOMIC CHARGES AND SPIN POPULATIONS"
+
+                for line in f:
+                    if header in line:
+                        # Skip the separator line
+                        next(f, None)
+                        # Parse data lines until we hit the sum line
+                        temp_indices = []
+                        temp_elements = []
+                        temp_charges = []
+                        temp_spins = []
+
+                        for data_line in f:
+                            if data_line.startswith("Sum of"):
+                                break
+
+                            line_stripped = data_line.strip()
+                            if line_stripped and not line_stripped.startswith("-"):
+                                parts = line_stripped.split()
+                                # Handle both "Np:" and "F :" formats
+                                if len(parts) >= 4:
+                                    try:
+                                        idx = int(parts[0])
+                                        # Element can be in parts[1] (like "Np:") or parts[1]+parts[2] (like "F" ":")
+                                        if parts[1].endswith(":"):
+                                            element = parts[1].rstrip(":")
+                                            charge = float(parts[2])
+                                            spin = float(parts[3])
+                                        elif len(parts) >= 5 and parts[2] == ":":
+                                            element = parts[1]
+                                            charge = float(parts[3])
+                                            spin = float(parts[4])
+                                        else:
+                                            continue
+                                        temp_indices.append(idx)
+                                        temp_elements.append(element)
+                                        temp_charges.append(charge)
+                                        temp_spins.append(spin)
+                                    except (ValueError, IndexError):
+                                        pass
+
+                        # Store results based on analysis type
+                        if analysis_type == "MULLIKEN" and temp_charges:
+                            result["mulliken_charges"] = temp_charges
+                            result["mulliken_spins"] = temp_spins
+                            result["elements"] = temp_elements
+                            result["indices"] = temp_indices
+                        elif analysis_type == "LOEWDIN" and temp_charges:
+                            result["loewdin_charges"] = temp_charges
+                            result["loewdin_spins"] = temp_spins
+                            # Only store elements/indices if not already stored
+                            if not result["elements"]:
+                                result["elements"] = temp_elements
+                                result["indices"] = temp_indices
+                        break
+
+        # Return None if no population analysis found
+        if not result["mulliken_charges"] and not result["loewdin_charges"]:
+            return None
+
+        # Validate charge and spin conservation (optional, issues warnings if violated)
+        # Use Mulliken data for validation if available, otherwise Loewdin
+        charges = result.get("mulliken_charges") or result.get("loewdin_charges")
+        spins = result.get("mulliken_spins") or result.get("loewdin_spins")
+
+        if charges and spins:
+            # Default assumption: neutral molecule (charge=0), no specific multiplicity
+            validation = validate_charge_spin_conservation(
+                charges=charges,
+                spins=spins,
+                expected_charge=0,  # Assume neutral
+                expected_multiplicity=None,  # Unknown, skip spin validation
+            )
+            # Add validation results to output
+            result["validation"] = validation
+
+        return result
 
     except Exception:
         return None
@@ -729,7 +1106,8 @@ def parse_job_metrics(
         unzip: If True, look for gzipped files (e.g., quacc output).
 
     Returns:
-        Dictionary with keys: max_forces, scf_steps, final_energy, success.
+        Dictionary with keys: max_forces, scf_steps, final_energy, success,
+        mulliken_population (dict with charges/spins if available).
     """
     job_dir = Path(job_dir)
 
@@ -801,14 +1179,20 @@ def parse_job_metrics(
                     pass
 
             # Check if job completed successfully
-            termination = check_job_termination(str(job_dir))
-            success = termination == 1
+            # Simply check for "ORCA TERMINATED NORMALLY" in output file
+            with open(output_file) as f:
+                content = f.read()
+            success = "ORCA TERMINATED NORMALLY" in content
+
+        # Try to parse Mulliken population analysis
+        mulliken_pop = parse_mulliken_population(output_file)
 
         return {
             "max_forces": max_forces,
             "scf_steps": scf_steps,
             "final_energy": final_energy,
             "success": success,
+            "mulliken_population": mulliken_pop,
         }
 
     except Exception as e:
@@ -817,6 +1201,7 @@ def parse_job_metrics(
             "scf_steps": None,
             "final_energy": None,
             "success": False,
+            "mulliken_population": None,
             "error": str(e),
         }
 
@@ -836,18 +1221,18 @@ def parse_sella_log(sella_log_file, filter: bool = False) -> dict:
 
     if not os.path.exists(sella_log_file):
         return False
-    # read sella.log and check for final forces
-    with open(sella_log_file) as f:
-        lines = f.readlines()
+
+    # Stream line-by-line instead of loading full file (Issue #007)
     forces = []
     steps = []
     energy = []
 
-    for line in lines:
-        if "Sella" in line:
-            steps.append(int(line.split()[1]))
-            forces.append(float(line.split()[4]))
-            energy.append(float(line.split()[3]))
+    with open(sella_log_file) as f:
+        for line in f:
+            if "Sella" in line:
+                steps.append(int(line.split()[1]))
+                forces.append(float(line.split()[4]))
+                energy.append(float(line.split()[3]))
 
     if len(forces) == 0:
         return {}

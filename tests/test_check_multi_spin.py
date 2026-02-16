@@ -2,6 +2,8 @@ import os
 import sqlite3
 import time
 
+import pytest
+
 from oact_utilities.scripts.multi_spin import check_multi_spin as cms
 
 
@@ -188,3 +190,79 @@ def test_running_age_threshold(tmp_path, monkeypatch):
     status = c.fetchone()[0]
     assert status == 0
     conn.close()
+
+
+def test_validate_charge_spin_list():
+    """Test validation of charge/spin lists (Issue #009)."""
+    # Valid list of floats
+    result = cms.validate_charge_spin_list([1.5, -0.5, 0.0], "test_field")
+    assert result == [1.5, -0.5, 0.0]
+
+    # Valid with integers (should convert to float)
+    result = cms.validate_charge_spin_list([1, 2, 3], "test_field")
+    assert result == [1.0, 2.0, 3.0]
+
+    # None returns empty list
+    result = cms.validate_charge_spin_list(None, "test_field")
+    assert result == []
+
+    # Length validation
+    result = cms.validate_charge_spin_list([1.0, 2.0], "test_field", expected_length=2)
+    assert len(result) == 2
+
+    # Length mismatch should raise
+    try:
+        cms.validate_charge_spin_list([1.0, 2.0], "test_field", expected_length=3)
+        pytest.fail("Should have raised ValueError")
+    except ValueError as e:
+        assert "length mismatch" in str(e)
+
+    # Non-list should raise
+    try:
+        cms.validate_charge_spin_list("not a list", "test_field")
+        pytest.fail("Should have raised ValueError")
+    except ValueError as e:
+        assert "must be a list" in str(e)
+
+    # Non-numeric element should raise
+    try:
+        cms.validate_charge_spin_list([1.0, "invalid", 3.0], "test_field")
+        pytest.fail("Should have raised ValueError")
+    except ValueError as e:
+        assert "must be numeric" in str(e)
+
+
+def test_safe_load_json_field():
+    """Test safe JSON loading with validation (Issue #009)."""
+    # Valid JSON list
+    result = cms.safe_load_json_field("[1.5, -0.5, 0.0]", "test_field")
+    assert result == [1.5, -0.5, 0.0]
+
+    # None returns empty list
+    result = cms.safe_load_json_field(None, "test_field")
+    assert result == []
+
+    # Empty string returns empty list
+    result = cms.safe_load_json_field("", "test_field")
+    assert result == []
+
+    # Invalid JSON should raise
+    try:
+        cms.safe_load_json_field("invalid json", "test_field")
+        pytest.fail("Should have raised ValueError")
+    except ValueError as e:
+        assert "Invalid JSON" in str(e)
+
+    # JSON with wrong type should raise
+    try:
+        cms.safe_load_json_field('{"key": "value"}', "test_field")
+        pytest.fail("Should have raised ValueError")
+    except ValueError as e:
+        assert "must be a list" in str(e)
+
+    # JSON with non-numeric elements should raise
+    try:
+        cms.safe_load_json_field('[1.0, "invalid", 3.0]', "test_field")
+        pytest.fail("Should have raised ValueError")
+    except ValueError as e:
+        assert "must be numeric" in str(e)

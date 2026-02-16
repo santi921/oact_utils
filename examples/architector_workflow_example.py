@@ -95,10 +95,7 @@ def monitor_workflow():
     python -m oact_utilities.workflows.dashboard architector_workflow.db
 
     # Update statuses by scanning job directories
-    python -m oact_utilities.workflows.dashboard \\
-        architector_workflow.db \\
-        --update /path/to/jobs \\
-        --verbose
+    python -m oact_utilities.workflows.dashboard architector_workflow.db --update ./jobs --verbose
 
     # Show failed jobs
     python -m oact_utilities.workflows.dashboard \\
@@ -107,9 +104,7 @@ def monitor_workflow():
         --limit 50
 
     # Show computational metrics (forces, SCF steps)
-    python -m oact_utilities.workflows.dashboard \\
-        architector_workflow.db \\
-        --show-metrics
+    python -m oact_utilities.workflows.dashboard architector_workflow.db --show-metrics
 
     # Reset failed jobs to retry
     python -m oact_utilities.workflows.dashboard \\
@@ -224,10 +219,7 @@ def typical_hpc_workflow():
     3. On HPC: Monitor progress (in a cron job or periodically)
        ---------------------------------------------------------
        # Update statuses and show dashboard
-       python -m oact_utilities.workflows.dashboard \\
-           architector_workflow.db \\
-           --update jobs/ \\
-           --show-metrics
+       python -m oact_utilities.workflows.dashboard architector_workflow.db --update jobs/ --show-metrics
 
     4. On HPC: Submit more batches as jobs complete
        ----------------------------------------------
