@@ -1,5 +1,6 @@
 import os
 import re
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,83 @@ def _validate_file_path(file_path: str | Path, check_exists: bool = True) -> Pat
         raise ValueError(f"Path contains directory traversal: {path}")
 
     return path
+
+
+def validate_charge_spin_conservation(
+    charges: list[float],
+    spins: list[float],
+    expected_charge: int = 0,
+    expected_multiplicity: int | None = None,
+    charge_tolerance: float = 0.01,
+    spin_tolerance: float = 0.05,
+) -> dict[str, bool | float]:
+    """Validate charge and spin conservation laws.
+
+    Args:
+        charges: List of atomic charges
+        spins: List of atomic spin populations
+        expected_charge: Expected total molecular charge (default: 0 for neutral)
+        expected_multiplicity: Expected spin multiplicity (2S+1), if known
+        charge_tolerance: Tolerance for charge sum (default: ±0.01e)
+        spin_tolerance: Tolerance for spin sum (default: ±0.05)
+
+    Returns:
+        Dictionary with validation results:
+            - charge_sum: Sum of atomic charges
+            - charge_valid: Whether charge conservation is satisfied
+            - spin_sum: Sum of atomic spins
+            - spin_valid: Whether spin conservation is satisfied (or True if no expected value)
+
+    Examples:
+        >>> charges = [1.65, -0.55, -0.55, -0.55]  # NpF3
+        >>> spins = [4.0, 0.0, 0.0, 0.0]  # Quintet
+        >>> result = validate_charge_spin_conservation(charges, spins, expected_charge=0, expected_multiplicity=5)
+        >>> result['charge_valid']  # Should be True
+        >>> result['spin_valid']  # Should be True
+    """
+    # Validate charge conservation
+    charge_sum = sum(charges)
+    charge_valid = abs(charge_sum - expected_charge) <= charge_tolerance
+
+    # Issue warning if charge conservation violated
+    if not charge_valid:
+        warnings.warn(
+            f"Charge conservation violated: sum={charge_sum:.3f}, "
+            f"expected={expected_charge}, diff={abs(charge_sum - expected_charge):.3f} "
+            f"(tolerance={charge_tolerance})",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    # Validate spin if multiplicity known
+    spin_sum = sum(spins)
+    spin_valid = True  # Default to valid if no expected value
+
+    if expected_multiplicity is not None:
+        # Multiplicity M = 2S + 1, so S = (M - 1) / 2
+        expected_total_spin = (expected_multiplicity - 1) / 2
+        # Spin populations sum to 2S (since each spin is the alpha-beta difference)
+        expected_spin_sum = 2 * expected_total_spin
+
+        actual_spin = spin_sum / 2
+        spin_valid = abs(actual_spin - expected_total_spin) <= spin_tolerance
+
+        if not spin_valid:
+            warnings.warn(
+                f"Spin conservation violated: S={actual_spin:.3f}, "
+                f"expected={expected_total_spin:.3f} (multiplicity={expected_multiplicity}), "
+                f"spin_sum={spin_sum:.3f}, expected_sum={expected_spin_sum:.3f} "
+                f"(tolerance={spin_tolerance})",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    return {
+        "charge_sum": charge_sum,
+        "charge_valid": charge_valid,
+        "spin_sum": spin_sum,
+        "spin_valid": spin_valid,
+    }
 
 
 def get_rmsd_start_final(root_dir: str) -> tuple:
@@ -891,6 +969,22 @@ def parse_mulliken_population(output_file: str | Path) -> dict[str, list] | None
         # Return None if no population analysis found
         if not result["mulliken_charges"] and not result["loewdin_charges"]:
             return None
+
+        # Validate charge and spin conservation (optional, issues warnings if violated)
+        # Use Mulliken data for validation if available, otherwise Loewdin
+        charges = result.get("mulliken_charges") or result.get("loewdin_charges")
+        spins = result.get("mulliken_spins") or result.get("loewdin_spins")
+
+        if charges and spins:
+            # Default assumption: neutral molecule (charge=0), no specific multiplicity
+            validation = validate_charge_spin_conservation(
+                charges=charges,
+                spins=spins,
+                expected_charge=0,  # Assume neutral
+                expected_multiplicity=None,  # Unknown, skip spin validation
+            )
+            # Add validation results to output
+            result["validation"] = validation
 
         return result
 
