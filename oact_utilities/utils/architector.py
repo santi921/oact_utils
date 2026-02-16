@@ -15,6 +15,77 @@ from pathlib import Path
 import pandas as pd
 from ase import Atoms
 
+# Allowed SQLite column types for extra_columns validation
+ALLOWED_COLUMN_TYPES = {
+    "TEXT",
+    "INTEGER",
+    "REAL",
+    "BLOB",
+    "NUMERIC",
+    "TEXT NOT NULL",
+    "INTEGER NOT NULL",
+    "REAL NOT NULL",
+    "INTEGER PRIMARY KEY",
+    "TEXT UNIQUE",
+}
+
+
+def validate_extra_columns(extra_columns: dict[str, str] | None) -> dict[str, str]:
+    """Validate extra_columns against whitelist to prevent SQL injection.
+
+    Args:
+        extra_columns: Dictionary of {column_name: column_type}
+
+    Returns:
+        Validated dictionary with uppercase column types
+
+    Raises:
+        ValueError: If any column name or type is invalid
+
+    Examples:
+        >>> validate_extra_columns({"metal": "TEXT", "count": "INTEGER"})
+        {'metal': 'TEXT', 'count': 'INTEGER'}
+        >>> validate_extra_columns({"bad'; DROP TABLE": "TEXT"})
+        ValueError: Invalid column name...
+    """
+    if extra_columns is None:
+        return {}
+
+    validated = {}
+
+    for col_name, col_type in extra_columns.items():
+        # Validate column name: alphanumeric and underscore only
+        if not col_name.replace("_", "").isalnum():
+            raise ValueError(
+                f"Invalid column name: '{col_name}'. "
+                "Must contain only alphanumeric characters and underscores."
+            )
+
+        # Check for SQL keywords as column names
+        if col_name.upper() in (
+            "SELECT",
+            "DROP",
+            "INSERT",
+            "DELETE",
+            "UPDATE",
+            "TABLE",
+        ):
+            raise ValueError(
+                f"Column name '{col_name}' is a reserved SQL keyword and cannot be used"
+            )
+
+        # Validate column type against whitelist
+        col_type_upper = col_type.upper()
+        if col_type_upper not in ALLOWED_COLUMN_TYPES:
+            raise ValueError(
+                f"Invalid column type: '{col_type}'. "
+                f"Allowed types: {', '.join(sorted(ALLOWED_COLUMN_TYPES))}"
+            )
+
+        validated[col_name] = col_type_upper
+
+    return validated
+
 
 def chunk_architector_to_lmdb(
     csv_path: str | Path,
@@ -179,8 +250,15 @@ def _init_db(
 
     Returns:
         SQLite connection object.
+
+    Raises:
+        ValueError: If extra_columns contains invalid column names or types.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Validate extra_columns before using them in SQL
+    extra_columns = validate_extra_columns(extra_columns)
+
     conn = sqlite3.connect(str(db_path), timeout=timeout)
 
     # Enable WAL mode for better concurrent access
