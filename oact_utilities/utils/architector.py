@@ -15,6 +15,8 @@ from pathlib import Path
 import pandas as pd
 from ase import Atoms
 
+from oact_utilities.utils.analysis import validate_spin_multiplicity
+
 # Allowed SQLite column types for extra_columns validation
 ALLOWED_COLUMN_TYPES = {
     "TEXT",
@@ -568,6 +570,16 @@ def create_workflow_db(
                         # Convert unpaired electrons (uhf) to spin multiplicity (2S+1)
                         # uhf=0 -> singlet (spin=1), uhf=2 -> triplet (spin=3), etc.
                         spin = int(spin_val) + 1
+
+                        # Validate spin multiplicity (Issue #014)
+                        try:
+                            spin = validate_spin_multiplicity(spin, n_electrons=None)
+                        except ValueError as e:
+                            if debug:
+                                print(
+                                    f"  Skipping row {idx}: Invalid spin multiplicity: {e}"
+                                )
+                            continue  # Skip this row
 
                 # Extract extra column values
                 extra_values = None

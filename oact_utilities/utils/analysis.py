@@ -147,6 +147,83 @@ def validate_charge_spin_conservation(
     }
 
 
+def validate_spin_multiplicity(
+    spin: int,
+    n_electrons: int | None = None,
+    max_reasonable: int = 11,
+) -> int:
+    """Validate spin multiplicity is physically valid.
+
+    Spin multiplicity (M = 2S+1) must be:
+    - Positive integer ≥ 1
+    - Consistent with electron count parity (if known)
+    - Reasonable for typical chemistry (warning if > max_reasonable)
+
+    Args:
+        spin: Spin multiplicity (2S+1)
+        n_electrons: Total electron count (optional, for parity check)
+        max_reasonable: Maximum reasonable multiplicity (default: 11 = undectet)
+
+    Returns:
+        Validated spin multiplicity (same as input if valid)
+
+    Raises:
+        ValueError: If spin multiplicity is invalid
+
+    Examples:
+        >>> validate_spin_multiplicity(1)  # Singlet - OK
+        1
+        >>> validate_spin_multiplicity(3)  # Triplet - OK
+        3
+        >>> validate_spin_multiplicity(0)  # Invalid
+        ValueError: Spin multiplicity must be ≥ 1, got 0
+        >>> validate_spin_multiplicity(5, n_electrons=60)  # Check parity
+        ValueError: Spin multiplicity 5 (odd) incompatible with 60 electrons (even)
+
+    Notes:
+        - M=1 (S=0): Singlet - all electrons paired
+        - M=2 (S=1/2): Doublet - one unpaired electron
+        - M=3 (S=1): Triplet - two unpaired electrons
+        - M=4 (S=3/2): Quartet - three unpaired electrons
+        - M=5 (S=2): Quintet - four unpaired electrons
+        - Odd electrons → Even multiplicity (2, 4, 6, ...)
+        - Even electrons → Odd multiplicity (1, 3, 5, ...)
+    """
+    # Must be integer
+    if not isinstance(spin, int):
+        raise ValueError(
+            f"Spin multiplicity must be integer, got {type(spin).__name__}"
+        )
+
+    # Must be positive
+    if spin < 1:
+        raise ValueError(f"Spin multiplicity must be ≥ 1, got {spin}")
+
+    # Check reasonable range (warning only)
+    if spin > max_reasonable:
+        warnings.warn(
+            f"Spin multiplicity {spin} is very high (> {max_reasonable}). "
+            "This may be an error or an unusual high-spin state.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    # Check electron parity if known
+    if n_electrons is not None:
+        # Odd electrons → even multiplicity (doublet, quartet, sextet, ...)
+        # Even electrons → odd multiplicity (singlet, triplet, quintet, ...)
+        expected_parity = "even" if n_electrons % 2 == 1 else "odd"
+        actual_parity = "even" if spin % 2 == 0 else "odd"
+
+        if expected_parity != actual_parity:
+            raise ValueError(
+                f"Spin multiplicity {spin} ({actual_parity}) incompatible with "
+                f"{n_electrons} electrons (expects {expected_parity} multiplicity)"
+            )
+
+    return spin
+
+
 def get_rmsd_start_final(root_dir: str) -> tuple:
     """
     Calculate RMSD between initial and final geometries from a trajectory file.
@@ -181,12 +258,19 @@ def get_rmsd_start_final(root_dir: str) -> tuple:
 
         print(f"Reading trajectory from {traj_output} for RMSD calculation.")
 
+        # Stream line-by-line to find Coordinates lines and extract energies
+        lines_coords = []
         with open(traj_output) as f:
-            lines = f.readlines()
-        lines_coords = [
-            i for i, line in enumerate(lines) if line.startswith("Coordinates")
-        ]
-        energies = [float(lines[i].strip().split()[-1]) for i in lines_coords]
+            for i, line in enumerate(f):
+                if line.startswith("Coordinates"):
+                    lines_coords.append(i)
+
+        # Read again to extract energies at specific line numbers
+        energies = []
+        with open(traj_output) as f:
+            for i, line in enumerate(f):
+                if i in lines_coords:
+                    energies.append(float(line.strip().split()[-1]))
 
     else:
         print(
@@ -270,10 +354,6 @@ def get_geo_forces(log_file: str) -> list:
 
     list_info = []
 
-    # read output_file, find lines between
-    with open(log_file) as f:
-        lines = f.readlines()
-
     trigger = "Geometry convergence"
     # trigger_end_a = (
     #    "-------------------------------------------------------------------------"
@@ -281,28 +361,30 @@ def get_geo_forces(log_file: str) -> list:
     # trigger_end_b = "........................................................"
 
     info_block_tf = False
-    for _, line in enumerate(lines):
 
-        if trigger in line.strip():
-            info_dict = {}
-            info_block_tf = True
+    # Stream line-by-line instead of loading entire file (Issue #007)
+    with open(log_file) as f:
+        for _, line in enumerate(f):
+            if trigger in line.strip():
+                info_dict = {}
+                info_block_tf = True
 
-        if info_block_tf:
-            if len(line.split()) > 1:
-                if (
-                    line.split()[0].lower() == "rms"
-                    and line.split()[1].lower() == "gradient"
-                ):
-                    info_dict["RMS_Gradient"] = float(line.split()[2])
-                if (
-                    line.split()[0].lower() == "max"
-                    and line.split()[1].lower() == "gradient"
-                ):
-                    info_dict["Max_Gradient"] = float(line.split()[2])
-                    info_block_tf = False
-                    list_info.append(info_dict)
-            else:
-                continue
+            if info_block_tf:
+                if len(line.split()) > 1:
+                    if (
+                        line.split()[0].lower() == "rms"
+                        and line.split()[1].lower() == "gradient"
+                    ):
+                        info_dict["RMS_Gradient"] = float(line.split()[2])
+                    if (
+                        line.split()[0].lower() == "max"
+                        and line.split()[1].lower() == "gradient"
+                    ):
+                        info_dict["Max_Gradient"] = float(line.split()[2])
+                        info_block_tf = False
+                        list_info.append(info_dict)
+                else:
+                    continue
 
     return list_info
 
@@ -327,20 +409,19 @@ def parse_max_forces(output_file: str) -> float | None:
         return None  # Invalid path format
 
     try:
-        with open(output_file) as f:
-            lines = f.readlines()
-
+        # Stream line-by-line and keep last occurrence (Issue #007)
         # Look for "MAX gradient" in geometry optimization output
         # Example line: "MAX gradient             0.00123456"
         max_force = None
-        for line in reversed(lines):
-            if "MAX gradient" in line:
-                parts = line.split()
-                try:
-                    max_force = float(parts[-1])
-                    break
-                except (ValueError, IndexError):
-                    continue
+        with open(output_file) as f:
+            for line in f:
+                if "MAX gradient" in line:
+                    parts = line.split()
+                    try:
+                        max_force = float(parts[-1])
+                        # Keep updating - last occurrence wins
+                    except (ValueError, IndexError):
+                        continue
 
         return max_force
 
@@ -433,32 +514,40 @@ def get_engrad(engrad_file: str) -> dict:
     """
 
     dict_info = {}
+    # Stream line-by-line with iterator for lookahead (Issue #007)
     with open(engrad_file) as f:
-        lines = f.readlines()
-    for i, line in enumerate(lines):
-        if "The current total energy in Eh" in line:
-            energy = float(lines[i + 2].strip())
-            dict_info["total_energy_Eh"] = energy
+        f_iter = iter(f)
+        for line in f_iter:
+            if "The current total energy in Eh" in line:
+                # Skip one line, read energy on line i+2
+                next(f_iter)  # Skip line i+1
+                energy_line = next(f_iter)  # Read line i+2
+                energy = float(energy_line.strip())
+                dict_info["total_energy_Eh"] = energy
 
-        if "The current gradient in Eh/bohr" in line:
-            gradient = []
-            j = i + 2
-            while lines[j].strip() != "#":
-                gradient.append(float(lines[j].strip()))
-                j += 1
-            dict_info["gradient_Eh_per_bohr"] = gradient
+            if "The current gradient in Eh/bohr" in line:
+                gradient = []
+                next(f_iter)  # Skip line i+1
+                # Read gradient values until we hit "#"
+                for grad_line in f_iter:
+                    if grad_line.strip() == "#":
+                        break
+                    gradient.append(float(grad_line.strip()))
+                dict_info["gradient_Eh_per_bohr"] = gradient
 
-        if "The atomic numbers and current coordinates in Bohr" in line:
-            coords = []
-            elements = []
-            j = i + 2
-            while j < len(lines) and lines[j].strip() != "":
-                parts = lines[j].strip().split()
-                elements.append(int(parts[0]))
-                coords.append([float(x) for x in parts[1:4]])
-                j += 1
-            dict_info["elements"] = elements
-            dict_info["coords_bohr"] = coords
+            if "The atomic numbers and current coordinates in Bohr" in line:
+                coords = []
+                elements = []
+                next(f_iter)  # Skip line i+1
+                # Read coordinates until empty line
+                for coord_line in f_iter:
+                    if coord_line.strip() == "":
+                        break
+                    parts = coord_line.strip().split()
+                    elements.append(int(parts[0]))
+                    coords.append([float(x) for x in parts[1:4]])
+                dict_info["elements"] = elements
+                dict_info["coords_bohr"] = coords
 
     # Compute max force from gradient
     gradient = dict_info.get("gradient_Eh_per_bohr")
@@ -496,6 +585,9 @@ def find_timings_and_cores(log_file: str) -> list:
         return None, None
 
     # iterate through files_out until you hit line with "nprocs" line
+    # Use deque to keep only last N lines without loading full file (Issue #007)
+    from collections import deque
+
     with open(log_file) as f:
         # don't read whole file into memory
         for line in f:
@@ -503,8 +595,15 @@ def find_timings_and_cores(log_file: str) -> list:
                 nprocs = int(line.strip().split()[-1])
                 # break after finding first occurrence
                 break
-        # get last line
-        last_lines = f.readlines()[-10:-3]
+
+        # Keep only last 10 lines using deque (memory efficient)
+        last_lines_deque = deque(f, maxlen=10)
+        # Get lines [-10:-3] equivalent
+        last_lines = (
+            list(last_lines_deque)[:-3]
+            if len(last_lines_deque) > 3
+            else list(last_lines_deque)
+        )
 
         # format is TOTAL RUN TIME: 0 days 0 hours 3 minutes 16 seconds 840 msec
         time_dict = {}
@@ -849,19 +948,19 @@ def parse_final_energy(output_file: str) -> float | None:
         return None  # Invalid path format
 
     try:
+        # Stream line-by-line and keep last occurrence (Issue #007)
+        final_energy = None
         with open(output_file) as f:
-            lines = f.readlines()
+            for line in f:
+                if "FINAL SINGLE POINT ENERGY" in line:
+                    parts = line.split()
+                    try:
+                        final_energy = float(parts[-1])
+                        # Keep updating - last occurrence wins
+                    except (ValueError, IndexError):
+                        continue
 
-        # Look for "FINAL SINGLE POINT ENERGY"
-        for line in reversed(lines):
-            if "FINAL SINGLE POINT ENERGY" in line:
-                parts = line.split()
-                try:
-                    return float(parts[-1])
-                except (ValueError, IndexError):
-                    continue
-
-        return None
+        return final_energy
 
     except Exception:
         return None
@@ -896,9 +995,6 @@ def parse_mulliken_population(output_file: str | Path) -> dict[str, list] | None
         return None  # Invalid path format
 
     try:
-        with open(output_file) as f:
-            lines = f.readlines()
-
         result: dict[str, list] = {
             "mulliken_charges": [],
             "mulliken_spins": [],
@@ -908,63 +1004,67 @@ def parse_mulliken_population(output_file: str | Path) -> dict[str, list] | None
             "indices": [],
         }
 
-        # Parse both Mulliken and Loewdin sections
-        for analysis_type in ["MULLIKEN", "LOEWDIN"]:
-            header = f"{analysis_type} ATOMIC CHARGES AND SPIN POPULATIONS"
-            i = 0
-            while i < len(lines):
-                if header in lines[i]:
-                    # Skip the header and separator line
-                    i += 2
-                    # Parse data lines until we hit the sum line
-                    temp_indices = []
-                    temp_elements = []
-                    temp_charges = []
-                    temp_spins = []
+        # Stream line-by-line instead of loading full file (Issue #007)
+        with open(output_file) as f:
+            # Parse both Mulliken and Loewdin sections
+            for analysis_type in ["MULLIKEN", "LOEWDIN"]:
+                # Reset file to beginning for each analysis type
+                f.seek(0)
+                header = f"{analysis_type} ATOMIC CHARGES AND SPIN POPULATIONS"
 
-                    while i < len(lines) and not lines[i].startswith("Sum of"):
-                        line = lines[i].strip()
-                        if line and not line.startswith("-"):
-                            parts = line.split()
-                            # Handle both "Np:" and "F :" formats
-                            if len(parts) >= 4:
-                                try:
-                                    idx = int(parts[0])
-                                    # Element can be in parts[1] (like "Np:") or parts[1]+parts[2] (like "F" ":")
-                                    if parts[1].endswith(":"):
-                                        element = parts[1].rstrip(":")
-                                        charge = float(parts[2])
-                                        spin = float(parts[3])
-                                    elif len(parts) >= 5 and parts[2] == ":":
-                                        element = parts[1]
-                                        charge = float(parts[3])
-                                        spin = float(parts[4])
-                                    else:
-                                        i += 1
-                                        continue
-                                    temp_indices.append(idx)
-                                    temp_elements.append(element)
-                                    temp_charges.append(charge)
-                                    temp_spins.append(spin)
-                                except (ValueError, IndexError):
-                                    pass
-                        i += 1
+                for line in f:
+                    if header in line:
+                        # Skip the separator line
+                        next(f, None)
+                        # Parse data lines until we hit the sum line
+                        temp_indices = []
+                        temp_elements = []
+                        temp_charges = []
+                        temp_spins = []
 
-                    # Store results based on analysis type
-                    if analysis_type == "MULLIKEN" and temp_charges:
-                        result["mulliken_charges"] = temp_charges
-                        result["mulliken_spins"] = temp_spins
-                        result["elements"] = temp_elements
-                        result["indices"] = temp_indices
-                    elif analysis_type == "LOEWDIN" and temp_charges:
-                        result["loewdin_charges"] = temp_charges
-                        result["loewdin_spins"] = temp_spins
-                        # Only store elements/indices if not already stored
-                        if not result["elements"]:
+                        for data_line in f:
+                            if data_line.startswith("Sum of"):
+                                break
+
+                            line_stripped = data_line.strip()
+                            if line_stripped and not line_stripped.startswith("-"):
+                                parts = line_stripped.split()
+                                # Handle both "Np:" and "F :" formats
+                                if len(parts) >= 4:
+                                    try:
+                                        idx = int(parts[0])
+                                        # Element can be in parts[1] (like "Np:") or parts[1]+parts[2] (like "F" ":")
+                                        if parts[1].endswith(":"):
+                                            element = parts[1].rstrip(":")
+                                            charge = float(parts[2])
+                                            spin = float(parts[3])
+                                        elif len(parts) >= 5 and parts[2] == ":":
+                                            element = parts[1]
+                                            charge = float(parts[3])
+                                            spin = float(parts[4])
+                                        else:
+                                            continue
+                                        temp_indices.append(idx)
+                                        temp_elements.append(element)
+                                        temp_charges.append(charge)
+                                        temp_spins.append(spin)
+                                    except (ValueError, IndexError):
+                                        pass
+
+                        # Store results based on analysis type
+                        if analysis_type == "MULLIKEN" and temp_charges:
+                            result["mulliken_charges"] = temp_charges
+                            result["mulliken_spins"] = temp_spins
                             result["elements"] = temp_elements
                             result["indices"] = temp_indices
-                    break
-                i += 1
+                        elif analysis_type == "LOEWDIN" and temp_charges:
+                            result["loewdin_charges"] = temp_charges
+                            result["loewdin_spins"] = temp_spins
+                            # Only store elements/indices if not already stored
+                            if not result["elements"]:
+                                result["elements"] = temp_elements
+                                result["indices"] = temp_indices
+                        break
 
         # Return None if no population analysis found
         if not result["mulliken_charges"] and not result["loewdin_charges"]:
@@ -1121,18 +1221,18 @@ def parse_sella_log(sella_log_file, filter: bool = False) -> dict:
 
     if not os.path.exists(sella_log_file):
         return False
-    # read sella.log and check for final forces
-    with open(sella_log_file) as f:
-        lines = f.readlines()
+
+    # Stream line-by-line instead of loading full file (Issue #007)
     forces = []
     steps = []
     energy = []
 
-    for line in lines:
-        if "Sella" in line:
-            steps.append(int(line.split()[1]))
-            forces.append(float(line.split()[4]))
-            energy.append(float(line.split()[3]))
+    with open(sella_log_file) as f:
+        for line in f:
+            if "Sella" in line:
+                steps.append(int(line.split()[1]))
+                forces.append(float(line.split()[4]))
+                energy.append(float(line.split()[3]))
 
     if len(forces) == 0:
         return {}

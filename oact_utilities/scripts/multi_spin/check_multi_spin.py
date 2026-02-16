@@ -38,6 +38,96 @@ from oact_utilities.utils.status import (
     pull_log_file,
 )
 
+# JSON Validation Functions (Issue #009)
+# ========================================
+# These functions validate JSON data read from the database to prevent
+# type confusion, invalid data propagation, and potential code execution.
+# Use when deserializing mulliken_charges, mulliken_spins, loewdin_charges, loewdin_spins.
+
+
+def validate_charge_spin_list(
+    data: Any,
+    field_name: str,
+    expected_length: int | None = None,
+) -> list[float]:
+    """Validate and return a list of charges or spins.
+
+    Args:
+        data: JSON-decoded data to validate
+        field_name: Name for error messages ('mulliken_charges', etc.)
+        expected_length: Expected list length (number of atoms), optional
+
+    Returns:
+        Validated list of floats
+
+    Raises:
+        ValueError: If validation fails
+
+    Examples:
+        >>> validate_charge_spin_list([1.5, -0.5, 0.0], "charges")
+        [1.5, -0.5, 0.0]
+        >>> validate_charge_spin_list("invalid", "charges")
+        ValueError: charges must be a list, got str
+    """
+    if data is None:
+        return []
+
+    if not isinstance(data, list):
+        raise ValueError(f"{field_name} must be a list, got {type(data).__name__}")
+
+    # Validate each element
+    validated = []
+    for i, item in enumerate(data):
+        if not isinstance(item, (int, float)):
+            raise ValueError(
+                f"{field_name}[{i}] must be numeric, got {type(item).__name__}: {item}"
+            )
+        validated.append(float(item))
+
+    # Validate length if specified
+    if expected_length is not None and len(validated) != expected_length:
+        raise ValueError(
+            f"{field_name} length mismatch: got {len(validated)}, "
+            f"expected {expected_length}"
+        )
+
+    return validated
+
+
+def safe_load_json_field(
+    json_string: str | None,
+    field_name: str,
+    expected_length: int | None = None,
+) -> list[float]:
+    """Safely load and validate a JSON field from database.
+
+    Args:
+        json_string: JSON string from database (may be None)
+        field_name: Field name for error messages
+        expected_length: Expected list length for validation
+
+    Returns:
+        Validated list of floats, or empty list if None/empty
+
+    Raises:
+        ValueError: If JSON invalid or validation fails
+
+    Examples:
+        >>> safe_load_json_field('[1.0, 2.0]', 'charges')
+        [1.0, 2.0]
+        >>> safe_load_json_field('invalid', 'charges')
+        ValueError: Invalid JSON in charges: ...
+    """
+    if json_string is None or json_string == "":
+        return []
+
+    try:
+        data = json.loads(json_string)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in {field_name}: {e}") from e
+
+    return validate_charge_spin_list(data, field_name, expected_length)
+
 
 def iter_dirs_limited(root: str, max_depth: int) -> Iterator[str]:
     """Yield directory paths under `root` up to `max_depth` levels deep.
@@ -207,16 +297,17 @@ def _apply_migration_v1(conn: sqlite3.Connection) -> None:
         ("final_elements", "TEXT"),
     ]
 
-    for col, col_type in columns_v1:
-        if not _column_exists(conn, "jobs", col):
-            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
+    # Wrap all migration operations in a transaction
+    with conn:
+        for col, col_type in columns_v1:
+            if not _column_exists(conn, "jobs", col):
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
 
-    # Record migration
-    conn.execute(
-        "INSERT INTO schema_version (version, applied_at, description) VALUES (?, datetime('now'), ?)",
-        (1, "Add analysis fields (run_type, final_energy, max_force, etc.)"),
-    )
-    conn.commit()
+        # Record migration
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at, description) VALUES (?, datetime('now'), ?)",
+            (1, "Add analysis fields (run_type, final_energy, max_force, etc.)"),
+        )
 
 
 def _apply_migration_v2(conn: sqlite3.Connection) -> None:
@@ -235,16 +326,17 @@ def _apply_migration_v2(conn: sqlite3.Connection) -> None:
         ("loewdin_spins", "TEXT"),
     ]
 
-    for col, col_type in columns_v2:
-        if not _column_exists(conn, "jobs", col):
-            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
+    # Wrap all migration operations in a transaction
+    with conn:
+        for col, col_type in columns_v2:
+            if not _column_exists(conn, "jobs", col):
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
 
-    # Record migration
-    conn.execute(
-        "INSERT INTO schema_version (version, applied_at, description) VALUES (?, datetime('now'), ?)",
-        (2, "Add Mulliken/Loewdin population analysis columns"),
-    )
-    conn.commit()
+        # Record migration
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at, description) VALUES (?, datetime('now'), ?)",
+            (2, "Add Mulliken/Loewdin population analysis columns"),
+        )
 
 
 def _migrate_database(conn: sqlite3.Connection) -> None:
@@ -310,7 +402,7 @@ def _ensure_db(conn: sqlite3.Connection) -> None:
 
 
 def extract_orca_analysis(
-    job_dir: str, verbose_results: bool = False
+    job_dir: str, verbose_results: bool = False, parse_charges: bool = False
 ) -> dict[str, Any]:
     """Extract analysis data for an ORCA direct run (no Sella).
 
@@ -319,6 +411,7 @@ def extract_orca_analysis(
     Args:
         job_dir: Path to the job directory.
         verbose_results: If True, print which keys have non-None values.
+        parse_charges: If True, parse Mulliken/Loewdin charges and spins (Issue #007).
 
     Returns:
         Dictionary with analysis data.
@@ -381,24 +474,25 @@ def extract_orca_analysis(
                 result["max_force"] = last_forces.get("Max_Gradient")
                 result["final_rms_force"] = last_forces.get("RMS_Gradient")
 
-            # Parse Mulliken population analysis
-            mulliken_data = parse_mulliken_population(log_file)
-            if mulliken_data:
-                # Store as JSON strings for database
-                result["mulliken_charges"] = json.dumps(
-                    mulliken_data.get("mulliken_charges", [])
-                )
-                result["mulliken_spins"] = json.dumps(
-                    mulliken_data.get("mulliken_spins", [])
-                )
-                if mulliken_data.get("loewdin_charges"):
-                    result["loewdin_charges"] = json.dumps(
-                        mulliken_data.get("loewdin_charges", [])
+            # Parse Mulliken population analysis (optional - Issue #007)
+            if parse_charges:
+                mulliken_data = parse_mulliken_population(log_file)
+                if mulliken_data:
+                    # Store as JSON strings for database
+                    result["mulliken_charges"] = json.dumps(
+                        mulliken_data.get("mulliken_charges", [])
                     )
-                if mulliken_data.get("loewdin_spins"):
-                    result["loewdin_spins"] = json.dumps(
-                        mulliken_data.get("loewdin_spins", [])
+                    result["mulliken_spins"] = json.dumps(
+                        mulliken_data.get("mulliken_spins", [])
                     )
+                    if mulliken_data.get("loewdin_charges"):
+                        result["loewdin_charges"] = json.dumps(
+                            mulliken_data.get("loewdin_charges", [])
+                        )
+                    if mulliken_data.get("loewdin_spins"):
+                        result["loewdin_spins"] = json.dumps(
+                            mulliken_data.get("loewdin_spins", [])
+                        )
     except Exception:
         pass
 
@@ -413,7 +507,7 @@ def extract_orca_analysis(
 
 
 def extract_sella_analysis(
-    job_dir: str, verbose_results: bool = False
+    job_dir: str, verbose_results: bool = False, parse_charges: bool = False
 ) -> dict[str, Any]:
     """Extract analysis data for a Sella optimizer run.
 
@@ -422,6 +516,7 @@ def extract_sella_analysis(
     Args:
         job_dir: Path to the job directory.
         verbose_results: If True, print which keys have non-None values.
+        parse_charges: If True, parse Mulliken/Loewdin charges and spins (Issue #007).
 
     Returns:
         Dictionary with analysis data. Energies in Hartree, forces in Eh/Bohr.
@@ -545,29 +640,30 @@ def extract_sella_analysis(
         except Exception:
             pass
 
-    # Parse Mulliken population analysis from ORCA output
-    try:
-        log_file = pull_log_file(job_dir)
-        if log_file:
-            mulliken_data = parse_mulliken_population(log_file)
-            if mulliken_data:
-                # Store as JSON strings for database
-                result["mulliken_charges"] = json.dumps(
-                    mulliken_data.get("mulliken_charges", [])
-                )
-                result["mulliken_spins"] = json.dumps(
-                    mulliken_data.get("mulliken_spins", [])
-                )
-                if mulliken_data.get("loewdin_charges"):
-                    result["loewdin_charges"] = json.dumps(
-                        mulliken_data.get("loewdin_charges", [])
+    # Parse Mulliken population analysis from ORCA output (optional - Issue #007)
+    if parse_charges:
+        try:
+            log_file = pull_log_file(job_dir)
+            if log_file:
+                mulliken_data = parse_mulliken_population(log_file)
+                if mulliken_data:
+                    # Store as JSON strings for database
+                    result["mulliken_charges"] = json.dumps(
+                        mulliken_data.get("mulliken_charges", [])
                     )
-                if mulliken_data.get("loewdin_spins"):
-                    result["loewdin_spins"] = json.dumps(
-                        mulliken_data.get("loewdin_spins", [])
+                    result["mulliken_spins"] = json.dumps(
+                        mulliken_data.get("mulliken_spins", [])
                     )
-    except Exception:
-        pass
+                    if mulliken_data.get("loewdin_charges"):
+                        result["loewdin_charges"] = json.dumps(
+                            mulliken_data.get("loewdin_charges", [])
+                        )
+                    if mulliken_data.get("loewdin_spins"):
+                        result["loewdin_spins"] = json.dumps(
+                            mulliken_data.get("loewdin_spins", [])
+                        )
+        except Exception:
+            pass
 
     if verbose_results:
         non_none_keys = [
@@ -598,129 +694,133 @@ def find_and_get_status(
     _ensure_db(conn)
 
     processed = 0
-    for d in iter_dirs_limited(root, max_depth=max_depth):
-        flux_file = os.path.join(d, "flux_job.flux")
-        status = 0
-        note = ""
-        analysis_data: dict[str, Any] = {}
-        is_sella_run = False
+    # Use context manager for transaction - all jobs committed together
+    # or rolled back on error (atomicity across batch)
+    with conn:
+        for d in iter_dirs_limited(root, max_depth=max_depth):
+            flux_file = os.path.join(d, "flux_job.flux")
+            status = 0
+            note = ""
+            analysis_data: dict[str, Any] = {}
+            is_sella_run = False
 
-        if os.path.exists(flux_file):
-            processed += 1
-            # Check if this is a Sella run (has sella.log or opt.traj)
-            sella_log = os.path.join(d, "sella.log")
-            opt_traj = os.path.join(d, "opt.traj")
-            is_sella_run = os.path.exists(sella_log) or os.path.exists(
-                opt_traj
-            )  # is this true??
+            if os.path.exists(flux_file):
+                processed += 1
+                # Check if this is a Sella run (has sella.log or opt.traj)
+                sella_log = os.path.join(d, "sella.log")
+                opt_traj = os.path.join(d, "opt.traj")
+                is_sella_run = os.path.exists(sella_log) or os.path.exists(
+                    opt_traj
+                )  # is this true??
 
-            # default is remaining (0). Determine status in order:
-            # 1) failed (-1) 2) completed (1) 3) running (2 if recent flux-*.out) 4) remaining (0)
+                # default is remaining (0). Determine status in order:
+                # 1) failed (-1) 2) completed (1) 3) running (2 if recent flux-*.out) 4) remaining (0)
 
-            term = check_job_termination(d)
+                term = check_job_termination(d)
 
-            if term == -1:
-                if verbose:
-                    print(f"Found failed job at {d}")
-                status = -1
-                note = "job_failed"
+                if term == -1:
+                    if verbose:
+                        print(f"Found failed job at {d}")
+                    status = -1
+                    note = "job_failed"
 
-            elif term:
-                if verbose:
-                    print(f"Found completed job at {d}")
-                status = 1
-                note = "job_completed"
-                # Extract analysis data for completed jobs
-                if is_sella_run:
+                elif term:
+                    if verbose:
+                        print(f"Found completed job at {d}")
+                    status = 1
+                    note = "job_completed"
+                    # Extract analysis data for completed jobs
+                    if is_sella_run:
+                        analysis_data = extract_sella_analysis(d, verbose_results)
+                    else:
+                        analysis_data = extract_orca_analysis(d, verbose_results)
+
+                elif check_sella_complete(d):
+                    if verbose:
+                        print(f"Found completed job (sella) at {d}")
+                    status = 1
+                    note = "sella_complete"
+                    # Extract analysis data for sella-completed jobs
                     analysis_data = extract_sella_analysis(d, verbose_results)
+
                 else:
-                    analysis_data = extract_orca_analysis(d, verbose_results)
+                    # check for running indicator: recent flux-*.out read/write
+                    import glob
 
-            elif check_sella_complete(d):
-                if verbose:
-                    print(f"Found completed job (sella) at {d}")
-                status = 1
-                note = "sella_complete"
-                # Extract analysis data for sella-completed jobs
-                analysis_data = extract_sella_analysis(d, verbose_results)
+                    out_files = glob.glob(os.path.join(d, "flux-*.out"))
+                    if out_files:
+                        latest_out = max(out_files, key=os.path.getmtime)
+                        latest_mtime = os.path.getmtime(latest_out)
+                        if (time() - latest_mtime) < running_age_seconds:
+                            if verbose:
+                                print(
+                                    f"Found recent flux output {latest_out}; marking as running"
+                                )
+                            status = 2
+                            note = f"running_recent:{os.path.basename(latest_out)}"
 
-            else:
-                # check for running indicator: recent flux-*.out read/write
-                import glob
+                path_data = parse_info_from_path(d)
 
-                out_files = glob.glob(os.path.join(d, "flux-*.out"))
-                if out_files:
-                    latest_out = max(out_files, key=os.path.getmtime)
-                    latest_mtime = os.path.getmtime(latest_out)
-                    if (time() - latest_mtime) < running_age_seconds:
-                        if verbose:
-                            print(
-                                f"Found recent flux output {latest_out}; marking as running"
-                            )
-                        status = 2
-                        note = f"running_recent:{os.path.basename(latest_out)}"
+                # This script is a status checker only; always record status
 
-            path_data = parse_info_from_path(d)
-
-            # This script is a status checker only; always record status
-
-            # insert/update into DB with analysis data
-            c = conn.cursor()
-            c.execute(
-                """
-                INSERT INTO jobs (path, lot, category, name, spin, status, note, checked_at,
-                                  run_type, final_energy, max_force, rmsd_start_final,
-                                  has_final_geometry, n_opt_steps, final_rms_force,
-                                  final_coords, final_elements, mulliken_charges, mulliken_spins,
-                                  loewdin_charges, loewdin_spins)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(path) DO UPDATE SET
-                    lot=excluded.lot,
-                    category=excluded.category,
-                    name=excluded.name,
-                    spin=excluded.spin,
-                    status=excluded.status,
-                    note=excluded.note,
-                    checked_at=excluded.checked_at,
-                    run_type=excluded.run_type,
-                    final_energy=excluded.final_energy,
-                    max_force=excluded.max_force,
-                    rmsd_start_final=excluded.rmsd_start_final,
-                    has_final_geometry=excluded.has_final_geometry,
-                    n_opt_steps=excluded.n_opt_steps,
-                    final_rms_force=excluded.final_rms_force,
-                    final_coords=excluded.final_coords,
-                    final_elements=excluded.final_elements,
-                    mulliken_charges=excluded.mulliken_charges,
-                    mulliken_spins=excluded.mulliken_spins,
-                    loewdin_charges=excluded.loewdin_charges,
-                    loewdin_spins=excluded.loewdin_spins
-                """,
-                (
-                    d,
-                    path_data.get("lot", ""),
-                    path_data.get("cat", ""),
-                    path_data.get("name", ""),
-                    path_data.get("spin", ""),
-                    status,
-                    note,
-                    time(),
-                    analysis_data.get("run_type"),
-                    analysis_data.get("final_energy"),
-                    analysis_data.get("max_force"),
-                    analysis_data.get("rmsd_start_final"),
-                    analysis_data.get("has_final_geometry", 0),
-                    analysis_data.get("n_opt_steps"),
-                    analysis_data.get("final_rms_force"),
-                    analysis_data.get("final_coords"),
-                    analysis_data.get("final_elements"),
-                    analysis_data.get("mulliken_charges"),
-                    analysis_data.get("mulliken_spins"),
-                    analysis_data.get("loewdin_charges"),
-                    analysis_data.get("loewdin_spins"),
-                ),
-            )
-            conn.commit()
+                # insert/update into DB with analysis data
+                c = conn.cursor()
+                c.execute(
+                    """
+                    INSERT INTO jobs (path, lot, category, name, spin, status, note, checked_at,
+                                      run_type, final_energy, max_force, rmsd_start_final,
+                                      has_final_geometry, n_opt_steps, final_rms_force,
+                                      final_coords, final_elements, mulliken_charges, mulliken_spins,
+                                      loewdin_charges, loewdin_spins)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(path) DO UPDATE SET
+                        lot=excluded.lot,
+                        category=excluded.category,
+                        name=excluded.name,
+                        spin=excluded.spin,
+                        status=excluded.status,
+                        note=excluded.note,
+                        checked_at=excluded.checked_at,
+                        run_type=excluded.run_type,
+                        final_energy=excluded.final_energy,
+                        max_force=excluded.max_force,
+                        rmsd_start_final=excluded.rmsd_start_final,
+                        has_final_geometry=excluded.has_final_geometry,
+                        n_opt_steps=excluded.n_opt_steps,
+                        final_rms_force=excluded.final_rms_force,
+                        final_coords=excluded.final_coords,
+                        final_elements=excluded.final_elements,
+                        mulliken_charges=excluded.mulliken_charges,
+                        mulliken_spins=excluded.mulliken_spins,
+                        loewdin_charges=excluded.loewdin_charges,
+                        loewdin_spins=excluded.loewdin_spins
+                    """,
+                    (
+                        d,
+                        path_data.get("lot", ""),
+                        path_data.get("cat", ""),
+                        path_data.get("name", ""),
+                        path_data.get("spin", ""),
+                        status,
+                        note,
+                        time(),
+                        analysis_data.get("run_type"),
+                        analysis_data.get("final_energy"),
+                        analysis_data.get("max_force"),
+                        analysis_data.get("rmsd_start_final"),
+                        analysis_data.get("has_final_geometry", 0),
+                        analysis_data.get("n_opt_steps"),
+                        analysis_data.get("final_rms_force"),
+                        analysis_data.get("final_coords"),
+                        analysis_data.get("final_elements"),
+                        analysis_data.get("mulliken_charges"),
+                        analysis_data.get("mulliken_spins"),
+                        analysis_data.get("loewdin_charges"),
+                        analysis_data.get("loewdin_spins"),
+                    ),
+                )
+    # Transaction committed automatically by 'with conn:' context manager
+    # or rolled back if exception occurs (atomicity across entire batch)
 
     # Print a clean summary per molecule/name and spin state
     c = conn.cursor()

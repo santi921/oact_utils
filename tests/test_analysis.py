@@ -100,3 +100,49 @@ def test_parse_job_metrics_with_mulliken():
         assert "mulliken_charges" in mulliken
         assert "mulliken_spins" in mulliken
         assert len(mulliken["mulliken_charges"]) > 0
+
+
+def test_validate_spin_multiplicity():
+    """Test spin multiplicity validation (Issue #014)."""
+    import pytest
+
+    from oact_utilities.utils.analysis import validate_spin_multiplicity
+
+    # Valid spin multiplicities
+    assert validate_spin_multiplicity(1) == 1  # Singlet
+    assert validate_spin_multiplicity(2) == 2  # Doublet
+    assert validate_spin_multiplicity(3) == 3  # Triplet
+    assert validate_spin_multiplicity(5) == 5  # Quintet
+
+    # Invalid: spin < 1
+    with pytest.raises(ValueError, match="must be ≥ 1"):
+        validate_spin_multiplicity(0)
+
+    with pytest.raises(ValueError, match="must be ≥ 1"):
+        validate_spin_multiplicity(-1)
+
+    # Invalid: non-integer
+    with pytest.raises(ValueError, match="must be integer"):
+        validate_spin_multiplicity(1.5)
+
+    # High spin (should warn but not raise)
+    with pytest.warns(UserWarning, match="very high"):
+        result = validate_spin_multiplicity(15, max_reasonable=11)
+        assert result == 15
+
+    # Electron parity check - even electrons → odd multiplicity
+    assert validate_spin_multiplicity(1, n_electrons=2) == 1  # Singlet, 2e-
+    assert validate_spin_multiplicity(3, n_electrons=2) == 3  # Triplet, 2e-
+    assert validate_spin_multiplicity(5, n_electrons=4) == 5  # Quintet, 4e-
+
+    # Electron parity check - odd electrons → even multiplicity
+    assert validate_spin_multiplicity(2, n_electrons=1) == 2  # Doublet, 1e-
+    assert validate_spin_multiplicity(4, n_electrons=3) == 4  # Quartet, 3e-
+
+    # Invalid parity - even electrons with even multiplicity
+    with pytest.raises(ValueError, match="incompatible"):
+        validate_spin_multiplicity(2, n_electrons=2)  # Doublet with 2e- is invalid
+
+    # Invalid parity - odd electrons with odd multiplicity
+    with pytest.raises(ValueError, match="incompatible"):
+        validate_spin_multiplicity(3, n_electrons=1)  # Triplet with 1e- is invalid
