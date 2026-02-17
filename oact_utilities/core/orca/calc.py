@@ -195,6 +195,12 @@ ORCA_BLOCKS = [
     "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
 ]
 
+ORCA_BLOCKS_BASE = [
+    "%scf \n  Convergence Tight\n  maxiter 600\n  THRESH 1e-12\n  TCUT 1e-13\nend",
+    "%elprop Dipole true Quadrupole true end",
+    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
+]
+
 ORCA_BLOCKS_X2C = [
     "%rel \n  FiniteNuc     true\n  DLU         true\n  LightAtomThresh 0\nend",
     "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  Shift Shift 0.1 ErrOff 0.1 end\nend",
@@ -368,6 +374,17 @@ def get_orca_blocks(
             if error_code == -1:
                 print("Using looser SCF settings due to previous SCF failure.")
                 # we know it's the first block we need to modify
+                orcablocks[0] = re.sub(
+                    r"Convergence Tight", "Convergence Medium", orcablocks[0]
+                )
+
+    elif simple_input == "omol_base":
+        simple = ORCA_SIMPLE_INPUT.copy()
+        simple.insert(0, job)
+        orcablocks = ORCA_BLOCKS_BASE.copy()
+        if error_handle:
+            if error_code == -1:
+                print("Using looser SCF settings due to previous SCF failure.")
                 orcablocks[0] = re.sub(
                     r"Convergence Tight", "Convergence Medium", orcablocks[0]
                 )

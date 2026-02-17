@@ -32,7 +32,7 @@ class OrcaConfig(TypedDict, total=False):
 
     Attributes:
         functional: DFT functional (default: "wB97M-V").
-        simple_input: Input template (default: "omol"). Options: "omol", "x2c", "dk3".
+        simple_input: Input template (default: "omol"). Options: "omol", "omol_base", "x2c", "dk3".
         actinide_basis: Basis set for actinides (default: "ma-def-TZVP").
         actinide_ecp: ECP for actinides (default: None).
         non_actinide_basis: Basis set for non-actinides (default: "def2-TZVPD").
@@ -1203,7 +1203,7 @@ def main():
     )
     orca_group.add_argument(
         "--simple-input",
-        choices=["omol", "x2c", "dk3"],
+        choices=["omol", "omol_base", "x2c", "dk3"],
         default="omol",
         help="ORCA input template (default: omol)",
     )
