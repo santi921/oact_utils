@@ -684,8 +684,12 @@ def find_and_get_status(
     running_age_seconds: int = 3600,
     verbose_results: bool = False,
     truncate_len: int = 30,
+    parse_charges: bool = False,
 ) -> int:
     """Traverse `root` up to `max_depth` and check status of flux jobs.
+
+    Args:
+        parse_charges: If True, parse Mulliken/Loewdin charges and spins from ORCA output.
 
     Returns the number of jobs processed.
     """
@@ -731,9 +735,13 @@ def find_and_get_status(
                     note = "job_completed"
                     # Extract analysis data for completed jobs
                     if is_sella_run:
-                        analysis_data = extract_sella_analysis(d, verbose_results)
+                        analysis_data = extract_sella_analysis(
+                            d, verbose_results, parse_charges
+                        )
                     else:
-                        analysis_data = extract_orca_analysis(d, verbose_results)
+                        analysis_data = extract_orca_analysis(
+                            d, verbose_results, parse_charges
+                        )
 
                 elif check_sella_complete(d):
                     if verbose:
@@ -741,7 +749,9 @@ def find_and_get_status(
                     status = 1
                     note = "sella_complete"
                     # Extract analysis data for sella-completed jobs
-                    analysis_data = extract_sella_analysis(d, verbose_results)
+                    analysis_data = extract_sella_analysis(
+                        d, verbose_results, parse_charges
+                    )
 
                 else:
                     # check for running indicator: recent flux-*.out read/write
@@ -952,6 +962,11 @@ def main() -> None:
         default=3600,
         help="Seconds to treat a flux-*.out as 'running' (default: 3600)",
     )
+    parser.add_argument(
+        "--parse-charges",
+        action="store_true",
+        help="Parse Mulliken/Loewdin charges and spins from ORCA output (default: False)",
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.root):
@@ -965,6 +980,7 @@ def main() -> None:
         running_age_seconds=args.running_age_seconds,
         verbose_results=args.verbose_results,
         truncate_len=args.truncate,
+        parse_charges=args.parse_charges,
     )
     print(f"Total flux jobs found: {n}")
 
