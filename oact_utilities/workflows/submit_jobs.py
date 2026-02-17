@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
+from ..utils.analysis import parse_job_metrics
 from ..utils.architector import xyz_string_to_atoms
 from .architector_workflow import ArchitectorWorkflow, JobStatus
 
@@ -295,7 +296,10 @@ def filter_jobs_for_submission(
         List of JobRecords ready for submission
     """
     # Get ready jobs (DB is source of truth)
-    ready_jobs = workflow.get_jobs_by_status([JobStatus.TO_RUN, JobStatus.READY])
+    # include_geometry=True so prepare_job_directory can write the .inp file
+    ready_jobs = workflow.get_jobs_by_status(
+        [JobStatus.TO_RUN, JobStatus.READY], include_geometry=True
+    )
 
     # Apply fail_count filter if specified
     if max_fail_count is not None:
@@ -807,7 +811,7 @@ def submit_batch_parsl(
             orca_config=dict(config),
             timeout_seconds=timeout_seconds,
         )
-        futures.append((job.id, future))
+        futures.append((job.id, str(job_dir_abs), future))
 
     # Monitor futures concurrently (CRITICAL: use as_completed, not sequential loop)
     print("\nMonitoring job execution...")
@@ -816,19 +820,36 @@ def submit_batch_parsl(
     completed_ids = []
     failed_ids = []
 
-    # Create future->job_id mapping for concurrent completion
-    futures_map = {future: job_id for job_id, future in futures}
+    # Create future->(job_id, job_dir) mapping for concurrent completion
+    futures_map = {future: (job_id, job_dir) for job_id, job_dir, future in futures}
 
     try:
         # as_completed() yields futures as they finish (concurrent, not sequential!)
         for future in as_completed(futures_map.keys()):
-            job_id = futures_map[future]
+            job_id, job_dir = futures_map[future]
             try:
                 result = future.result()
 
                 if result["status"] == "completed":
                     workflow.update_status(job_id, JobStatus.COMPLETED)
                     completed_ids.append(job_id)
+
+                    # Extract metrics on the fly for successful jobs
+                    try:
+                        metrics = parse_job_metrics(job_dir)
+                        if metrics["success"]:
+                            workflow.update_job_metrics(
+                                job_id,
+                                job_dir=job_dir,
+                                max_forces=metrics.get("max_forces"),
+                                scf_steps=metrics.get("scf_steps"),
+                                final_energy=metrics.get("final_energy"),
+                            )
+                    except Exception as e:
+                        print(
+                            f"  Warning: metrics extraction failed for job {job_id}: {e}"
+                        )
+
                     print(
                         f" Job {job_id} completed ({len(completed_ids)}/{len(futures)} done)"
                     )
@@ -947,7 +968,10 @@ def submit_batch(
         )
 
     # Get ready jobs (includes both TO_RUN and READY for backward compatibility)
-    ready_jobs = workflow.get_jobs_by_status([JobStatus.TO_RUN, JobStatus.READY])
+    # include_geometry=True so prepare_job_directory can write the .inp file
+    ready_jobs = workflow.get_jobs_by_status(
+        [JobStatus.TO_RUN, JobStatus.READY], include_geometry=True
+    )
 
     # Filter out jobs that have failed too many times
     if max_fail_count is not None:

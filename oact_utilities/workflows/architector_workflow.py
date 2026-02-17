@@ -66,12 +66,14 @@ class ArchitectorWorkflow:
     - Generate dashboard reports
     """
 
-    def __init__(self, db_path: str | Path, timeout: float = 30.0):
+    def __init__(self, db_path: str | Path, timeout: float = 5.0):
         """Initialize workflow manager with existing database.
 
         Args:
             db_path: Path to the SQLite database file.
-            timeout: Timeout in seconds for database locks.
+            timeout: SQLite busy-wait timeout in seconds per lock attempt.
+                Kept short so the Python-level retry loop can back off
+                and re-try quickly under concurrent access (e.g. Parsl).
         """
         self.db_path = Path(db_path)
         if not self.db_path.exists():
@@ -108,8 +110,30 @@ class ArchitectorWorkflow:
                 return cur
             except sqlite3.OperationalError as e:
                 if "locked" in str(e).lower() and attempt < max_retries - 1:
-                    delay = min(0.5 * (2**attempt), 5.0)
-                    jitter = random.uniform(0, 0.5)
+                    delay = min(0.1 * (2**attempt), 2.0)
+                    jitter = random.uniform(0, 0.1)
+                    time.sleep(delay + jitter)
+                    continue
+                raise
+
+    def _commit_with_retry(self, max_retries: int = 10):
+        """Commit with retry logic for handling database locks.
+
+        The conn.commit() call can also raise 'database is locked' when
+        another process holds the write lock (e.g. Parsl workers updating
+        job statuses concurrently).
+
+        Args:
+            max_retries: Maximum number of retries.
+        """
+        for attempt in range(max_retries):
+            try:
+                self.conn.commit()
+                return
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower() and attempt < max_retries - 1:
+                    delay = min(0.1 * (2**attempt), 2.0)
+                    jitter = random.uniform(0, 0.1)
                     time.sleep(delay + jitter)
                     continue
                 raise
@@ -242,7 +266,7 @@ class ArchitectorWorkflow:
         query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
         values.append(job_id)
         self._execute_with_retry(query, tuple(values))
-        self.conn.commit()
+        self._commit_with_retry()
 
     def update_job_metrics(
         self,
@@ -297,7 +321,7 @@ class ArchitectorWorkflow:
             query = f"UPDATE structures SET {', '.join(updates)} WHERE id = ?"
             values.append(job_id)
             self._execute_with_retry(query, tuple(values))
-            self.conn.commit()
+            self._commit_with_retry()
 
     def update_job_metrics_bulk(self, metrics_list: list[dict]):
         """Update metrics for multiple jobs in a single transaction.
@@ -337,7 +361,7 @@ class ArchitectorWorkflow:
                 values.append(job_id)
                 cur.execute(query, tuple(values))
 
-        self.conn.commit()
+        self._commit_with_retry()
 
     def update_status_bulk(
         self,
@@ -356,7 +380,32 @@ class ArchitectorWorkflow:
         placeholders = ",".join("?" * len(job_ids))
         query = f"UPDATE structures SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"
         self._execute_with_retry(query, tuple([new_status.value] + job_ids))
-        self.conn.commit()
+        self._commit_with_retry()
+
+    def update_status_bulk_multi(
+        self,
+        status_groups: dict[JobStatus, list[int]],
+    ):
+        """Update multiple status groups in a single transaction.
+
+        This minimises commit() calls (one instead of per-group), which is
+        critical when another process (e.g. Parsl) is concurrently writing
+        to the same database on a parallel filesystem.
+
+        Args:
+            status_groups: Mapping of new_status -> list of job IDs.
+        """
+        if not status_groups:
+            return
+
+        cur = self.conn.cursor()
+        for new_status, job_ids in status_groups.items():
+            if not job_ids:
+                continue
+            placeholders = ",".join("?" * len(job_ids))
+            query = f"UPDATE structures SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"
+            cur.execute(query, tuple([new_status.value] + job_ids))
+        self._commit_with_retry()
 
     def count_by_status(self) -> dict[JobStatus, int]:
         """Count jobs grouped by status.
@@ -435,7 +484,7 @@ class ArchitectorWorkflow:
             self._execute_with_retry(
                 query, tuple([JobStatus.TO_RUN.value] + statuses_to_reset)
             )
-        self.conn.commit()
+        self._commit_with_retry()
 
     def reset_timeout_jobs(self, max_fail_count: int | None = None):
         """Reset all timeout jobs back to ready status for retry.
@@ -470,7 +519,7 @@ class ArchitectorWorkflow:
             self._execute_with_retry(
                 query, (JobStatus.TO_RUN.value, JobStatus.TIMEOUT.value)
             )
-        self.conn.commit()
+        self._commit_with_retry()
 
     def make_jobs_failed_with_max_fail_count(self, max_fail_count: int):
         """Mark jobs as failed if they have reached the maximum fail count.
@@ -484,7 +533,7 @@ class ArchitectorWorkflow:
             WHERE COALESCE(fail_count, 0) >= ?
         """
         self._execute_with_retry(query, (JobStatus.FAILED.value, max_fail_count))
-        self.conn.commit()
+        self._commit_with_retry()
 
     def get_jobs_by_fail_count(self, min_fail_count: int = 1) -> list[JobRecord]:
         """Get jobs that have failed at least min_fail_count times.

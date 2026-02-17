@@ -428,9 +428,8 @@ def _parallel_status_check(
             if extract_metrics and update["new_status"] == JobStatus.COMPLETED:
                 completed_for_metrics.append((update["job_id"], update["job_dir"]))
 
-    # Single bulk update per status (one commit each instead of per-job)
-    for new_status, job_ids in status_groups.items():
-        workflow.update_status_bulk(job_ids, new_status)
+    # Single transaction for all status groups (one commit total)
+    workflow.update_status_bulk_multi(status_groups)
 
     return updated_counts, completed_for_metrics
 
@@ -522,9 +521,8 @@ def _sequential_status_check(
             if extract_metrics and new_status == JobStatus.COMPLETED:
                 completed_for_metrics.append((job.id, job_dir))
 
-    # Single bulk update per status (one commit each instead of per-job)
-    for new_status, job_ids in status_groups.items():
-        workflow.update_status_bulk(job_ids, new_status)
+    # Single transaction for all status groups (one commit total)
+    workflow.update_status_bulk_multi(status_groups)
 
     return updated_counts, completed_for_metrics
 
