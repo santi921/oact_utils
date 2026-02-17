@@ -450,39 +450,20 @@ def parse_scf_steps(output_file: str | Path) -> int | None:
         return None  # Invalid path format
 
     try:
-        # Pre-compile regex patterns for efficiency
-        scf_iterations_re = re.compile(r"SCF ITERATIONS\s+(\d+)")
-        scf_cycle_re = re.compile(r"^\s*(\d+)\s+-?\d+\.\d+\s+")
+        # Match "SCF CONVERGED AFTER  17 CYCLES" lines from ORCA success blocks
+        scf_converged_re = re.compile(r"SCF CONVERGED AFTER\s+(\d+)\s+CYCLES")
 
-        scf_iterations = []
-        max_cycle = -1
+        total_cycles = 0
+        found = False
 
-        # Stream line-by-line instead of loading entire file (Issue #007)
         with open(output_file) as f:
             for line in f:
-                # Look for "SCF ITERATIONS" lines
-                match = scf_iterations_re.search(line)
+                match = scf_converged_re.search(line)
                 if match:
-                    scf_iterations.append(int(match.group(1)))
-                    continue
+                    total_cycles += int(match.group(1))
+                    found = True
 
-                # Look for cycle numbers in SCF output
-                # Example: "  0   -123.456789012   0.000000e+00  0.12345678..."
-                match = scf_cycle_re.match(line)
-                if match:
-                    cycle_num = int(match.group(1))
-                    if cycle_num > max_cycle:
-                        max_cycle = cycle_num
-
-        # Return sum of SCF iterations if found
-        if scf_iterations:
-            return sum(scf_iterations)
-
-        # Otherwise return max cycle + 1 (since cycles start at 0)
-        if max_cycle >= 0:
-            return max_cycle + 1
-
-        return None
+        return total_cycles if found else None
 
     except Exception:
         return None

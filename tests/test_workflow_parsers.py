@@ -54,10 +54,8 @@ def test_parse_scf_steps_direct(orca_direct_dir):
 
     scf_steps = parse_scf_steps(str(log_file))
 
-    # Should find SCF iterations
-    assert scf_steps is not None
-    assert isinstance(scf_steps, int)
-    assert scf_steps > 0
+    # Should find SCF iterations (27 + 17 + 10 + 2 = 56 from 4 geo opt steps)
+    assert scf_steps == 56
 
 
 def test_parse_final_energy_direct(orca_direct_dir):
