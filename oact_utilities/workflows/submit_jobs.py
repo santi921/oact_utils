@@ -39,6 +39,7 @@ class OrcaConfig(TypedDict, total=False):
         non_actinide_basis: Basis set for non-actinides (default: "def2-TZVPD").
         scf_MaxIter: Maximum SCF iterations (default: None, uses ORCA default).
         nbo: Enable NBO analysis (default: False).
+        mbis: Enable MBIS population analysis (default: False).
         opt: Enable geometry optimization (default: False).
         orca_path: Path to ORCA executable (default: scheduler-specific).
     """
@@ -50,6 +51,7 @@ class OrcaConfig(TypedDict, total=False):
     non_actinide_basis: str
     scf_MaxIter: int | None
     nbo: bool
+    mbis: bool
     opt: bool
     orca_path: str
     diis_option: str | None
@@ -63,6 +65,7 @@ DEFAULT_ORCA_CONFIG: OrcaConfig = {
     "non_actinide_basis": "def2-TZVPD",
     "scf_MaxIter": None,
     "nbo": False,
+    "mbis": False,
     "opt": False,
     "diis_option": None,
 }
@@ -139,6 +142,7 @@ def prepare_job_directory(
             charge=charge,
             mult=mult,
             nbo=config.get("nbo", False),
+            mbis=config.get("mbis", False),
             diis_option=config.get("diis_option"),
             cores=n_cores,
             opt=config.get("opt", False),
@@ -1258,6 +1262,11 @@ def main():
         help="Enable NBO analysis",
     )
     orca_group.add_argument(
+        "--mbis",
+        action="store_true",
+        help="Enable MBIS population analysis",
+    )
+    orca_group.add_argument(
         "--kdiis",
         action="store_true",
         help="Enable KDIIS SCF convergence acceleration",
@@ -1286,6 +1295,7 @@ def main():
         "non_actinide_basis": args.non_actinide_basis,
         "scf_MaxIter": args.scf_maxiter,
         "nbo": args.nbo,
+        "mbis": args.mbis,
         "opt": args.opt,
         "diis_option": "KDIIS" if args.kdiis else None,
     }

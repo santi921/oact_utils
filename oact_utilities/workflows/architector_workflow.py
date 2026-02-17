@@ -557,6 +557,7 @@ def create_workflow(
     charge_column: str | None = "charge",
     spin_column: str | None = "uhf",
     batch_size: int = 10000,
+    extra_columns: dict[str, str] | None = None,
 ) -> tuple[Path, ArchitectorWorkflow]:
     """Initialize a new workflow from an architector CSV file.
 
@@ -571,6 +572,9 @@ def create_workflow(
         charge_column: CSV column containing molecular charges.
         spin_column: CSV column containing unpaired electrons.
         batch_size: Number of rows to process at a time.
+        extra_columns: Dictionary mapping CSV column names to SQL types
+            (e.g., {"metal": "TEXT", "ligand_count": "INTEGER"}).
+            These columns will be added to the database and populated from the CSV.
 
     Returns:
         Tuple of (db_path, ArchitectorWorkflow instance).
@@ -582,6 +586,7 @@ def create_workflow(
         charge_column=charge_column,
         spin_column=spin_column,
         batch_size=batch_size,
+        extra_columns=extra_columns,
     )
 
     workflow = ArchitectorWorkflow(db_path_ret)

@@ -192,27 +192,27 @@ ORCA_SIMPLE_INPUT_DK3 = [
 ORCA_BLOCKS = [
     "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  Shift Shift 0.1 ErrOff 0.1 end\n  DIISMaxEq   7\n  Guess PModel\nend",
     "%elprop Dipole true Quadrupole true end",
-    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
+    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 Print[ P_Hirshfeld ] 1 end",
 ]
 
 ORCA_BLOCKS_BASE = [
     "%scf \n  Convergence Tight\n  maxiter 600\n  THRESH 1e-12\n  TCUT 1e-13\nend",
     "%elprop Dipole true Quadrupole true end",
-    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
+    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 Print[ P_Hirshfeld ] 1 end",
 ]
 
 ORCA_BLOCKS_X2C = [
     "%rel \n  FiniteNuc     true\n  DLU         true\n  LightAtomThresh 0\nend",
     "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  Shift Shift 0.1 ErrOff 0.1 end\nend",
     "%elprop Dipole true Quadrupole true end",
-    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
+    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 Print[ P_Hirshfeld ] 1 end",
 ]
 
 ORCA_BLOCKS_DK3 = [
     "%rel \n  FiniteNuc     true\nend\n",
     "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  Shift Shift 0.1 ErrOff 0.1 end\nend",
     "%elprop Dipole true Quadrupole true end",
-    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
+    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 Print[ P_Hirshfeld ] 1 end",
 ]
 
 NBO_FLAGS = '%nbo NBOKEYLIST = "$NBO NPA NBO E2PERT 0.1 $END" end'  # SV - turn off??
@@ -343,6 +343,7 @@ def get_orca_blocks(
     atoms: Atoms,
     mult: int = 1,
     nbo: bool = True,
+    mbis: bool = False,
     cores: int = 12,
     opt: bool = False,
     simple_input: str = "omol",
@@ -466,6 +467,9 @@ def get_orca_blocks(
     else:
         orcablocks.append(f"{NBO_FLAGS}")
 
+    if mbis:
+        orcasimpleinput += " MBIS"
+
     if vertical in {Vertical.MetalOrganics, Vertical.Oss} and mult == 1:
         orcasimpleinput += " UKS"
         orcablocks.append(get_symm_break_block(atoms, charge=0))
@@ -501,6 +505,7 @@ def write_orca_inputs(
     charge: int = 0,
     mult: int = 1,
     nbo: bool = False,
+    mbis: bool = False,
     cores: int = 12,
     opt: bool = False,
     functional: str = "wB97M-V",
@@ -535,6 +540,7 @@ def write_orca_inputs(
     orcasimpleinput, orcablocks = get_orca_blocks(
         atoms=atoms,
         nbo=nbo,
+        mbis=mbis,
         cores=cores,
         opt=opt,
         vertical=vertical,
