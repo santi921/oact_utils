@@ -526,6 +526,8 @@ def backfill_metrics(
     unzip: bool = False,
     verbose: bool = False,
     workers: int = 4,
+    recompute: bool = False,
+    max_jobs: int | None = None,
 ):
     """Extract metrics for completed jobs that don't have them yet.
 
@@ -536,21 +538,36 @@ def backfill_metrics(
         unzip: If True, handle gzipped output files (quacc).
         verbose: Print detailed progress messages.
         workers: Number of parallel worker threads for extraction.
+        recompute: If True, recompute metrics for all completed jobs, even those
+            that already have metrics.
+        max_jobs: If set, limit to this many jobs (useful for debugging).
     """
     root_dir = Path(root_dir)
 
-    cur = workflow._execute_with_retry(
-        """
-        SELECT id, orig_index
-        FROM structures
-        WHERE status = 'completed' AND max_forces IS NULL
-        """
-    )
+    if recompute:
+        cur = workflow._execute_with_retry(
+            "SELECT id, orig_index FROM structures WHERE status = 'completed'"
+        )
+    else:
+        cur = workflow._execute_with_retry(
+            """
+            SELECT id, orig_index
+            FROM structures
+            WHERE status = 'completed' AND max_forces IS NULL
+            """
+        )
     rows = cur.fetchall()
 
     if not rows:
         print("\nAll completed jobs already have metrics.")
         return
+
+    if max_jobs is not None:
+        total_found = len(rows)
+        rows = rows[:max_jobs]
+        print(
+            f"\n[debug] Limiting metrics extraction to {len(rows)} of {total_found} jobs"
+        )
 
     # Build work items, filtering out missing directories
     work_items = []
@@ -594,6 +611,7 @@ def update_all_statuses(
     recheck_completed: bool = False,
     hours_cutoff: float = 6,
     parallel_status_check: bool = True,
+    max_jobs: int | None = None,
 ):
     """Scan job directories and update statuses in bulk.
 
@@ -609,6 +627,7 @@ def update_all_statuses(
         recheck_completed: If True, also re-verify jobs marked as completed.
         hours_cutoff: Hours of inactivity before a job is considered timed out.
         parallel_status_check: If True, parallelize status checking (default: True for scalability).
+        max_jobs: If set, limit operations to this many jobs (useful for debugging).
     """
     from functools import partial
 
@@ -627,12 +646,18 @@ def update_all_statuses(
         JobStatus.RUNNING,
         JobStatus.READY,
         JobStatus.FAILED,
+        JobStatus.TIMEOUT,
         JobStatus.TO_RUN,
     ]
     if recheck_completed:
         statuses_to_check.append(JobStatus.COMPLETED)
 
     jobs = workflow.get_jobs_by_status(statuses_to_check)
+
+    if max_jobs is not None:
+        total_found = len(jobs)
+        jobs = jobs[:max_jobs]
+        print(f"\n[debug] Limiting to {len(jobs)} of {total_found} jobs")
 
     if verbose:
         print(f"\nScanning {len(jobs)} jobs for status updates...")
@@ -895,6 +920,18 @@ def main():
         default=6,
         help="Hours of inactivity before a job is considered timed out (default: 6)",
     )
+    parser.add_argument(
+        "--recompute-metrics",
+        action="store_true",
+        help="Recompute metrics for all completed jobs, even those that already have them",
+    )
+    parser.add_argument(
+        "--debug",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Limit status checks and metrics extraction to N jobs (for testing changes)",
+    )
 
     args = parser.parse_args()
 
@@ -917,10 +954,11 @@ def main():
             workers=args.workers,
             recheck_completed=args.recheck_completed,
             hours_cutoff=args.hours_cutoff,
+            max_jobs=args.debug,
         )
 
         # Backfill metrics for previously completed jobs missing them
-        if args.extract_metrics:
+        if args.extract_metrics or args.recompute_metrics:
             backfill_metrics(
                 workflow,
                 args.update,
@@ -928,6 +966,8 @@ def main():
                 unzip=args.unzip,
                 verbose=args.verbose,
                 workers=args.workers,
+                recompute=args.recompute_metrics,
+                max_jobs=args.debug,
             )
 
     # Reset failed jobs if requested
