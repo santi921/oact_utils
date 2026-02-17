@@ -146,3 +146,103 @@ def test_validate_spin_multiplicity():
     # Invalid parity - odd electrons with odd multiplicity
     with pytest.raises(ValueError, match="incompatible"):
         validate_spin_multiplicity(3, n_electrons=1)  # Triplet with 1e- is invalid
+
+
+def test_parse_job_metrics_termination_normal():
+    """Test parse_job_metrics correctly identifies normal termination."""
+    test_dir = Path(__file__).parent / "files"
+    job_dir = test_dir / "quacc_example"
+
+    result = parse_job_metrics(job_dir, unzip=True)
+
+    # Check that we got success status
+    assert result["success"] is True, "Should detect normal termination"
+    assert result["is_timeout"] is False, "Should not be timeout"
+    assert result["termination_status"] == 1, "Termination status should be 1 (normal)"
+
+
+def test_parse_job_metrics_termination_timeout():
+    """Test parse_job_metrics correctly identifies timeout jobs."""
+    import os
+    import time
+
+    # Create a temporary directory with an old output file
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        output_file = temp_dir_path / "orca.out"
+
+        # Write a file with normal termination message
+        output_file.write_text(
+            "ORCA CALCULATION\n"
+            "...\n"
+            "...\n"
+            "...\n"
+            "...\n"
+            "****ORCA TERMINATED NORMALLY****\n"
+        )
+
+        # Make the file old (> 6 hours ago)
+        # Set access and modification time to 8 hours ago
+        eight_hours_ago = time.time() - (8 * 3600)
+        os.utime(output_file, (eight_hours_ago, eight_hours_ago))
+
+        result = parse_job_metrics(temp_dir_path, unzip=False, hours_cutoff=6.0)
+
+        # Should detect as timeout
+        assert result["success"] is False, "Old file should not be success"
+        assert result["is_timeout"] is True, "Should detect timeout"
+        assert (
+            result["termination_status"] == -2
+        ), "Termination status should be -2 (timeout)"
+
+
+def test_parse_job_metrics_termination_error():
+    """Test parse_job_metrics correctly identifies jobs with errors."""
+    # Create a temporary directory with an error output file
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        output_file = temp_dir_path / "orca.out"
+
+        # Write a file with Error in last 5 lines
+        output_file.write_text(
+            "ORCA CALCULATION\n"
+            "...\n"
+            "...\n"
+            "SCF NOT CONVERGED\n"
+            "Error: SCF failed to converge\n"
+        )
+
+        result = parse_job_metrics(temp_dir_path, unzip=False, hours_cutoff=6.0)
+
+        # Should detect as failed (not timeout)
+        assert result["success"] is False, "Error file should not be success"
+        assert result["is_timeout"] is False, "Should not be timeout"
+        assert (
+            result["termination_status"] == -1
+        ), "Termination status should be -1 (error)"
+
+
+def test_parse_job_metrics_termination_aborted():
+    """Test parse_job_metrics correctly identifies aborted jobs."""
+    # Create a temporary directory with an aborted output file
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        output_file = temp_dir_path / "orca.out"
+
+        # Write a file with "aborting the run"
+        output_file.write_text(
+            "ORCA CALCULATION\n"
+            "...\n"
+            "...\n"
+            "FATAL ERROR: Memory allocation failed\n"
+            "aborting the run\n"
+        )
+
+        result = parse_job_metrics(temp_dir_path, unzip=False, hours_cutoff=6.0)
+
+        # Should detect as failed (not timeout)
+        assert result["success"] is False, "Aborted file should not be success"
+        assert result["is_timeout"] is False, "Should not be timeout"
+        assert (
+            result["termination_status"] == -1
+        ), "Termination status should be -1 (aborted)"

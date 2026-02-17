@@ -1093,7 +1093,7 @@ def parse_mulliken_population(output_file: str | Path) -> dict[str, list] | None
 
 
 def parse_job_metrics(
-    job_dir: str | Path, unzip: bool = False
+    job_dir: str | Path, unzip: bool = False, hours_cutoff: float = 6.0
 ) -> dict[str, float | int | None]:
     """Extract multiple metrics from ORCA output files in a job directory.
 
@@ -1101,13 +1101,24 @@ def parse_job_metrics(
     It tries to extract max forces from .engrad file first (more reliable),
     then falls back to parsing text output.
 
+    Uses check_file_termination() to robustly detect job completion status,
+    including timeouts, errors, and aborted runs.
+
     Args:
         job_dir: Path to job directory containing ORCA output.
         unzip: If True, look for gzipped files (e.g., quacc output).
+        hours_cutoff: Timeout threshold in hours for stale output files (default: 6.0).
 
     Returns:
-        Dictionary with keys: max_forces, scf_steps, final_energy, success,
-        mulliken_population (dict with charges/spins if available).
+        Dictionary with keys:
+            - max_forces: Maximum force from optimization (float or None)
+            - scf_steps: Number of SCF iterations (int or None)
+            - final_energy: Final energy in Hartree (float or None)
+            - success: True if job completed successfully (bool)
+            - is_timeout: True if job timed out (bool)
+            - termination_status: Raw status from check_file_termination (int)
+                1 = normal termination, -1 = failed/aborted, -2 = timeout, 0 = running
+            - mulliken_population: Dict with charges/spins if available (dict or None)
     """
     job_dir = Path(job_dir)
 
@@ -1125,6 +1136,9 @@ def parse_job_metrics(
                     "scf_steps": None,
                     "final_energy": None,
                     "success": False,
+                    "is_timeout": False,
+                    "termination_status": 0,
+                    "mulliken_population": None,
                 }
 
             # Unzip to temp file
@@ -1157,8 +1171,12 @@ def parse_job_metrics(
                     finally:
                         os.unlink(engrad_temp)
 
-                # Check termination from content (for gzipped files)
-                success = "ORCA TERMINATED NORMALLY" in content
+                # Check termination from temp file (for gzipped files)
+                termination_status = check_file_termination(
+                    temp_path, is_gzipped=False, hours_cutoff=hours_cutoff
+                )
+                success = termination_status == 1
+                is_timeout = termination_status == -2
 
             finally:
                 os.unlink(temp_path)
@@ -1178,11 +1196,13 @@ def parse_job_metrics(
                 except Exception:
                     pass
 
-            # Check if job completed successfully
-            # Simply check for "ORCA TERMINATED NORMALLY" in output file
-            with open(output_file) as f:
-                content = f.read()
-            success = "ORCA TERMINATED NORMALLY" in content
+            # Check if job completed successfully using robust termination check
+            # This properly detects timeouts, errors, and aborted runs
+            termination_status = check_file_termination(
+                str(output_file), is_gzipped=False, hours_cutoff=hours_cutoff
+            )
+            success = termination_status == 1  # 1 = normal termination
+            is_timeout = termination_status == -2  # -2 = timeout
 
         # Try to parse Mulliken population analysis
         mulliken_pop = parse_mulliken_population(output_file)
@@ -1192,6 +1212,8 @@ def parse_job_metrics(
             "scf_steps": scf_steps,
             "final_energy": final_energy,
             "success": success,
+            "is_timeout": is_timeout,
+            "termination_status": termination_status,
             "mulliken_population": mulliken_pop,
         }
 
@@ -1201,6 +1223,8 @@ def parse_job_metrics(
             "scf_steps": None,
             "final_energy": None,
             "success": False,
+            "is_timeout": False,
+            "termination_status": 0,
             "mulliken_population": None,
             "error": str(e),
         }
