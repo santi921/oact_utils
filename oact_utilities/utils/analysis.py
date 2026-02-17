@@ -956,13 +956,58 @@ def parse_final_energy(output_file: str) -> float | None:
         return None
 
 
-def parse_mulliken_population(output_file: str | Path) -> dict[str, list] | None:
+def parse_charge_mult_from_inp(inp_file: str | Path) -> tuple[int, int] | None:
+    """Extract charge and spin multiplicity from an ORCA .inp file.
+
+    Parses the ``* xyz <charge> <mult>`` or ``*xyz <charge> <mult>`` line.
+
+    Args:
+        inp_file: Path to an ORCA ``.inp`` file (plain text, not gzipped).
+
+    Returns:
+        Tuple of (charge, multiplicity), or None if the line was not found.
+    """
+    try:
+        inp_file = _validate_file_path(inp_file, check_exists=True)
+    except (ValueError, FileNotFoundError):
+        return None
+
+    try:
+        with open(inp_file) as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("* xyz") or stripped.startswith("*xyz"):
+                    parts = stripped.split()
+                    # "* xyz 0 5" → ['*', 'xyz', '0', '5']
+                    # "*xyz 0 5"  → ['*xyz', '0', '5']
+                    if parts[0] == "*":
+                        charge = int(parts[2])
+                        mult = int(parts[3])
+                    else:
+                        charge = int(parts[1])
+                        mult = int(parts[2])
+                    return charge, mult
+    except Exception:
+        return None
+
+    return None
+
+
+def parse_mulliken_population(
+    output_file: str | Path,
+    expected_charge: int | None = None,
+    expected_multiplicity: int | None = None,
+) -> dict[str, list] | None:
     """Extract Mulliken population analysis from an ORCA output file.
 
     Parses both Mulliken and Loewdin atomic charges and spin populations.
 
     Args:
         output_file: Path to ORCA .out file.
+        expected_charge: Expected total molecular charge for validation.
+            If None, charge validation is skipped.
+        expected_multiplicity: Expected spin multiplicity (2S+1) for validation.
+            If None, spin validation is skipped.
 
     Returns:
         Dictionary with keys:
@@ -1065,13 +1110,12 @@ def parse_mulliken_population(output_file: str | Path) -> dict[str, list] | None
         charges = result.get("mulliken_charges") or result.get("loewdin_charges")
         spins = result.get("mulliken_spins") or result.get("loewdin_spins")
 
-        if charges and spins:
-            # Default assumption: neutral molecule (charge=0), no specific multiplicity
+        if charges and spins and expected_charge is not None:
             validation = validate_charge_spin_conservation(
                 charges=charges,
                 spins=spins,
-                expected_charge=0,  # Assume neutral
-                expected_multiplicity=None,  # Unknown, skip spin validation
+                expected_charge=expected_charge,
+                expected_multiplicity=expected_multiplicity,
             )
             # Add validation results to output
             result["validation"] = validation
@@ -1194,8 +1238,40 @@ def parse_job_metrics(
             success = termination_status == 1  # 1 = normal termination
             is_timeout = termination_status == -2  # -2 = timeout
 
+        # Try to parse charge/multiplicity from .inp file for validation
+        expected_charge = None
+        expected_multiplicity = None
+        if unzip:
+            inp_gz = list(job_dir.glob("*.inp.gz"))
+            if inp_gz:
+                import gzip
+                import tempfile
+
+                with gzip.open(inp_gz[0], "rt") as f_in:
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", delete=False, suffix=".inp"
+                    ) as f_out:
+                        f_out.write(f_in.read())
+                        inp_temp = f_out.name
+                try:
+                    charge_mult = parse_charge_mult_from_inp(inp_temp)
+                    if charge_mult is not None:
+                        expected_charge, expected_multiplicity = charge_mult
+                finally:
+                    os.unlink(inp_temp)
+        else:
+            inp_files = list(job_dir.glob("*.inp"))
+            if inp_files:
+                charge_mult = parse_charge_mult_from_inp(inp_files[0])
+                if charge_mult is not None:
+                    expected_charge, expected_multiplicity = charge_mult
+
         # Try to parse Mulliken population analysis
-        mulliken_pop = parse_mulliken_population(output_file)
+        mulliken_pop = parse_mulliken_population(
+            output_file,
+            expected_charge=expected_charge,
+            expected_multiplicity=expected_multiplicity,
+        )
 
         return {
             "max_forces": max_forces,

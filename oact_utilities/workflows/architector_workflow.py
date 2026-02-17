@@ -127,36 +127,24 @@ class ArchitectorWorkflow:
         if self.conn:
             self.conn.close()
 
-    def get_jobs_by_status(
-        self,
-        status: JobStatus | list[JobStatus] | None = None,
-        limit: int | None = None,
-    ) -> list[JobRecord]:
-        """Retrieve jobs filtered by status.
+    # Columns to select by default (excludes the heavy 'geometry' column).
+    _LIGHT_COLS = (
+        "id, orig_index, elements, natoms, status, charge, spin, "
+        "job_dir, max_forces, scf_steps, final_energy, error_message, "
+        "fail_count, wall_time, n_cores"
+    )
+
+    @staticmethod
+    def _row_to_record(r: tuple, has_geometry: bool = False) -> JobRecord:
+        """Convert a database row tuple to a JobRecord.
 
         Args:
-            status: Single status, list of statuses, or None for all jobs.
-            limit: If set, return at most this many rows (SQL LIMIT).
-
-        Returns:
-            List of JobRecord objects matching the filter.
+            r: Row tuple from SQLite cursor.
+            has_geometry: If True, geometry is at index 7 and shifts
+                subsequent indices by 1 (SELECT * layout).
         """
-        suffix = f" LIMIT {int(limit)}" if limit is not None else ""
-
-        if status is None:
-            query = f"SELECT * FROM structures{suffix}"
-            cur = self._execute_with_retry(query)
-        elif isinstance(status, list):
-            placeholders = ",".join("?" * len(status))
-            query = f"SELECT * FROM structures WHERE status IN ({placeholders}){suffix}"
-            cur = self._execute_with_retry(query, tuple(s.value for s in status))
-        else:
-            query = f"SELECT * FROM structures WHERE status = ?{suffix}"
-            cur = self._execute_with_retry(query, (status.value,))
-
-        rows = cur.fetchall()
-        return [
-            JobRecord(
+        if has_geometry:
+            return JobRecord(
                 id=r[0],
                 orig_index=r[1],
                 elements=r[2],
@@ -174,8 +162,57 @@ class ArchitectorWorkflow:
                 wall_time=r[14] if len(r) > 14 else None,
                 n_cores=r[15] if len(r) > 15 else None,
             )
-            for r in rows
-        ]
+        return JobRecord(
+            id=r[0],
+            orig_index=r[1],
+            elements=r[2],
+            natoms=r[3],
+            status=JobStatus(r[4]),
+            charge=r[5],
+            spin=r[6],
+            job_dir=r[7],
+            max_forces=r[8],
+            scf_steps=r[9],
+            final_energy=r[10],
+            error_message=r[11],
+            fail_count=r[12] if len(r) > 12 and r[12] is not None else 0,
+            wall_time=r[13] if len(r) > 13 else None,
+            n_cores=r[14] if len(r) > 14 else None,
+        )
+
+    def get_jobs_by_status(
+        self,
+        status: JobStatus | list[JobStatus] | None = None,
+        limit: int | None = None,
+        include_geometry: bool = False,
+    ) -> list[JobRecord]:
+        """Retrieve jobs filtered by status.
+
+        Args:
+            status: Single status, list of statuses, or None for all jobs.
+            limit: If set, return at most this many rows (SQL LIMIT).
+            include_geometry: If True, include the geometry column (large).
+                Defaults to False for performance.
+
+        Returns:
+            List of JobRecord objects matching the filter.
+        """
+        cols = "*" if include_geometry else self._LIGHT_COLS
+        suffix = f" LIMIT {int(limit)}" if limit is not None else ""
+
+        if status is None:
+            query = f"SELECT {cols} FROM structures{suffix}"
+            cur = self._execute_with_retry(query)
+        elif isinstance(status, list):
+            placeholders = ",".join("?" * len(status))
+            query = f"SELECT {cols} FROM structures WHERE status IN ({placeholders}){suffix}"
+            cur = self._execute_with_retry(query, tuple(s.value for s in status))
+        else:
+            query = f"SELECT {cols} FROM structures WHERE status = ?{suffix}"
+            cur = self._execute_with_retry(query, (status.value,))
+
+        rows = cur.fetchall()
+        return [self._row_to_record(r, has_geometry=include_geometry) for r in rows]
 
     def update_status(
         self,
@@ -458,30 +495,10 @@ class ArchitectorWorkflow:
         Returns:
             List of JobRecord objects with fail_count >= min_fail_count.
         """
-        query = "SELECT * FROM structures WHERE COALESCE(fail_count, 0) >= ?"
+        query = f"SELECT {self._LIGHT_COLS} FROM structures WHERE COALESCE(fail_count, 0) >= ?"
         cur = self._execute_with_retry(query, (min_fail_count,))
         rows = cur.fetchall()
-        return [
-            JobRecord(
-                id=r[0],
-                orig_index=r[1],
-                elements=r[2],
-                natoms=r[3],
-                status=JobStatus(r[4]),
-                charge=r[5],
-                spin=r[6],
-                geometry=r[7],
-                job_dir=r[8],
-                max_forces=r[9],
-                scf_steps=r[10],
-                final_energy=r[11],
-                error_message=r[12],
-                fail_count=r[13] if len(r) > 13 and r[13] is not None else 0,
-                wall_time=r[14] if len(r) > 14 else None,
-                n_cores=r[15] if len(r) > 15 else None,
-            )
-            for r in rows
-        ]
+        return [self._row_to_record(r, has_geometry=False) for r in rows]
 
 
 def create_workflow(
