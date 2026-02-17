@@ -526,6 +526,7 @@ def backfill_metrics(
     unzip: bool = False,
     verbose: bool = False,
     workers: int = 4,
+    recompute: bool = False,
 ):
     """Extract metrics for completed jobs that don't have them yet.
 
@@ -536,16 +537,23 @@ def backfill_metrics(
         unzip: If True, handle gzipped output files (quacc).
         verbose: Print detailed progress messages.
         workers: Number of parallel worker threads for extraction.
+        recompute: If True, recompute metrics for all completed jobs, even those
+            that already have metrics.
     """
     root_dir = Path(root_dir)
 
-    cur = workflow._execute_with_retry(
-        """
-        SELECT id, orig_index
-        FROM structures
-        WHERE status = 'completed' AND max_forces IS NULL
-        """
-    )
+    if recompute:
+        cur = workflow._execute_with_retry(
+            "SELECT id, orig_index FROM structures WHERE status = 'completed'"
+        )
+    else:
+        cur = workflow._execute_with_retry(
+            """
+            SELECT id, orig_index
+            FROM structures
+            WHERE status = 'completed' AND max_forces IS NULL
+            """
+        )
     rows = cur.fetchall()
 
     if not rows:
@@ -896,6 +904,11 @@ def main():
         default=6,
         help="Hours of inactivity before a job is considered timed out (default: 6)",
     )
+    parser.add_argument(
+        "--recompute-metrics",
+        action="store_true",
+        help="Recompute metrics for all completed jobs, even those that already have them",
+    )
 
     args = parser.parse_args()
 
@@ -921,7 +934,7 @@ def main():
         )
 
         # Backfill metrics for previously completed jobs missing them
-        if args.extract_metrics:
+        if args.extract_metrics or args.recompute_metrics:
             backfill_metrics(
                 workflow,
                 args.update,
@@ -929,6 +942,7 @@ def main():
                 unzip=args.unzip,
                 verbose=args.verbose,
                 workers=args.workers,
+                recompute=args.recompute_metrics,
             )
 
     # Reset failed jobs if requested
