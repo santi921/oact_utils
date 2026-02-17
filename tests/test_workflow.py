@@ -543,11 +543,15 @@ def test_update_status_default_no_increment(tmp_path):
 
 
 def test_update_job_status_timeout_detection(tmp_path):
-    """Test that update_job_status correctly detects timeout jobs."""
-    db_path = tmp_path / "test.db"
+    """Test timeout detection: only stale files without termination signal are timeout.
 
+    A file with "ORCA TERMINATED NORMALLY" should be COMPLETED even if old.
+    A stale file without a termination signal should be TIMEOUT.
+    """
     from oact_utilities.utils.architector import _init_db, _insert_row
 
+    # --- Case 1: Old file WITH normal termination → COMPLETED ---
+    db_path = tmp_path / "test_completed.db"
     conn = _init_db(db_path)
     _insert_row(
         conn,
@@ -560,12 +564,9 @@ def test_update_job_status_timeout_detection(tmp_path):
     conn.commit()
     conn.close()
 
-    # Create a job directory with an old output file (timeout scenario)
-    job_dir = tmp_path / "job_timeout"
+    job_dir = tmp_path / "job_completed_old"
     job_dir.mkdir()
     output_file = job_dir / "orca.out"
-
-    # Write output with normal termination
     output_file.write_text(
         "ORCA CALCULATION\n"
         "...\n"
@@ -573,13 +574,10 @@ def test_update_job_status_timeout_detection(tmp_path):
         "...\n"
         "****ORCA TERMINATED NORMALLY****\n"
     )
-
-    # Make file old (> 6 hours)
     eight_hours_ago = time.time() - (8 * 3600)
     os.utime(output_file, (eight_hours_ago, eight_hours_ago))
 
     with ArchitectorWorkflow(db_path) as workflow:
-        # Update job status - should detect timeout
         status = update_job_status(
             workflow=workflow,
             job_dir=job_dir,
@@ -587,11 +585,41 @@ def test_update_job_status_timeout_detection(tmp_path):
             extract_metrics=True,
             unzip=False,
         )
+        assert status == JobStatus.COMPLETED, "Old completed file should stay COMPLETED"
+        jobs = workflow.get_jobs_by_status(JobStatus.COMPLETED)
+        assert len(jobs) == 1
 
-        # Should be marked as TIMEOUT
-        assert status == JobStatus.TIMEOUT, "Old file should be detected as timeout"
+    # --- Case 2: Old file WITHOUT termination signal → TIMEOUT ---
+    db_path2 = tmp_path / "test_timeout.db"
+    conn = _init_db(db_path2)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+    )
+    conn.commit()
+    conn.close()
 
-        # Verify in database
+    job_dir2 = tmp_path / "job_timeout"
+    job_dir2.mkdir()
+    output_file2 = job_dir2 / "orca.out"
+    output_file2.write_text(
+        "ORCA CALCULATION\n" "SCF CONVERGED AFTER 15 CYCLES\n" "...\n"
+    )
+    os.utime(output_file2, (eight_hours_ago, eight_hours_ago))
+
+    with ArchitectorWorkflow(db_path2) as workflow:
+        status = update_job_status(
+            workflow=workflow,
+            job_dir=job_dir2,
+            job_id=1,
+            extract_metrics=True,
+            unzip=False,
+        )
+        assert status == JobStatus.TIMEOUT, "Old inconclusive file should be TIMEOUT"
         jobs = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
         assert len(jobs) == 1
 

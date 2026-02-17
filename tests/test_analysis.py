@@ -162,16 +162,20 @@ def test_parse_job_metrics_termination_normal():
 
 
 def test_parse_job_metrics_termination_timeout():
-    """Test parse_job_metrics correctly identifies timeout jobs."""
+    """Test parse_job_metrics correctly identifies timeout vs completed jobs.
+
+    A file with "ORCA TERMINATED NORMALLY" should always be detected as
+    completed, regardless of file age. Only files without a definitive
+    termination signal should be flagged as timeout when stale.
+    """
     import os
     import time
 
-    # Create a temporary directory with an old output file
+    # Case 1: Old file WITH normal termination — should be COMPLETED, not timeout
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
         output_file = temp_dir_path / "orca.out"
 
-        # Write a file with normal termination message
         output_file.write_text(
             "ORCA CALCULATION\n"
             "...\n"
@@ -181,16 +185,37 @@ def test_parse_job_metrics_termination_timeout():
             "****ORCA TERMINATED NORMALLY****\n"
         )
 
-        # Make the file old (> 6 hours ago)
-        # Set access and modification time to 8 hours ago
         eight_hours_ago = time.time() - (8 * 3600)
         os.utime(output_file, (eight_hours_ago, eight_hours_ago))
 
         result = parse_job_metrics(temp_dir_path, unzip=False, hours_cutoff=6.0)
 
-        # Should detect as timeout
-        assert result["success"] is False, "Old file should not be success"
-        assert result["is_timeout"] is True, "Should detect timeout"
+        assert (
+            result["success"] is True
+        ), "Completed file should be success regardless of age"
+        assert result["is_timeout"] is False, "Completed file should not be timeout"
+        assert (
+            result["termination_status"] == 1
+        ), "Termination status should be 1 (normal)"
+
+    # Case 2: Old file WITHOUT termination signal — should be timeout
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        output_file = temp_dir_path / "orca.out"
+
+        output_file.write_text(
+            "ORCA CALCULATION\n" "SCF CONVERGED AFTER 15 CYCLES\n" "...\n"
+        )
+
+        eight_hours_ago = time.time() - (8 * 3600)
+        os.utime(output_file, (eight_hours_ago, eight_hours_ago))
+
+        result = parse_job_metrics(temp_dir_path, unzip=False, hours_cutoff=6.0)
+
+        assert (
+            result["success"] is False
+        ), "Stale inconclusive file should not be success"
+        assert result["is_timeout"] is True, "Stale inconclusive file should be timeout"
         assert (
             result["termination_status"] == -2
         ), "Termination status should be -2 (timeout)"

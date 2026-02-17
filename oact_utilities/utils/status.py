@@ -29,11 +29,6 @@ def check_file_termination(
     if is_gzipped is None:
         is_gzipped = file_path.endswith(".gz")
 
-    # Check file age FIRST before reading content
-    # A stale file is always a timeout, regardless of content
-    if os.path.getmtime(file_path) < (time.time() - hours_cutoff * 3600):
-        return -2
-
     # Use deque to efficiently read only last 10 lines without loading entire file
     if is_gzipped or file_path.endswith(".gz"):
         with gzip.open(file_path, "rt") as f:
@@ -42,15 +37,20 @@ def check_file_termination(
         with open(file_path) as f:
             last_lines = deque(f, maxlen=10)
 
-    # Check last 10 lines for termination status
+    # Check last 10 lines for definitive termination status first.
+    # Content-based checks take priority over file age so that completed
+    # or failed jobs keep their correct status regardless of how old they are.
     for line in last_lines:
         if "ORCA TERMINATED NORMALLY" in line:
             return 1
         if "aborting the run" in line:
             return -1
-        # also check if there is a line that says "Error" at all within the last 5 lines
         if "Error" in line:
             return -1
+
+    # No definitive signal found — check file age to detect stale/timed-out jobs
+    if os.path.getmtime(file_path) < (time.time() - hours_cutoff * 3600):
+        return -2
 
     return 0
 
