@@ -6,7 +6,7 @@ authors = [
     { name = "Santiago Vargas", email = "santiagovargas921@gmail.com" }
 ]
 requires-python = ">=3.11"
-dependencies = ["sella", "ase", "periodictable", "pandas", "parsl>=2024.1"]
+dependencies = ["sella", "ase", "periodictable", "pandas", "parsl>=2024.1", "tqdm>=4.0"]
 
 [build-system]
 requires = ["setuptools>=61.0"]
