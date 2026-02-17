@@ -526,6 +526,10 @@ def update_job_status(
 ) -> JobStatus:
     """Update a job's status by checking its output files.
 
+    Uses parse_job_metrics() which calls check_file_termination() to robustly
+    detect job completion status, including normal termination, errors, aborted
+    runs, and timeouts.
+
     Args:
         workflow: ArchitectorWorkflow instance.
         job_dir: Directory containing job output files.
@@ -534,7 +538,7 @@ def update_job_status(
         unzip: If True, handle gzipped output files (quacc).
 
     Returns:
-        The new status of the job.
+        The new status of the job (COMPLETED, FAILED, or TIMEOUT).
     """
     from ..utils.analysis import find_timings_and_cores, parse_job_metrics
 
@@ -550,7 +554,14 @@ def update_job_status(
         try:
             metrics = parse_job_metrics(job_dir, unzip=unzip)
 
-            new_status = JobStatus.COMPLETED if metrics["success"] else JobStatus.FAILED
+            # Determine job status based on termination check
+            # Check for timeout first, then success, then failed
+            if metrics.get("is_timeout", False):
+                new_status = JobStatus.TIMEOUT
+            elif metrics["success"]:
+                new_status = JobStatus.COMPLETED
+            else:
+                new_status = JobStatus.FAILED
 
             # Extract timing info for successful jobs
             wall_time = None

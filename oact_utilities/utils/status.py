@@ -28,6 +28,11 @@ def check_file_termination(
     if is_gzipped is None:
         is_gzipped = file_path.endswith(".gz")
 
+    # Check file age FIRST before reading content
+    # A stale file is always a timeout, regardless of content
+    if os.path.getmtime(file_path) < (time.time() - hours_cutoff * 3600):
+        return -2
+
     # Read file (handle both regular and gzipped)
     if is_gzipped or file_path.endswith(".gz"):
         with gzip.open(file_path, "rt") as f:
@@ -45,10 +50,6 @@ def check_file_termination(
         # also check if there is a line that says "Error" at all within the last 5 lines
         if "Error" in line:
             return -1
-
-    # check if the file was modified within the last hours_cutoff hours, if not, consider it timed out
-    if os.path.getmtime(file_path) < (time.time() - hours_cutoff * 3600):
-        return -2
 
     return 0
 

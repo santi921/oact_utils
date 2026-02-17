@@ -1,12 +1,19 @@
 """Tests for architector workflow manager."""
 
+import os
 import sqlite3
+import time
 
 import pandas as pd
 import pytest
 
 from oact_utilities.utils.architector import create_workflow_db
-from oact_utilities.workflows import ArchitectorWorkflow, JobStatus, create_workflow
+from oact_utilities.workflows import (
+    ArchitectorWorkflow,
+    JobStatus,
+    create_workflow,
+    update_job_status,
+)
 
 
 @pytest.fixture
@@ -533,3 +540,157 @@ def test_update_status_default_no_increment(tmp_path):
         jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
         assert len(jobs) == 1
         assert jobs[0].fail_count == 3  # Unchanged
+
+
+def test_update_job_status_timeout_detection(tmp_path):
+    """Test that update_job_status correctly detects timeout jobs."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+    )
+    conn.commit()
+    conn.close()
+
+    # Create a job directory with an old output file (timeout scenario)
+    job_dir = tmp_path / "job_timeout"
+    job_dir.mkdir()
+    output_file = job_dir / "orca.out"
+
+    # Write output with normal termination
+    output_file.write_text(
+        "ORCA CALCULATION\n"
+        "...\n"
+        "...\n"
+        "...\n"
+        "****ORCA TERMINATED NORMALLY****\n"
+    )
+
+    # Make file old (> 6 hours)
+    eight_hours_ago = time.time() - (8 * 3600)
+    os.utime(output_file, (eight_hours_ago, eight_hours_ago))
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Update job status - should detect timeout
+        status = update_job_status(
+            workflow=workflow,
+            job_dir=job_dir,
+            job_id=1,
+            extract_metrics=True,
+            unzip=False,
+        )
+
+        # Should be marked as TIMEOUT
+        assert status == JobStatus.TIMEOUT, "Old file should be detected as timeout"
+
+        # Verify in database
+        jobs = workflow.get_jobs_by_status(JobStatus.TIMEOUT)
+        assert len(jobs) == 1
+
+
+def test_update_job_status_error_detection(tmp_path):
+    """Test that update_job_status correctly detects error jobs."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+    )
+    conn.commit()
+    conn.close()
+
+    # Create a job directory with an error output file
+    job_dir = tmp_path / "job_error"
+    job_dir.mkdir()
+    output_file = job_dir / "orca.out"
+
+    # Write output with error in last 5 lines
+    output_file.write_text(
+        "ORCA CALCULATION\n"
+        "...\n"
+        "...\n"
+        "SCF NOT CONVERGED\n"
+        "Error: SCF failed to converge\n"
+    )
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Update job status - should detect error
+        status = update_job_status(
+            workflow=workflow,
+            job_dir=job_dir,
+            job_id=1,
+            extract_metrics=True,
+            unzip=False,
+        )
+
+        # Should be marked as FAILED
+        assert status == JobStatus.FAILED, "Error file should be detected as failed"
+
+        # Verify in database
+        jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
+        assert len(jobs) == 1
+
+
+def test_update_job_status_normal_termination(tmp_path):
+    """Test that update_job_status correctly detects normal termination."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+    )
+    conn.commit()
+    conn.close()
+
+    # Create a job directory with successful output
+    job_dir = tmp_path / "job_success"
+    job_dir.mkdir()
+    output_file = job_dir / "orca.out"
+
+    # Write output with normal termination (recent file)
+    output_file.write_text(
+        "ORCA CALCULATION\n"
+        "...\n"
+        "...\n"
+        "...\n"
+        "****ORCA TERMINATED NORMALLY****\n"
+    )
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Update job status - should detect success
+        status = update_job_status(
+            workflow=workflow,
+            job_dir=job_dir,
+            job_id=1,
+            extract_metrics=True,
+            unzip=False,
+        )
+
+        # Should be marked as COMPLETED
+        assert status == JobStatus.COMPLETED, "Normal termination should be completed"
+
+        # Verify in database
+        jobs = workflow.get_jobs_by_status(JobStatus.COMPLETED)
+        assert len(jobs) == 1
