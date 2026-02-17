@@ -627,6 +627,7 @@ def update_all_statuses(
         JobStatus.RUNNING,
         JobStatus.READY,
         JobStatus.FAILED,
+        JobStatus.TIMEOUT,
         JobStatus.TO_RUN,
     ]
     if recheck_completed:
