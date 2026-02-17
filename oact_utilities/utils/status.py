@@ -2,6 +2,7 @@ import gzip
 import os
 import re
 import time
+from collections import deque
 
 # Pattern matching ORCA's atomic SCF guess files (e.g. orca_atom0.out, orca_atom12.out)
 _ORCA_ATOM_RE = re.compile(r"^orca_atom\d+\.out$")
@@ -33,16 +34,16 @@ def check_file_termination(
     if os.path.getmtime(file_path) < (time.time() - hours_cutoff * 3600):
         return -2
 
-    # Read file (handle both regular and gzipped)
+    # Use deque to efficiently read only last 10 lines without loading entire file
     if is_gzipped or file_path.endswith(".gz"):
         with gzip.open(file_path, "rt") as f:
-            lines = f.readlines()
+            last_lines = deque(f, maxlen=10)
     else:
         with open(file_path) as f:
-            lines = f.readlines()
+            last_lines = deque(f, maxlen=10)
 
-    # Check last 5 lines for termination status
-    for line in lines[-5:]:
+    # Check last 10 lines for termination status
+    for line in last_lines:
         if "ORCA TERMINATED NORMALLY" in line:
             return 1
         if "aborting the run" in line:
@@ -105,9 +106,11 @@ def check_job_termination(
     else:
         # Check for regular .out files (skip ORCA atomic SCF guess files)
         files_out = [f for f in files if f.endswith("out") and not _is_orca_atom_scf(f)]
+
         # Check for gzipped .out.gz files (e.g., from quacc)
         if not files_out:
             files_out = [f for f in files if f.endswith(".out.gz")]
+
         # Check for .logs files
         if not files_out:
             files_out = [f for f in files if f.endswith("logs")]
@@ -201,20 +204,22 @@ def check_geometry_steps(
     else:
         output_file = dir + "/" + files_out[0]
 
-        # read last line of output_file
-        # scan through backwards to find geometry optimization cycles
-        with open(output_file) as f:
-            lines = f.readlines()
-        # reverse lines and traverse to find "GEOMETRY OPTIMIZATION CYCLE"
+        # Efficiently find last occurrence of "GEOMETRY OPTIMIZATION CYCLE"
+        # without loading entire file into memory
         # example line: *                GEOMETRY OPTIMIZATION CYCLE   1            *
+        last_cycle_line = None
+        with open(output_file) as f:
+            for line in f:
+                if "GEOMETRY OPTIMIZATION CYCLE" in line:
+                    last_cycle_line = line
 
-        for line in reversed(lines):
-            if "GEOMETRY OPTIMIZATION CYCLE" in line:
-                cycle_number = int(line.split()[-2])
-                if cycle_number > 1:
-                    return True
-                else:
-                    return False
+        if last_cycle_line:
+            try:
+                cycle_number = int(last_cycle_line.split()[-2])
+                return cycle_number > 1
+            except (ValueError, IndexError):
+                return False
+        return False
 
 
 def pull_log_file(root_dir: str) -> str:
