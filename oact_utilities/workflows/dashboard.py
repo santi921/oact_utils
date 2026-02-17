@@ -213,6 +213,13 @@ def _parallel_extract_metrics(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    try:
+        from tqdm import tqdm
+
+        use_tqdm = True
+    except ImportError:
+        use_tqdm = False
+
     if not work_items:
         return 0, 0
 
@@ -229,7 +236,18 @@ def _parallel_extract_metrics(
             for job_id, job_dir in work_items
         }
 
-        for future in as_completed(future_to_job):
+        # Create progress bar if tqdm available
+        futures = as_completed(future_to_job)
+        if use_tqdm:
+            futures = tqdm(
+                futures,
+                total=len(work_items),
+                desc="Extracting metrics",
+                unit="job",
+                disable=verbose,  # Disable tqdm if verbose (conflicts with detailed output)
+            )
+
+        for future in futures:
             job_id, job_dir = future_to_job[future]
             result = future.result()
 
@@ -391,6 +409,13 @@ def update_all_statuses(
 
     jobs = workflow.get_jobs_by_status(statuses_to_check)
 
+    try:
+        from tqdm import tqdm
+
+        use_tqdm = True
+    except ImportError:
+        use_tqdm = False
+
     if verbose:
         print(f"\nScanning {len(jobs)} jobs for status updates...")
 
@@ -402,7 +427,17 @@ def update_all_statuses(
     }
     completed_for_metrics: list[tuple[int, Path]] = []
 
-    for i, job in enumerate(jobs):
+    # Wrap jobs iterator with tqdm if available
+    jobs_iter = jobs
+    if use_tqdm:
+        jobs_iter = tqdm(
+            jobs,
+            desc="Updating statuses",
+            unit="job",
+            disable=verbose,  # Disable tqdm if verbose (conflicts with detailed output)
+        )
+
+    for i, job in enumerate(jobs_iter):
         # Format job directory name
         job_dir_name = job_dir_pattern.format(
             orig_index=job.orig_index,
