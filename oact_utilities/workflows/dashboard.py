@@ -213,6 +213,13 @@ def _parallel_extract_metrics(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    try:
+        from tqdm import tqdm
+
+        use_tqdm = True
+    except ImportError:
+        use_tqdm = False
+
     if not work_items:
         return 0, 0
 
@@ -229,7 +236,18 @@ def _parallel_extract_metrics(
             for job_id, job_dir in work_items
         }
 
-        for future in as_completed(future_to_job):
+        # Create progress bar if tqdm available
+        futures = as_completed(future_to_job)
+        if use_tqdm:
+            futures = tqdm(
+                futures,
+                total=len(work_items),
+                desc="Extracting metrics",
+                unit="job",
+                disable=verbose,  # Disable tqdm if verbose (conflicts with detailed output)
+            )
+
+        for future in futures:
             job_id, job_dir = future_to_job[future]
             result = future.result()
 
@@ -276,6 +294,229 @@ def _parallel_extract_metrics(
             )
 
     return len(success_metrics), len(failed_jobs)
+
+
+def _check_single_job_status(
+    job_id: int,
+    orig_index: int,
+    current_status: JobStatus,
+    job_dir: Path,
+    check_func: Callable,
+) -> dict:
+    """Check status of a single job (pure I/O, no DB writes).
+
+    Returns:
+        Dictionary with job_id, old_status, new_status, job_dir.
+    """
+    if not job_dir.exists():
+        return None
+
+    result = check_func(str(job_dir))
+
+    if result == 1:
+        new_status = JobStatus.COMPLETED
+    elif result == -2:
+        new_status = JobStatus.TIMEOUT
+    elif result == -1:
+        new_status = JobStatus.FAILED
+    else:
+        new_status = JobStatus.RUNNING
+
+    return {
+        "job_id": job_id,
+        "orig_index": orig_index,
+        "old_status": current_status,
+        "new_status": new_status,
+        "job_dir": job_dir,
+    }
+
+
+def _parallel_status_check(
+    workflow: ArchitectorWorkflow,
+    jobs: list,
+    root_dir: Path,
+    job_dir_pattern: str,
+    check_func: Callable,
+    verbose: bool,
+    workers: int,
+    extract_metrics: bool,
+) -> tuple[dict, list]:
+    """Check job statuses in parallel, then batch-update DB.
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        jobs: List of job objects to check.
+        root_dir: Root directory containing job subdirectories.
+        job_dir_pattern: Pattern for job directory names.
+        check_func: Status checking function.
+        verbose: Print detailed progress messages.
+        workers: Number of parallel worker threads.
+        extract_metrics: If True, collect completed jobs for metrics extraction.
+
+    Returns:
+        Tuple of (updated_counts dict, completed_for_metrics list).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    try:
+        from tqdm import tqdm
+
+        use_tqdm = True
+    except ImportError:
+        use_tqdm = False
+
+    # Phase 1: Check statuses in parallel (pure I/O, no DB)
+    status_updates = []
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        # Submit all jobs
+        future_to_job = {}
+        for job in jobs:
+            job_dir_name = job_dir_pattern.format(
+                orig_index=job.orig_index,
+                id=job.id,
+            )
+            job_dir = root_dir / job_dir_name
+
+            future = executor.submit(
+                _check_single_job_status,
+                job.id,
+                job.orig_index,
+                job.status,
+                job_dir,
+                check_func,
+            )
+            future_to_job[future] = job
+
+        # Collect results with progress bar
+        futures = as_completed(future_to_job)
+        if use_tqdm:
+            futures = tqdm(
+                futures,
+                total=len(jobs),
+                desc="Checking statuses",
+                unit="job",
+                disable=verbose,
+            )
+
+        for future in futures:
+            result = future.result()
+            if result is not None:
+                status_updates.append(result)
+
+    # Phase 2: Batch-update database
+    updated_counts = {
+        JobStatus.COMPLETED: 0,
+        JobStatus.FAILED: 0,
+        JobStatus.TIMEOUT: 0,
+        JobStatus.RUNNING: 0,
+    }
+    completed_for_metrics = []
+
+    # Group updates by new status for efficient batch processing
+    for update in status_updates:
+        if update["new_status"] != update["old_status"]:
+            workflow.update_status(update["job_id"], update["new_status"])
+            updated_counts[update["new_status"]] += 1
+
+            if verbose:
+                print(
+                    f"  Job {update['job_id']}: {update['old_status'].value} -> {update['new_status'].value}"
+                )
+
+            # Collect newly completed jobs for metrics extraction
+            if extract_metrics and update["new_status"] == JobStatus.COMPLETED:
+                completed_for_metrics.append((update["job_id"], update["job_dir"]))
+
+    return updated_counts, completed_for_metrics
+
+
+def _sequential_status_check(
+    workflow: ArchitectorWorkflow,
+    jobs: list,
+    root_dir: Path,
+    job_dir_pattern: str,
+    check_func: Callable,
+    verbose: bool,
+    extract_metrics: bool,
+) -> tuple[dict, list]:
+    """Check job statuses sequentially (fallback for debugging).
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        jobs: List of job objects to check.
+        root_dir: Root directory containing job subdirectories.
+        job_dir_pattern: Pattern for job directory names.
+        check_func: Status checking function.
+        verbose: Print detailed progress messages.
+        extract_metrics: If True, collect completed jobs for metrics extraction.
+
+    Returns:
+        Tuple of (updated_counts dict, completed_for_metrics list).
+    """
+    try:
+        from tqdm import tqdm
+
+        use_tqdm = True
+    except ImportError:
+        use_tqdm = False
+
+    updated_counts = {
+        JobStatus.COMPLETED: 0,
+        JobStatus.FAILED: 0,
+        JobStatus.TIMEOUT: 0,
+        JobStatus.RUNNING: 0,
+    }
+    completed_for_metrics = []
+
+    # Wrap jobs iterator with tqdm if available
+    jobs_iter = jobs
+    if use_tqdm:
+        jobs_iter = tqdm(
+            jobs,
+            desc="Updating statuses",
+            unit="job",
+            disable=verbose,
+        )
+
+    for i, job in enumerate(jobs_iter):
+        # Format job directory name
+        job_dir_name = job_dir_pattern.format(
+            orig_index=job.orig_index,
+            id=job.id,
+        )
+        job_dir = root_dir / job_dir_name
+
+        if not job_dir.exists():
+            continue
+
+        # Check status
+        result = check_func(str(job_dir))
+
+        if result == 1:
+            new_status = JobStatus.COMPLETED
+        elif result == -2:
+            new_status = JobStatus.TIMEOUT
+        elif result == -1:
+            new_status = JobStatus.FAILED
+        else:
+            new_status = JobStatus.RUNNING
+
+        # Update if changed
+        if new_status != job.status:
+            workflow.update_status(job.id, new_status)
+            updated_counts[new_status] += 1
+
+            if verbose:
+                print(
+                    f"  [{i+1}/{len(jobs)}] Job {job.id}: {job.status.value} -> {new_status.value}"
+                )
+
+            # Collect newly completed jobs for metrics extraction
+            if extract_metrics and new_status == JobStatus.COMPLETED:
+                completed_for_metrics.append((job.id, job_dir))
+
+    return updated_counts, completed_for_metrics
 
 
 def backfill_metrics(
@@ -352,6 +593,7 @@ def update_all_statuses(
     workers: int = 4,
     recheck_completed: bool = False,
     hours_cutoff: float = 6,
+    parallel_status_check: bool = True,
 ):
     """Scan job directories and update statuses in bulk.
 
@@ -363,9 +605,10 @@ def update_all_statuses(
         verbose: Print detailed progress messages.
         extract_metrics: If True, extract computational metrics for newly completed jobs.
         unzip: If True, handle gzipped output files (quacc).
-        workers: Number of parallel worker threads for metrics extraction.
+        workers: Number of parallel worker threads for status checking and metrics extraction.
         recheck_completed: If True, also re-verify jobs marked as completed.
         hours_cutoff: Hours of inactivity before a job is considered timed out.
+        parallel_status_check: If True, parallelize status checking (default: True for scalability).
     """
     from functools import partial
 
@@ -394,51 +637,29 @@ def update_all_statuses(
     if verbose:
         print(f"\nScanning {len(jobs)} jobs for status updates...")
 
-    updated_counts = {
-        JobStatus.COMPLETED: 0,
-        JobStatus.FAILED: 0,
-        JobStatus.TIMEOUT: 0,
-        JobStatus.RUNNING: 0,
-    }
-    completed_for_metrics: list[tuple[int, Path]] = []
-
-    for i, job in enumerate(jobs):
-        # Format job directory name
-        job_dir_name = job_dir_pattern.format(
-            orig_index=job.orig_index,
-            id=job.id,
+    if parallel_status_check:
+        # Parallel implementation (scalable for large job counts)
+        updated_counts, completed_for_metrics = _parallel_status_check(
+            workflow,
+            jobs,
+            root_dir,
+            job_dir_pattern,
+            check_func,
+            verbose,
+            workers,
+            extract_metrics,
         )
-        job_dir = root_dir / job_dir_name
-
-        if not job_dir.exists():
-            # Job directory doesn't exist yet, keep as ready
-            continue
-
-        # Check status
-        result = check_func(str(job_dir))
-
-        if result == 1:
-            new_status = JobStatus.COMPLETED
-        elif result == -2:
-            new_status = JobStatus.TIMEOUT
-        elif result == -1:
-            new_status = JobStatus.FAILED
-        else:
-            new_status = JobStatus.RUNNING
-
-        # Update if changed
-        if new_status != job.status:
-            workflow.update_status(job.id, new_status)
-            updated_counts[new_status] += 1
-
-            if verbose:
-                print(
-                    f"  [{i+1}/{len(jobs)}] Job {job.id}: {job.status.value} -> {new_status.value}"
-                )
-
-            # Collect newly completed jobs for parallel metrics extraction
-            if extract_metrics and new_status == JobStatus.COMPLETED:
-                completed_for_metrics.append((job.id, job_dir))
+    else:
+        # Sequential implementation (fallback for debugging)
+        updated_counts, completed_for_metrics = _sequential_status_check(
+            workflow,
+            jobs,
+            root_dir,
+            job_dir_pattern,
+            check_func,
+            verbose,
+            extract_metrics,
+        )
 
     # Print update summary
     print(

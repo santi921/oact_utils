@@ -1,6 +1,7 @@
 import os
 import re
 import warnings
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -449,27 +450,37 @@ def parse_scf_steps(output_file: str | Path) -> int | None:
         return None  # Invalid path format
 
     try:
+        # Pre-compile regex patterns for efficiency
+        scf_iterations_re = re.compile(r"SCF ITERATIONS\s+(\d+)")
+        scf_cycle_re = re.compile(r"^\s*(\d+)\s+-?\d+\.\d+\s+")
+
+        scf_iterations = []
+        max_cycle = -1
+
+        # Stream line-by-line instead of loading entire file (Issue #007)
         with open(output_file) as f:
-            content = f.read()
+            for line in f:
+                # Look for "SCF ITERATIONS" lines
+                match = scf_iterations_re.search(line)
+                if match:
+                    scf_iterations.append(int(match.group(1)))
+                    continue
 
-        # Count SCF iterations
-        # Look for lines like "SCF ITERATIONS"
-        # Or count the number of times "SCF converged" appears
-        scf_pattern = r"SCF ITERATIONS\s+(\d+)"
-        matches = re.findall(scf_pattern, content)
+                # Look for cycle numbers in SCF output
+                # Example: "  0   -123.456789012   0.000000e+00  0.12345678..."
+                match = scf_cycle_re.match(line)
+                if match:
+                    cycle_num = int(match.group(1))
+                    if cycle_num > max_cycle:
+                        max_cycle = cycle_num
 
-        if matches:
-            # Sum all SCF iterations if multiple geometry steps
-            return sum(int(m) for m in matches)
+        # Return sum of SCF iterations if found
+        if scf_iterations:
+            return sum(scf_iterations)
 
-        # Alternative: look for cycle numbers in SCF output
-        # Example: "ITER       Energy         Delta-E        Max-DP      RMS-DP      [F,P]     Damp"
-        #          "  0   -123.456789012   0.000000e+00  0.12345678  0.01234567  0.1234567  0.7000"
-        cycle_pattern = r"^\s*(\d+)\s+-?\d+\.\d+\s+"
-        cycles = re.findall(cycle_pattern, content, re.MULTILINE)
-        if cycles:
-            # Return the highest cycle number + 1 (since cycles start at 0)
-            return max(int(c) for c in cycles) + 1
+        # Otherwise return max cycle + 1 (since cycles start at 0)
+        if max_cycle >= 0:
+            return max_cycle + 1
 
         return None
 
@@ -586,8 +597,6 @@ def find_timings_and_cores(log_file: str) -> list:
 
     # iterate through files_out until you hit line with "nprocs" line
     # Use deque to keep only last N lines without loading full file (Issue #007)
-    from collections import deque
-
     with open(log_file) as f:
         # don't read whole file into memory
         for line in f:

@@ -256,3 +256,10 @@ parsl.*
 *.doc
 *.docx
 *.zip
+*.db
+*.db-shm
+*.db-wal
+*.md
+
+# also ignore .py if they are in data directory
+data/*.py

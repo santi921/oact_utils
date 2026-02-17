@@ -23,7 +23,8 @@ def test_check_file_termination_gzipped():
     gz_file = quacc_dir / "orca.out.gz"
     assert gz_file.exists(), f"Test file {gz_file} not found"
 
-    status = check_file_termination(str(gz_file))
+    # Use large hours_cutoff to avoid test fixtures timing out
+    status = check_file_termination(str(gz_file), hours_cutoff=100000)
     assert status == 1, f"Expected status 1 (success), got {status}"
 
 
@@ -34,7 +35,8 @@ def test_check_job_termination_quacc_output():
 
     assert quacc_dir.exists(), f"Test directory {quacc_dir} not found"
 
-    status = check_job_termination(str(quacc_dir))
+    # Use large hours_cutoff to avoid test fixtures timing out
+    status = check_job_termination(str(quacc_dir), hours_cutoff=100000)
     assert status == 1, f"Expected status 1 (success), got {status}"
 
 
