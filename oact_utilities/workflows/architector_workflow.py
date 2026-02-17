@@ -128,25 +128,30 @@ class ArchitectorWorkflow:
             self.conn.close()
 
     def get_jobs_by_status(
-        self, status: JobStatus | list[JobStatus] | None = None
+        self,
+        status: JobStatus | list[JobStatus] | None = None,
+        limit: int | None = None,
     ) -> list[JobRecord]:
         """Retrieve jobs filtered by status.
 
         Args:
             status: Single status, list of statuses, or None for all jobs.
+            limit: If set, return at most this many rows (SQL LIMIT).
 
         Returns:
             List of JobRecord objects matching the filter.
         """
+        suffix = f" LIMIT {int(limit)}" if limit is not None else ""
+
         if status is None:
-            query = "SELECT * FROM structures"
+            query = f"SELECT * FROM structures{suffix}"
             cur = self._execute_with_retry(query)
         elif isinstance(status, list):
             placeholders = ",".join("?" * len(status))
-            query = f"SELECT * FROM structures WHERE status IN ({placeholders})"
+            query = f"SELECT * FROM structures WHERE status IN ({placeholders}){suffix}"
             cur = self._execute_with_retry(query, tuple(s.value for s in status))
         else:
-            query = "SELECT * FROM structures WHERE status = ?"
+            query = f"SELECT * FROM structures WHERE status = ?{suffix}"
             cur = self._execute_with_retry(query, (status.value,))
 
         rows = cur.fetchall()

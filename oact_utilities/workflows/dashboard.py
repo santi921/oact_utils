@@ -544,16 +544,18 @@ def backfill_metrics(
     """
     root_dir = Path(root_dir)
 
+    limit_clause = f" LIMIT {int(max_jobs)}" if max_jobs is not None else ""
+
     if recompute:
         cur = workflow._execute_with_retry(
-            "SELECT id, orig_index FROM structures WHERE status = 'completed'"
+            f"SELECT id, orig_index FROM structures WHERE status = 'completed'{limit_clause}"
         )
     else:
         cur = workflow._execute_with_retry(
-            """
+            f"""
             SELECT id, orig_index
             FROM structures
-            WHERE status = 'completed' AND max_forces IS NULL
+            WHERE status = 'completed' AND max_forces IS NULL{limit_clause}
             """
         )
     rows = cur.fetchall()
@@ -563,10 +565,8 @@ def backfill_metrics(
         return
 
     if max_jobs is not None:
-        total_found = len(rows)
-        rows = rows[:max_jobs]
         print(
-            f"\n[debug] Limiting metrics extraction to {len(rows)} of {total_found} jobs"
+            f"\n[debug] Limiting metrics extraction to {len(rows)} jobs (--debug {max_jobs})"
         )
 
     # Build work items, filtering out missing directories
@@ -652,12 +652,10 @@ def update_all_statuses(
     if recheck_completed:
         statuses_to_check.append(JobStatus.COMPLETED)
 
-    jobs = workflow.get_jobs_by_status(statuses_to_check)
+    jobs = workflow.get_jobs_by_status(statuses_to_check, limit=max_jobs)
 
     if max_jobs is not None:
-        total_found = len(jobs)
-        jobs = jobs[:max_jobs]
-        print(f"\n[debug] Limiting to {len(jobs)} of {total_found} jobs")
+        print(f"\n[debug] Limiting to {len(jobs)} jobs (--debug {max_jobs})")
 
     if verbose:
         print(f"\nScanning {len(jobs)} jobs for status updates...")
