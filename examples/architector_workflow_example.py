@@ -17,8 +17,14 @@ from oact_utilities.workflows import ArchitectorWorkflow, JobStatus, create_work
 def setup_workflow():
     """Create a new workflow from architector CSV file."""
 
-    csv_path = "/Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32.csv"  # Your architector CSV
-    db_path = "./santi_results_compiled_2026-02-14_08-15-32.db"  # SQLite database
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_actinides_sample.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_actinides.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_non_actinides_sample.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_non_actinides.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32.csv
+
+    csv_path = "/Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_actinides_sample.csv"  # Your architector CSV
+    db_path = "./santi_results_compiled_2026-02-14_08-15-32_actinides_sample.db"  # SQLite database
 
     # Create workflow (chunks CSV and initializes database)
     db_path, workflow = create_workflow(

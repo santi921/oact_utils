@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Callable, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
-from ..utils.analysis import parse_job_metrics
+from ..utils.analysis import find_timings_and_cores, parse_job_metrics
 from ..utils.architector import xyz_string_to_atoms
+from ..utils.status import pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
 
 try:
@@ -841,6 +842,18 @@ def submit_batch_parsl(
                     # Extract metrics on the fly for successful jobs
                     try:
                         metrics = parse_job_metrics(job_dir)
+                        wall_time = None
+                        n_cores = None
+                        try:
+                            log_file = pull_log_file(str(job_dir))
+                            n_cores_val, time_dict = find_timings_and_cores(log_file)
+                            if time_dict and "Total" in time_dict:
+                                wall_time = time_dict["Total"]
+                            n_cores = n_cores_val
+                        except Exception as e:
+                            print(
+                                f"  Warning: timing extraction failed for job {job_id}: {e}"
+                            )
                         if metrics["success"]:
                             workflow.update_job_metrics(
                                 job_id,
@@ -848,6 +861,8 @@ def submit_batch_parsl(
                                 max_forces=metrics.get("max_forces"),
                                 scf_steps=metrics.get("scf_steps"),
                                 final_energy=metrics.get("final_energy"),
+                                wall_time=wall_time,
+                                n_cores=n_cores,
                             )
                     except Exception as e:
                         print(
