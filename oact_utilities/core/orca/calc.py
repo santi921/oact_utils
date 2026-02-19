@@ -114,6 +114,10 @@ BASIS_DICT = {
     "Po": 59,
     "At": 59,
     "Rn": 59,
+    # Period 7 s-block (analogues of Cs=32, Ba=40)
+    "Fr": 32,
+    "Ra": 40,
+    # Actinides
     "Ac": 105,
     "Th": 105,
     "Pa": 105,
@@ -129,6 +133,22 @@ BASIS_DICT = {
     "Md": 105,
     "No": 105,
     "Lr": 105,
+    # Transactinides (6d: Rf-Cn analogues of Hf-Hg; 7p: Nh-Og analogues of Tl-Rn)
+    "Rf": 43,
+    "Db": 43,
+    "Sg": 43,
+    "Bh": 43,
+    "Hs": 43,
+    "Mt": 43,
+    "Ds": 43,
+    "Rg": 43,
+    "Cn": 46,
+    "Nh": 56,
+    "Fl": 56,
+    "Mc": 56,
+    "Lv": 59,
+    "Ts": 59,
+    "Og": 59,
 }
 
 ACTINIDE_LIST = [
