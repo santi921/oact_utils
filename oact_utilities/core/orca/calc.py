@@ -338,7 +338,7 @@ def get_mem_estimate(
     """
     Get an estimate of the memory requirement for given input in MB.
 
-    If the estimate is less than 1000MB, we return 1000MB.
+    If the estimate is less than 4000MB, we return 4000MB.
 
     :param atoms: atoms to compute the number of basis functions of
     :param vertical: Which vertical this is for (all metal-organics are
@@ -355,7 +355,7 @@ def get_mem_estimate(
         # Default UKS scaling as determined by metal-organics in Orca5
         a = 0.016460518374501867
         b = -320.38502508802776
-    mem_est = int(max(a * nbasis**1.5 + b, 2000))
+    mem_est = int(max(a * nbasis**1.5 + b, 4000))
     return mem_est
 
 
