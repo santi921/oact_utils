@@ -26,6 +26,7 @@ def single_point_calculation(
     outputdir=os.getcwd(),
     vertical=Vertical.Default,
     nbo=False,
+    mbis=False,
     orca_cmd: str = "orca",
     copy_files=None,
     **calc_kwargs,
@@ -56,6 +57,8 @@ def single_point_calculation(
         Number of processes to parallelize across
     nbo: bool
         Run NBO as part of the Orca calculation
+    mbis: bool
+        Run MBIS population analysis as part of the Orca calculation
     outputdir: str
         Directory to move results to upon completion
     calc_kwargs:
@@ -65,6 +68,7 @@ def single_point_calculation(
     orcasimpleinput, orcablocks = get_orca_blocks(
         atoms,
         nbo=nbo,
+        mbis=mbis,
         cores=nprocs,
         basis=None,
         vertical=vertical,
@@ -118,6 +122,7 @@ def ase_relaxation(
     vertical=Vertical.Default,
     copy_files=None,
     nbo=False,
+    mbis=False,
     orca_cmd: str = "orca",
     step_counter_start=0,
     **calc_kwargs,
@@ -150,6 +155,8 @@ def ase_relaxation(
         Dictionary of optimizer parameters
     nbo: bool
         Run NBO as part of the Orca calculation
+    mbis: bool
+        Run MBIS population analysis as part of the Orca calculation
     step_counter_start: int
         Index to start step counter from (used for optimization restarts)
     outputdir: str
@@ -161,6 +168,7 @@ def ase_relaxation(
     orcasimpleinput, orcablocks = get_orca_blocks(
         atoms,
         nbo=nbo,
+        mbis=mbis,
         cores=nprocs,
         vertical=vertical,
         basis=None,
@@ -210,6 +218,7 @@ def pure_ase_relaxation(
     outputdir=os.getcwd(),
     vertical=Vertical.Default,
     nbo=False,
+    mbis=False,
     traj_file: str = "opt.traj",
     orca_cmd: str = "orca",
     **calc_kwargs,
@@ -241,6 +250,8 @@ def pure_ase_relaxation(
         Dictionary of optimizer parameters
     nbo: bool
         Run NBO as part of the Orca calculation
+    mbis: bool
+        Run MBIS population analysis as part of the Orca calculation
     step_counter_start: int
         Index to start step counter from (used for optimization restarts)
     outputdir: str
@@ -252,6 +263,7 @@ def pure_ase_relaxation(
     orcasimpleinput, orcablocks = get_orca_blocks(
         atoms,
         nbo=nbo,
+        mbis=mbis,
         cores=nprocs,
         vertical=vertical,
         basis=None,

@@ -114,6 +114,10 @@ BASIS_DICT = {
     "Po": 59,
     "At": 59,
     "Rn": 59,
+    # Period 7 s-block (analogues of Cs=32, Ba=40)
+    "Fr": 32,
+    "Ra": 40,
+    # Actinides
     "Ac": 105,
     "Th": 105,
     "Pa": 105,
@@ -129,6 +133,22 @@ BASIS_DICT = {
     "Md": 105,
     "No": 105,
     "Lr": 105,
+    # Transactinides (6d: Rf-Cn analogues of Hf-Hg; 7p: Nh-Og analogues of Tl-Rn)
+    "Rf": 43,
+    "Db": 43,
+    "Sg": 43,
+    "Bh": 43,
+    "Hs": 43,
+    "Mt": 43,
+    "Ds": 43,
+    "Rg": 43,
+    "Cn": 46,
+    "Nh": 56,
+    "Fl": 56,
+    "Mc": 56,
+    "Lv": 59,
+    "Ts": 59,
+    "Og": 59,
 }
 
 ACTINIDE_LIST = [
@@ -192,21 +212,27 @@ ORCA_SIMPLE_INPUT_DK3 = [
 ORCA_BLOCKS = [
     "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  Shift Shift 0.1 ErrOff 0.1 end\n  DIISMaxEq   7\n  Guess PModel\nend",
     "%elprop Dipole true Quadrupole true end",
-    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
+    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 Print[ P_Hirshfeld ] 1 end",
+]
+
+ORCA_BLOCKS_BASE = [
+    "%scf \n  Convergence Tight\n  maxiter 600\n  THRESH 1e-12\n  TCUT 1e-13\nend",
+    "%elprop Dipole true Quadrupole true end",
+    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 Print[ P_Hirshfeld ] 1 end",
 ]
 
 ORCA_BLOCKS_X2C = [
     "%rel \n  FiniteNuc     true\n  DLU         true\n  LightAtomThresh 0\nend",
     "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  Shift Shift 0.1 ErrOff 0.1 end\nend",
     "%elprop Dipole true Quadrupole true end",
-    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
+    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 Print[ P_Hirshfeld ] 1 end",
 ]
 
 ORCA_BLOCKS_DK3 = [
     "%rel \n  FiniteNuc     true\nend\n",
     "%scf \n  Convergence Tight\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  Shift Shift 0.1 ErrOff 0.1 end\nend",
     "%elprop Dipole true Quadrupole true end",
-    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 end",
+    "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 Print[ P_Hirshfeld ] 1 end",
 ]
 
 NBO_FLAGS = '%nbo NBOKEYLIST = "$NBO NPA NBO E2PERT 0.1 $END" end'  # SV - turn off??
@@ -337,6 +363,7 @@ def get_orca_blocks(
     atoms: Atoms,
     mult: int = 1,
     nbo: bool = True,
+    mbis: bool = False,
     cores: int = 12,
     opt: bool = False,
     simple_input: str = "omol",
@@ -368,6 +395,17 @@ def get_orca_blocks(
             if error_code == -1:
                 print("Using looser SCF settings due to previous SCF failure.")
                 # we know it's the first block we need to modify
+                orcablocks[0] = re.sub(
+                    r"Convergence Tight", "Convergence Medium", orcablocks[0]
+                )
+
+    elif simple_input == "omol_base":
+        simple = ORCA_SIMPLE_INPUT.copy()
+        simple.insert(0, job)
+        orcablocks = ORCA_BLOCKS_BASE.copy()
+        if error_handle:
+            if error_code == -1:
+                print("Using looser SCF settings due to previous SCF failure.")
                 orcablocks[0] = re.sub(
                     r"Convergence Tight", "Convergence Medium", orcablocks[0]
                 )
@@ -449,6 +487,9 @@ def get_orca_blocks(
     else:
         orcablocks.append(f"{NBO_FLAGS}")
 
+    if mbis:
+        orcasimpleinput += " MBIS"
+
     if vertical in {Vertical.MetalOrganics, Vertical.Oss} and mult == 1:
         orcasimpleinput += " UKS"
         orcablocks.append(get_symm_break_block(atoms, charge=0))
@@ -484,6 +525,7 @@ def write_orca_inputs(
     charge: int = 0,
     mult: int = 1,
     nbo: bool = False,
+    mbis: bool = False,
     cores: int = 12,
     opt: bool = False,
     functional: str = "wB97M-V",
@@ -518,6 +560,7 @@ def write_orca_inputs(
     orcasimpleinput, orcablocks = get_orca_blocks(
         atoms=atoms,
         nbo=nbo,
+        mbis=mbis,
         cores=cores,
         opt=opt,
         vertical=vertical,

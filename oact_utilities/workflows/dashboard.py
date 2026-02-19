@@ -404,7 +404,7 @@ def _parallel_status_check(
             if result is not None:
                 status_updates.append(result)
 
-    # Phase 2: Batch-update database
+    # Phase 2: Batch-update database — group by status for fewer commits
     updated_counts = {
         JobStatus.COMPLETED: 0,
         JobStatus.FAILED: 0,
@@ -413,10 +413,11 @@ def _parallel_status_check(
     }
     completed_for_metrics = []
 
-    # Group updates by new status for efficient batch processing
+    # Group changed jobs by their new status
+    status_groups: dict[JobStatus, list[int]] = {}
     for update in status_updates:
         if update["new_status"] != update["old_status"]:
-            workflow.update_status(update["job_id"], update["new_status"])
+            status_groups.setdefault(update["new_status"], []).append(update["job_id"])
             updated_counts[update["new_status"]] += 1
 
             if verbose:
@@ -424,9 +425,11 @@ def _parallel_status_check(
                     f"  Job {update['job_id']}: {update['old_status'].value} -> {update['new_status'].value}"
                 )
 
-            # Collect newly completed jobs for metrics extraction
             if extract_metrics and update["new_status"] == JobStatus.COMPLETED:
                 completed_for_metrics.append((update["job_id"], update["job_dir"]))
+
+    # Single transaction for all status groups (one commit total)
+    workflow.update_status_bulk_multi(status_groups)
 
     return updated_counts, completed_for_metrics
 
@@ -479,6 +482,9 @@ def _sequential_status_check(
             disable=verbose,
         )
 
+    # Collect all status changes, then batch-write at the end
+    status_groups: dict[JobStatus, list[int]] = {}
+
     for i, job in enumerate(jobs_iter):
         # Format job directory name
         job_dir_name = job_dir_pattern.format(
@@ -502,9 +508,9 @@ def _sequential_status_check(
         else:
             new_status = JobStatus.RUNNING
 
-        # Update if changed
+        # Track if changed
         if new_status != job.status:
-            workflow.update_status(job.id, new_status)
+            status_groups.setdefault(new_status, []).append(job.id)
             updated_counts[new_status] += 1
 
             if verbose:
@@ -512,9 +518,11 @@ def _sequential_status_check(
                     f"  [{i+1}/{len(jobs)}] Job {job.id}: {job.status.value} -> {new_status.value}"
                 )
 
-            # Collect newly completed jobs for metrics extraction
             if extract_metrics and new_status == JobStatus.COMPLETED:
                 completed_for_metrics.append((job.id, job_dir))
+
+    # Single transaction for all status groups (one commit total)
+    workflow.update_status_bulk_multi(status_groups)
 
     return updated_counts, completed_for_metrics
 
@@ -544,16 +552,18 @@ def backfill_metrics(
     """
     root_dir = Path(root_dir)
 
+    limit_clause = f" LIMIT {int(max_jobs)}" if max_jobs is not None else ""
+
     if recompute:
         cur = workflow._execute_with_retry(
-            "SELECT id, orig_index FROM structures WHERE status = 'completed'"
+            f"SELECT id, orig_index FROM structures WHERE status = 'completed'{limit_clause}"
         )
     else:
         cur = workflow._execute_with_retry(
-            """
+            f"""
             SELECT id, orig_index
             FROM structures
-            WHERE status = 'completed' AND max_forces IS NULL
+            WHERE status = 'completed' AND max_forces IS NULL{limit_clause}
             """
         )
     rows = cur.fetchall()
@@ -563,10 +573,8 @@ def backfill_metrics(
         return
 
     if max_jobs is not None:
-        total_found = len(rows)
-        rows = rows[:max_jobs]
         print(
-            f"\n[debug] Limiting metrics extraction to {len(rows)} of {total_found} jobs"
+            f"\n[debug] Limiting metrics extraction to {len(rows)} jobs (--debug {max_jobs})"
         )
 
     # Build work items, filtering out missing directories
@@ -652,12 +660,10 @@ def update_all_statuses(
     if recheck_completed:
         statuses_to_check.append(JobStatus.COMPLETED)
 
-    jobs = workflow.get_jobs_by_status(statuses_to_check)
+    jobs = workflow.get_jobs_by_status(statuses_to_check, limit=max_jobs)
 
     if max_jobs is not None:
-        total_found = len(jobs)
-        jobs = jobs[:max_jobs]
-        print(f"\n[debug] Limiting to {len(jobs)} of {total_found} jobs")
+        print(f"\n[debug] Limiting to {len(jobs)} jobs (--debug {max_jobs})")
 
     if verbose:
         print(f"\nScanning {len(jobs)} jobs for status updates...")

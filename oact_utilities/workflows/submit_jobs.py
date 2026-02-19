@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Callable, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
+from ..utils.analysis import find_timings_and_cores, parse_job_metrics
 from ..utils.architector import xyz_string_to_atoms
+from ..utils.status import pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
 
 try:
@@ -32,12 +34,13 @@ class OrcaConfig(TypedDict, total=False):
 
     Attributes:
         functional: DFT functional (default: "wB97M-V").
-        simple_input: Input template (default: "omol"). Options: "omol", "x2c", "dk3".
+        simple_input: Input template (default: "omol"). Options: "omol", "omol_base", "x2c", "dk3".
         actinide_basis: Basis set for actinides (default: "ma-def-TZVP").
         actinide_ecp: ECP for actinides (default: None).
         non_actinide_basis: Basis set for non-actinides (default: "def2-TZVPD").
         scf_MaxIter: Maximum SCF iterations (default: None, uses ORCA default).
         nbo: Enable NBO analysis (default: False).
+        mbis: Enable MBIS population analysis (default: False).
         opt: Enable geometry optimization (default: False).
         orca_path: Path to ORCA executable (default: scheduler-specific).
     """
@@ -49,6 +52,7 @@ class OrcaConfig(TypedDict, total=False):
     non_actinide_basis: str
     scf_MaxIter: int | None
     nbo: bool
+    mbis: bool
     opt: bool
     orca_path: str
     diis_option: str | None
@@ -62,6 +66,7 @@ DEFAULT_ORCA_CONFIG: OrcaConfig = {
     "non_actinide_basis": "def2-TZVPD",
     "scf_MaxIter": None,
     "nbo": False,
+    "mbis": False,
     "opt": False,
     "diis_option": None,
 }
@@ -138,6 +143,7 @@ def prepare_job_directory(
             charge=charge,
             mult=mult,
             nbo=config.get("nbo", False),
+            mbis=config.get("mbis", False),
             diis_option=config.get("diis_option"),
             cores=n_cores,
             opt=config.get("opt", False),
@@ -295,7 +301,10 @@ def filter_jobs_for_submission(
         List of JobRecords ready for submission
     """
     # Get ready jobs (DB is source of truth)
-    ready_jobs = workflow.get_jobs_by_status([JobStatus.TO_RUN, JobStatus.READY])
+    # include_geometry=True so prepare_job_directory can write the .inp file
+    ready_jobs = workflow.get_jobs_by_status(
+        [JobStatus.TO_RUN, JobStatus.READY], include_geometry=True
+    )
 
     # Apply fail_count filter if specified
     if max_fail_count is not None:
@@ -807,7 +816,7 @@ def submit_batch_parsl(
             orca_config=dict(config),
             timeout_seconds=timeout_seconds,
         )
-        futures.append((job.id, future))
+        futures.append((job.id, str(job_dir_abs), future))
 
     # Monitor futures concurrently (CRITICAL: use as_completed, not sequential loop)
     print("\nMonitoring job execution...")
@@ -816,19 +825,50 @@ def submit_batch_parsl(
     completed_ids = []
     failed_ids = []
 
-    # Create future->job_id mapping for concurrent completion
-    futures_map = {future: job_id for job_id, future in futures}
+    # Create future->(job_id, job_dir) mapping for concurrent completion
+    futures_map = {future: (job_id, job_dir) for job_id, job_dir, future in futures}
 
     try:
         # as_completed() yields futures as they finish (concurrent, not sequential!)
         for future in as_completed(futures_map.keys()):
-            job_id = futures_map[future]
+            job_id, job_dir = futures_map[future]
             try:
                 result = future.result()
 
                 if result["status"] == "completed":
                     workflow.update_status(job_id, JobStatus.COMPLETED)
                     completed_ids.append(job_id)
+
+                    # Extract metrics on the fly for successful jobs
+                    try:
+                        metrics = parse_job_metrics(job_dir)
+                        wall_time = None
+                        n_cores = None
+                        try:
+                            log_file = pull_log_file(str(job_dir))
+                            n_cores_val, time_dict = find_timings_and_cores(log_file)
+                            if time_dict and "Total" in time_dict:
+                                wall_time = time_dict["Total"]
+                            n_cores = n_cores_val
+                        except Exception as e:
+                            print(
+                                f"  Warning: timing extraction failed for job {job_id}: {e}"
+                            )
+                        if metrics["success"]:
+                            workflow.update_job_metrics(
+                                job_id,
+                                job_dir=job_dir,
+                                max_forces=metrics.get("max_forces"),
+                                scf_steps=metrics.get("scf_steps"),
+                                final_energy=metrics.get("final_energy"),
+                                wall_time=wall_time,
+                                n_cores=n_cores,
+                            )
+                    except Exception as e:
+                        print(
+                            f"  Warning: metrics extraction failed for job {job_id}: {e}"
+                        )
+
                     print(
                         f" Job {job_id} completed ({len(completed_ids)}/{len(futures)} done)"
                     )
@@ -947,7 +987,10 @@ def submit_batch(
         )
 
     # Get ready jobs (includes both TO_RUN and READY for backward compatibility)
-    ready_jobs = workflow.get_jobs_by_status([JobStatus.TO_RUN, JobStatus.READY])
+    # include_geometry=True so prepare_job_directory can write the .inp file
+    ready_jobs = workflow.get_jobs_by_status(
+        [JobStatus.TO_RUN, JobStatus.READY], include_geometry=True
+    )
 
     # Filter out jobs that have failed too many times
     if max_fail_count is not None:
@@ -1203,7 +1246,7 @@ def main():
     )
     orca_group.add_argument(
         "--simple-input",
-        choices=["omol", "x2c", "dk3"],
+        choices=["omol", "omol_base", "x2c", "dk3"],
         default="omol",
         help="ORCA input template (default: omol)",
     )
@@ -1234,6 +1277,11 @@ def main():
         help="Enable NBO analysis",
     )
     orca_group.add_argument(
+        "--mbis",
+        action="store_true",
+        help="Enable MBIS population analysis",
+    )
+    orca_group.add_argument(
         "--kdiis",
         action="store_true",
         help="Enable KDIIS SCF convergence acceleration",
@@ -1262,6 +1310,7 @@ def main():
         "non_actinide_basis": args.non_actinide_basis,
         "scf_MaxIter": args.scf_maxiter,
         "nbo": args.nbo,
+        "mbis": args.mbis,
         "opt": args.opt,
         "diis_option": "KDIIS" if args.kdiis else None,
     }

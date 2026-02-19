@@ -66,12 +66,14 @@ class ArchitectorWorkflow:
     - Generate dashboard reports
     """
 
-    def __init__(self, db_path: str | Path, timeout: float = 30.0):
+    def __init__(self, db_path: str | Path, timeout: float = 5.0):
         """Initialize workflow manager with existing database.
 
         Args:
             db_path: Path to the SQLite database file.
-            timeout: Timeout in seconds for database locks.
+            timeout: SQLite busy-wait timeout in seconds per lock attempt.
+                Kept short so the Python-level retry loop can back off
+                and re-try quickly under concurrent access (e.g. Parsl).
         """
         self.db_path = Path(db_path)
         if not self.db_path.exists():
@@ -108,8 +110,30 @@ class ArchitectorWorkflow:
                 return cur
             except sqlite3.OperationalError as e:
                 if "locked" in str(e).lower() and attempt < max_retries - 1:
-                    delay = min(0.5 * (2**attempt), 5.0)
-                    jitter = random.uniform(0, 0.5)
+                    delay = min(0.1 * (2**attempt), 2.0)
+                    jitter = random.uniform(0, 0.1)
+                    time.sleep(delay + jitter)
+                    continue
+                raise
+
+    def _commit_with_retry(self, max_retries: int = 10):
+        """Commit with retry logic for handling database locks.
+
+        The conn.commit() call can also raise 'database is locked' when
+        another process holds the write lock (e.g. Parsl workers updating
+        job statuses concurrently).
+
+        Args:
+            max_retries: Maximum number of retries.
+        """
+        for attempt in range(max_retries):
+            try:
+                self.conn.commit()
+                return
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower() and attempt < max_retries - 1:
+                    delay = min(0.1 * (2**attempt), 2.0)
+                    jitter = random.uniform(0, 0.1)
                     time.sleep(delay + jitter)
                     continue
                 raise
@@ -127,31 +151,24 @@ class ArchitectorWorkflow:
         if self.conn:
             self.conn.close()
 
-    def get_jobs_by_status(
-        self, status: JobStatus | list[JobStatus] | None = None
-    ) -> list[JobRecord]:
-        """Retrieve jobs filtered by status.
+    # Columns to select by default (excludes the heavy 'geometry' column).
+    _LIGHT_COLS = (
+        "id, orig_index, elements, natoms, status, charge, spin, "
+        "job_dir, max_forces, scf_steps, final_energy, error_message, "
+        "fail_count, wall_time, n_cores"
+    )
+
+    @staticmethod
+    def _row_to_record(r: tuple, has_geometry: bool = False) -> JobRecord:
+        """Convert a database row tuple to a JobRecord.
 
         Args:
-            status: Single status, list of statuses, or None for all jobs.
-
-        Returns:
-            List of JobRecord objects matching the filter.
+            r: Row tuple from SQLite cursor.
+            has_geometry: If True, geometry is at index 7 and shifts
+                subsequent indices by 1 (SELECT * layout).
         """
-        if status is None:
-            query = "SELECT * FROM structures"
-            cur = self._execute_with_retry(query)
-        elif isinstance(status, list):
-            placeholders = ",".join("?" * len(status))
-            query = f"SELECT * FROM structures WHERE status IN ({placeholders})"
-            cur = self._execute_with_retry(query, tuple(s.value for s in status))
-        else:
-            query = "SELECT * FROM structures WHERE status = ?"
-            cur = self._execute_with_retry(query, (status.value,))
-
-        rows = cur.fetchall()
-        return [
-            JobRecord(
+        if has_geometry:
+            return JobRecord(
                 id=r[0],
                 orig_index=r[1],
                 elements=r[2],
@@ -169,8 +186,57 @@ class ArchitectorWorkflow:
                 wall_time=r[14] if len(r) > 14 else None,
                 n_cores=r[15] if len(r) > 15 else None,
             )
-            for r in rows
-        ]
+        return JobRecord(
+            id=r[0],
+            orig_index=r[1],
+            elements=r[2],
+            natoms=r[3],
+            status=JobStatus(r[4]),
+            charge=r[5],
+            spin=r[6],
+            job_dir=r[7],
+            max_forces=r[8],
+            scf_steps=r[9],
+            final_energy=r[10],
+            error_message=r[11],
+            fail_count=r[12] if len(r) > 12 and r[12] is not None else 0,
+            wall_time=r[13] if len(r) > 13 else None,
+            n_cores=r[14] if len(r) > 14 else None,
+        )
+
+    def get_jobs_by_status(
+        self,
+        status: JobStatus | list[JobStatus] | None = None,
+        limit: int | None = None,
+        include_geometry: bool = False,
+    ) -> list[JobRecord]:
+        """Retrieve jobs filtered by status.
+
+        Args:
+            status: Single status, list of statuses, or None for all jobs.
+            limit: If set, return at most this many rows (SQL LIMIT).
+            include_geometry: If True, include the geometry column (large).
+                Defaults to False for performance.
+
+        Returns:
+            List of JobRecord objects matching the filter.
+        """
+        cols = "*" if include_geometry else self._LIGHT_COLS
+        suffix = f" LIMIT {int(limit)}" if limit is not None else ""
+
+        if status is None:
+            query = f"SELECT {cols} FROM structures{suffix}"
+            cur = self._execute_with_retry(query)
+        elif isinstance(status, list):
+            placeholders = ",".join("?" * len(status))
+            query = f"SELECT {cols} FROM structures WHERE status IN ({placeholders}){suffix}"
+            cur = self._execute_with_retry(query, tuple(s.value for s in status))
+        else:
+            query = f"SELECT {cols} FROM structures WHERE status = ?{suffix}"
+            cur = self._execute_with_retry(query, (status.value,))
+
+        rows = cur.fetchall()
+        return [self._row_to_record(r, has_geometry=include_geometry) for r in rows]
 
     def update_status(
         self,
@@ -200,7 +266,7 @@ class ArchitectorWorkflow:
         query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
         values.append(job_id)
         self._execute_with_retry(query, tuple(values))
-        self.conn.commit()
+        self._commit_with_retry()
 
     def update_job_metrics(
         self,
@@ -255,7 +321,7 @@ class ArchitectorWorkflow:
             query = f"UPDATE structures SET {', '.join(updates)} WHERE id = ?"
             values.append(job_id)
             self._execute_with_retry(query, tuple(values))
-            self.conn.commit()
+            self._commit_with_retry()
 
     def update_job_metrics_bulk(self, metrics_list: list[dict]):
         """Update metrics for multiple jobs in a single transaction.
@@ -295,7 +361,7 @@ class ArchitectorWorkflow:
                 values.append(job_id)
                 cur.execute(query, tuple(values))
 
-        self.conn.commit()
+        self._commit_with_retry()
 
     def update_status_bulk(
         self,
@@ -314,7 +380,32 @@ class ArchitectorWorkflow:
         placeholders = ",".join("?" * len(job_ids))
         query = f"UPDATE structures SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"
         self._execute_with_retry(query, tuple([new_status.value] + job_ids))
-        self.conn.commit()
+        self._commit_with_retry()
+
+    def update_status_bulk_multi(
+        self,
+        status_groups: dict[JobStatus, list[int]],
+    ):
+        """Update multiple status groups in a single transaction.
+
+        This minimises commit() calls (one instead of per-group), which is
+        critical when another process (e.g. Parsl) is concurrently writing
+        to the same database on a parallel filesystem.
+
+        Args:
+            status_groups: Mapping of new_status -> list of job IDs.
+        """
+        if not status_groups:
+            return
+
+        cur = self.conn.cursor()
+        for new_status, job_ids in status_groups.items():
+            if not job_ids:
+                continue
+            placeholders = ",".join("?" * len(job_ids))
+            query = f"UPDATE structures SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"
+            cur.execute(query, tuple([new_status.value] + job_ids))
+        self._commit_with_retry()
 
     def count_by_status(self) -> dict[JobStatus, int]:
         """Count jobs grouped by status.
@@ -393,7 +484,7 @@ class ArchitectorWorkflow:
             self._execute_with_retry(
                 query, tuple([JobStatus.TO_RUN.value] + statuses_to_reset)
             )
-        self.conn.commit()
+        self._commit_with_retry()
 
     def reset_timeout_jobs(self, max_fail_count: int | None = None):
         """Reset all timeout jobs back to ready status for retry.
@@ -428,7 +519,7 @@ class ArchitectorWorkflow:
             self._execute_with_retry(
                 query, (JobStatus.TO_RUN.value, JobStatus.TIMEOUT.value)
             )
-        self.conn.commit()
+        self._commit_with_retry()
 
     def make_jobs_failed_with_max_fail_count(self, max_fail_count: int):
         """Mark jobs as failed if they have reached the maximum fail count.
@@ -442,7 +533,7 @@ class ArchitectorWorkflow:
             WHERE COALESCE(fail_count, 0) >= ?
         """
         self._execute_with_retry(query, (JobStatus.FAILED.value, max_fail_count))
-        self.conn.commit()
+        self._commit_with_retry()
 
     def get_jobs_by_fail_count(self, min_fail_count: int = 1) -> list[JobRecord]:
         """Get jobs that have failed at least min_fail_count times.
@@ -453,30 +544,10 @@ class ArchitectorWorkflow:
         Returns:
             List of JobRecord objects with fail_count >= min_fail_count.
         """
-        query = "SELECT * FROM structures WHERE COALESCE(fail_count, 0) >= ?"
+        query = f"SELECT {self._LIGHT_COLS} FROM structures WHERE COALESCE(fail_count, 0) >= ?"
         cur = self._execute_with_retry(query, (min_fail_count,))
         rows = cur.fetchall()
-        return [
-            JobRecord(
-                id=r[0],
-                orig_index=r[1],
-                elements=r[2],
-                natoms=r[3],
-                status=JobStatus(r[4]),
-                charge=r[5],
-                spin=r[6],
-                geometry=r[7],
-                job_dir=r[8],
-                max_forces=r[9],
-                scf_steps=r[10],
-                final_energy=r[11],
-                error_message=r[12],
-                fail_count=r[13] if len(r) > 13 and r[13] is not None else 0,
-                wall_time=r[14] if len(r) > 14 else None,
-                n_cores=r[15] if len(r) > 15 else None,
-            )
-            for r in rows
-        ]
+        return [self._row_to_record(r, has_geometry=False) for r in rows]
 
 
 def create_workflow(
@@ -486,6 +557,7 @@ def create_workflow(
     charge_column: str | None = "charge",
     spin_column: str | None = "uhf",
     batch_size: int = 10000,
+    extra_columns: dict[str, str] | None = None,
 ) -> tuple[Path, ArchitectorWorkflow]:
     """Initialize a new workflow from an architector CSV file.
 
@@ -500,6 +572,9 @@ def create_workflow(
         charge_column: CSV column containing molecular charges.
         spin_column: CSV column containing unpaired electrons.
         batch_size: Number of rows to process at a time.
+        extra_columns: Dictionary mapping CSV column names to SQL types
+            (e.g., {"metal": "TEXT", "ligand_count": "INTEGER"}).
+            These columns will be added to the database and populated from the CSV.
 
     Returns:
         Tuple of (db_path, ArchitectorWorkflow instance).
@@ -511,6 +586,7 @@ def create_workflow(
         charge_column=charge_column,
         spin_column=spin_column,
         batch_size=batch_size,
+        extra_columns=extra_columns,
     )
 
     workflow = ArchitectorWorkflow(db_path_ret)

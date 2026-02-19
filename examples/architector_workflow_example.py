@@ -17,19 +17,24 @@ from oact_utilities.workflows import ArchitectorWorkflow, JobStatus, create_work
 def setup_workflow():
     """Create a new workflow from architector CSV file."""
 
-    csv_path = (
-        "./data/architector_dev/2_all_architector_results.csv"  # Your architector CSV
-    )
-    db_path = "architector_workflow.db"  # SQLite database
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_actinides_sample.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_actinides.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_non_actinides_sample.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_non_actinides.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32.csv
+
+    csv_path = "/Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_actinides_sample.csv"  # Your architector CSV
+    db_path = "./santi_results_compiled_2026-02-14_08-15-32_actinides_sample.db"  # SQLite database
 
     # Create workflow (chunks CSV and initializes database)
     db_path, workflow = create_workflow(
         csv_path=csv_path,
         db_path=db_path,
-        geometry_column="aligned_csd_core",  # Column with XYZ geometries
+        geometry_column="structure",  # Column with XYZ geometries
         charge_column="charge",
-        spin_column="uhf",
+        spin_column="spinmult",
         batch_size=10000,
+        extra_columns={"metal": "TEXT"},  # Example extra columns to store
     )
 
     print("Workflow initialized!")

@@ -246,6 +246,7 @@ def write_inputs_ase(
     error_handle: bool = False,
     error_code: int = 0,
     tight_two_e_int: bool = False,
+    mbis: bool = False,
     restart=True,
 ):
     """
@@ -256,6 +257,7 @@ def write_inputs_ase(
         - charge(int): Charge of the system
         - mult(int): Multiplicity of the system
         - nbo(bool): Whether to include NBO analysis
+        - mbis(bool): Whether to include MBIS population analysis
         - cores(int): Number of cores to use
         - functional(str): Exchange-correlation functional
         - scf_MaxIter(int): Maximum number of SCF iterations
@@ -287,6 +289,7 @@ def write_inputs_ase(
         f.write(f"    output_directory = '{output_directory}'\n")
         f.write(f"    orca_path = '{orca_path}'\n")
         f.write(f"    nbo_tf = {nbo}\n")
+        f.write(f"    mbis_tf = {mbis}\n")
         f.write(f"    cores={cores}\n")
         f.write(f"    actinide_basis = '{actinide_basis}'\n")
         if actinide_ecp is None:
@@ -307,6 +310,7 @@ def write_inputs_ase(
         f.write("        outputdir=output_directory,\n")
         f.write("        orca_cmd=orca_path,\n")
         f.write("        nbo=nbo_tf,\n")
+        f.write("        mbis=mbis_tf,\n")
         f.write(f"        traj_file='{traj_file}',\n")
         f.write("        nprocs=cores,\n")
         f.write("        actinide_basis=actinide_basis,\n")

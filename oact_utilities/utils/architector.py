@@ -569,7 +569,7 @@ def create_workflow_db(
                     if not pd.isna(spin_val):
                         # Convert unpaired electrons (uhf) to spin multiplicity (2S+1)
                         # uhf=0 -> singlet (spin=1), uhf=2 -> triplet (spin=3), etc.
-                        spin = int(spin_val) + 1
+                        spin = int(spin_val)
 
                         # Validate spin multiplicity (Issue #014)
                         try:

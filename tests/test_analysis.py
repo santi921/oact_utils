@@ -6,6 +6,7 @@ import numpy as np
 
 from oact_utilities.utils.analysis import (
     get_rmsd_start_final,
+    parse_charge_mult_from_inp,
     parse_job_metrics,
     parse_mulliken_population,
 )
@@ -83,6 +84,74 @@ def test_parse_mulliken_population():
         Path(temp_path).unlink()
 
 
+def test_parse_charge_mult_from_inp():
+    """Test parsing charge and multiplicity from ORCA .inp files."""
+    test_dir = Path(__file__).parent / "files"
+
+    # Test with direct .inp file (AmO: charge=0, mult=8)
+    result = parse_charge_mult_from_inp(
+        test_dir / "orca_direct_example" / "AmO_orca.inp"
+    )
+    assert result is not None, "Should parse charge/mult from .inp"
+    charge, mult = result
+    assert charge == 0
+    assert mult == 8
+
+    # Test with gzipped .inp (unzip manually for the standalone function)
+    gz_file = test_dir / "quacc_example" / "orca.inp.gz"
+    with gzip.open(gz_file, "rt") as f_in:
+        content = f_in.read()
+        with tempfile.NamedTemporaryFile(
+            mode="w", delete=False, suffix=".inp"
+        ) as f_out:
+            f_out.write(content)
+            temp_path = f_out.name
+
+    try:
+        result = parse_charge_mult_from_inp(temp_path)
+        assert result is not None, "Should parse charge/mult from quacc .inp"
+        charge, mult = result
+        assert charge == 0
+        assert mult == 5  # NpF3 quintet
+    finally:
+        Path(temp_path).unlink()
+
+    # Test with nonexistent file
+    result = parse_charge_mult_from_inp("/nonexistent/file.inp")
+    assert result is None
+
+
+def test_parse_mulliken_population_with_validation():
+    """Test that parse_mulliken_population validates against expected charge/mult."""
+    test_dir = Path(__file__).parent / "files"
+    gz_file = test_dir / "quacc_example" / "orca.out.gz"
+
+    with gzip.open(gz_file, "rt") as f_in:
+        content = f_in.read()
+        with tempfile.NamedTemporaryFile(
+            mode="w", delete=False, suffix=".out"
+        ) as f_out:
+            f_out.write(content)
+            temp_path = f_out.name
+
+    try:
+        # With correct charge/mult (NpF3: charge=0, mult=5) — should pass validation
+        result = parse_mulliken_population(
+            temp_path, expected_charge=0, expected_multiplicity=5
+        )
+        assert result is not None
+        assert "validation" in result
+        assert result["validation"]["charge_valid"] is True
+        assert result["validation"]["spin_valid"] is True
+
+        # With no charge/mult — should skip validation entirely
+        result_no_val = parse_mulliken_population(temp_path)
+        assert result_no_val is not None
+        assert "validation" not in result_no_val
+    finally:
+        Path(temp_path).unlink()
+
+
 def test_parse_job_metrics_with_mulliken():
     """Test that parse_job_metrics includes Mulliken population analysis."""
     test_dir = Path(__file__).parent / "files"
@@ -94,12 +163,17 @@ def test_parse_job_metrics_with_mulliken():
     assert result is not None
     assert "mulliken_population" in result
 
-    # Check that Mulliken data was parsed
+    # Check that Mulliken data was parsed with validation from .inp
     mulliken = result["mulliken_population"]
     if mulliken is not None:
         assert "mulliken_charges" in mulliken
         assert "mulliken_spins" in mulliken
         assert len(mulliken["mulliken_charges"]) > 0
+
+        # Validation should be present (quacc_example has orca.inp.gz)
+        assert "validation" in mulliken, "Should have validation from .inp file"
+        assert mulliken["validation"]["charge_valid"] is True
+        assert mulliken["validation"]["spin_valid"] is True
 
 
 def test_validate_spin_multiplicity():
