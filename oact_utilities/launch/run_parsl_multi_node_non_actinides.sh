@@ -19,7 +19,7 @@
 #SBATCH --nodes=1
 
 # ---- Configuration (edit these) ----
-DB_PATH="/path/to/workflow.db"  #(update USE ACTINIDES DB)
+DB_PATH="/path/to/workflow.db"  #(update USE NON-ACTINIDES DB)
 ROOT_DIR="/path/to/job_output_dir" #(update)
 
 BATCH_SIZE=500          # number of jobs to dispatch at once (update)
@@ -40,7 +40,7 @@ ACCOUNT="ODEFN5169CYFZ"
 
 # ORCA settings
 FUNCTIONAL="wB97M-V"
-SIMPLE_INPUT="omol"
+SIMPLE_INPUT="omol_base"
 ACTINIDE_BASIS="ma-def-TZVP"
 ACTINIDE_ECP="def-ECP"
 NON_ACTINIDE_BASIS="def2-TZVPD"

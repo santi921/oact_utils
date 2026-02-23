@@ -617,7 +617,7 @@ def update_all_statuses(
     unzip: bool = False,
     workers: int = 4,
     recheck_completed: bool = False,
-    hours_cutoff: float = 6,
+    hours_cutoff: float = 24,
     parallel_status_check: bool = True,
     max_jobs: int | None = None,
 ):
@@ -923,8 +923,8 @@ def main():
     parser.add_argument(
         "--hours-cutoff",
         type=float,
-        default=6,
-        help="Hours of inactivity before a job is considered timed out (default: 6)",
+        default=24,
+        help="Hours of inactivity before a job is considered timed out (default: 24)",
     )
     parser.add_argument(
         "--recompute-metrics",

@@ -457,7 +457,7 @@ def get_orca_blocks(
     orcablocks.append("%basis")
 
     for elem in elem_set:
-        if elem in ACTINIDE_LIST:
+        if elem in ACTINIDE_LIST or elem in {"Ra", "Fr"}:
             if os.path.isfile(actinide_basis):
                 orcablocks.append(
                     f'  GTOName      = "{actinide_basis}"      # read orbital basis'
