@@ -76,6 +76,4 @@ python -m oact_utilities.workflows.submit_jobs \
     --actinide-ecp "${ACTINIDE_ECP}" \
     --non-actinide-basis "${NON_ACTINIDE_BASIS}" \
     --scf-maxiter "${SCF_MAXITER}"
-    #--mbis  \ # Uncomment if you want to use MBIS charges instead of NBO
-    #--nbo \ # Uncomment if you want to use NBO charges instead of MBIS
     #--dry-run # Uncomment to do a dry run (Parsl will spin up and prepare directories but not actually submit jobs)

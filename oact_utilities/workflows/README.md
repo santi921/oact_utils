@@ -133,12 +133,14 @@ python -m oact_utilities.workflows.submit_jobs \\
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--functional` | wB97M-V | DFT functional |
-| `--simple-input` | omol | Input template: `omol`, `x2c`, or `dk3` |
+| `--simple-input` | omol | Input template: `omol`, `omol_base`, `x2c`, or `dk3` |
 | `--actinide-basis` | ma-def-TZVP | Basis set for actinides |
 | `--actinide-ecp` | None | ECP for actinides |
 | `--non-actinide-basis` | def2-TZVPD | Basis set for other elements |
 | `--scf-maxiter` | ORCA default | Maximum SCF iterations |
 | `--nbo` | False | Enable NBO analysis |
+| `--mbis` | False | Enable MBIS population analysis |
+| `--kdiis` | False | Use KDIIS SCF convergence accelerator |
 | `--opt` | False | Enable geometry optimization |
 | `--orca-path` | scheduler-specific | Path to ORCA executable |
 | `--conda-env` | py10mpi | Conda environment to activate |
@@ -150,8 +152,19 @@ python -m oact_utilities.workflows.submit_jobs \\
 | `--max-workers` | 4 | Maximum number of concurrent Parsl workers |
 | `--cores-per-worker` | 16 | CPU cores allocated per worker |
 | `--n-cores` | auto (matches `cores_per_worker`) | Cores per ORCA job (auto-set to `cores_per_worker` if mismatch) |
-| `--job-timeout` | 7200 | Per-job timeout in seconds (2 hours) |
+| `--job-timeout` | 72000 | Per-job timeout in seconds (20 hours) |
 | `--conda-base` | /usr/WS1/vargas58/miniconda3 | Conda base path for worker init |
+
+**SLURM Multi-Node Parsl Options (`--use-parsl --scheduler slurm`):**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--max-blocks` | 10 | Maximum SLURM nodes to provision |
+| `--init-blocks` | 2 | Nodes to request at startup |
+| `--min-blocks` | 1 | Minimum nodes to keep alive |
+| `--walltime-hours` | 2 | Walltime per SLURM node allocation (hours) |
+| `--qos` | frontier | SLURM QOS |
+| `--account` | ODEFN5169CYFZ | SLURM account/allocation |
 
 ### 3. Monitor Progress
 
@@ -221,7 +234,7 @@ The SQLite database tracks each structure with:
 - **`running`**: Job has been submitted to HPC scheduler and is executing
 - **`completed`**: Job finished successfully
 - **`failed`**: Job crashed or failed convergence (explicit error or abort)
-- **`timeout`**: Job timed out (file not modified in 6+ hours, likely stuck or walltime exceeded)
+- **`timeout`**: Job timed out (file not modified for `--hours-cutoff` hours, default 24, likely stuck or walltime exceeded)
 
 ## Parsl Mode Architecture
 
@@ -230,9 +243,9 @@ The Parsl integration provides a Python-native workflow executor for high-throug
 ### How It Works
 
 1. **Job Preparation**: Creates job directories with ORCA input files (same as traditional mode)
-2. **Parsl Initialization**: Configures `HighThroughputExecutor` with `LocalProvider`
-   - Uses local node resources (no scale-out to other nodes)
-   - Spawns worker processes on the allocated node
+2. **Parsl Initialization**: Configures `HighThroughputExecutor` with `LocalProvider` (Flux) or `SlurmProvider` (SLURM multi-node)
+   - **Flux**: Uses local node resources only; workers run on the allocated node
+   - **SLURM**: Auto-provisions additional nodes via SLURM scheduler; scales out across multiple nodes
    - Each worker handles one ORCA job at a time
 3. **Job Submission**: Wraps each ORCA run in a `python_app` decorated function
 4. **Concurrent Execution**: Parsl schedules jobs across workers using `concurrent.futures`
@@ -265,7 +278,8 @@ Config(
 ```
 
 **Key Design Choices:**
-- **LocalProvider**: Uses the current node only (Flux doesn't support Parsl scale-out)
+- **LocalProvider (Flux)**: Uses the current allocated node only. Pass `--scheduler flux` (default).
+- **SlurmProvider (SLURM)**: Auto-provisions additional nodes via SLURM. Pass `--use-parsl --scheduler slurm`. Each provisioned node runs `max_workers` concurrent ORCA jobs.
 - **cores_per_worker**: CPU cores allocated per worker by Parsl
 - **n_cores**: Automatically set to match `cores_per_worker` if not specified (ensures proper resource allocation)
 - **max_workers**: Set based on node capacity (e.g., 64 cores → 4 workers × 16 cores each)
@@ -474,13 +488,15 @@ from oact_utilities.workflows.submit_jobs import submit_batch, OrcaConfig
 # Configure ORCA calculation settings
 orca_config: OrcaConfig = {
     "functional": "wB97M-V",       # DFT functional
-    "simple_input": "x2c",         # Template: "omol", "x2c", or "dk3"
+    "simple_input": "x2c",         # Template: "omol", "omol_base", "x2c", or "dk3"
     "actinide_basis": "ma-def-TZVP",
     "actinide_ecp": None,          # Or "def-ECP" for ECP calculations
     "non_actinide_basis": "def2-TZVPD",
     "scf_MaxIter": None,           # Use ORCA default
     "nbo": False,                  # NBO analysis
+    "mbis": False,                 # MBIS population analysis
     "opt": True,                   # Geometry optimization
+    "diis_option": None,           # Or "KDIIS" for KDIIS convergence accelerator
     "orca_path": "/path/to/orca",  # Optional, defaults per scheduler
 }
 

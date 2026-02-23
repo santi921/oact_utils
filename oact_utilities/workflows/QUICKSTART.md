@@ -57,7 +57,7 @@ This creates `jobs/job_0/`, `job_1/`, etc. with:
 - `flux_job.flux` - Submission script (runs ORCA directly)
 - Auto-submits and marks as "running"
 
-**ORCA options:** `--functional`, `--simple-input {omol,x2c,dk3}`, `--actinide-basis`, `--nbo`, `--opt`, etc.
+**ORCA options:** `--functional`, `--simple-input {omol,omol_base,x2c,dk3}`, `--actinide-basis`, `--nbo`, `--mbis`, `--kdiis`, `--opt`, etc.
 
 #### B. Parsl Mode (Concurrent Execution on Exclusive Node)
 
@@ -76,7 +76,7 @@ python -m oact_utilities.workflows.submit_jobs \\
     --max-workers 4 \\
     --cores-per-worker 16 \\
     --n-cores 16 \\
-    --job-timeout 7200
+    --job-timeout 72000
 
 # Example with custom ORCA settings
 python -m oact_utilities.workflows.submit_jobs \\
@@ -103,8 +103,10 @@ python -m oact_utilities.workflows.submit_jobs \\
 - `--use-parsl`: Enable Parsl mode
 - `--max-workers`: Number of concurrent workers (default: 4)
 - `--cores-per-worker`: CPU cores per worker (default: 16)
-- `--job-timeout`: Per-job timeout in seconds (default: 7200 = 2 hours)
+- `--job-timeout`: Per-job timeout in seconds (default: 72000 = 20 hours)
 - `--conda-base`: Conda installation path (default: /usr/WS1/vargas58/miniconda3)
+
+**SLURM multi-node Parsl** (`--use-parsl --scheduler slurm`): Auto-provisions additional nodes via SLURM. Extra options: `--max-blocks`, `--init-blocks`, `--min-blocks`, `--walltime-hours`, `--qos`, `--account`. See README for full details.
 
 **When to use Parsl mode:**
 
@@ -154,7 +156,7 @@ The SQLite DB automatically tracks:
   - `running`: Job currently executing
   - `completed`: Job finished successfully
   - `failed`: Job failed (abort, error, etc.)
-  - `timeout`: Job timed out (no file updates in 6+ hours)
+  - `timeout`: Job timed out (no file updates for `--hours-cutoff` hours, default 24)
 - **Metrics**: `max_forces`, `scf_steps`, `final_energy` (auto-extracted from ORCA outputs)
 - **Performance**: `wall_time` (seconds), `n_cores` (CPU cores used) - for tracking compute usage
 - **Failure tracking**: `fail_count` (incremented each time a job is reset from failed/timeout to ready)
@@ -234,7 +236,7 @@ with ArchitectorWorkflow("workflow.db") as wf:
     )
 
     # Get jobs
-    ready = wf.get_jobs_by_status(JobStatus.READY)
+    ready = wf.get_jobs_by_status(JobStatus.TO_RUN)
 
     # Update status manually
     wf.update_status(job_id=42, new_status=JobStatus.COMPLETED)

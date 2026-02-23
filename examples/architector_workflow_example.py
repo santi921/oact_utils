@@ -25,9 +25,17 @@ def setup_workflow():
     # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_actinides_largest.csv
     # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_non_actinides_largest.csv
 
-    csv_path = "/Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-14_08-15-32_actinides.csv"  # Your architector CSV
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-21_09-49-34_non_actinides.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-21_09-49-34_non_actinides_tuo.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-21_09-49-34_non_actinides_dod.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-21_09-49-34.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-21_09-49-34_actinides_dod.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-21_09-49-34_actinides_tuo.csv
+    # /Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-21_09-49-34_actinides.csv
+
+    csv_path = "/Users/santiagovargas/dev/oact_utils/data/homoleptics_oact/santi_results_compiled_2026-02-21_09-49-34_actinides.csv"  # Your architector CSV
     db_path = (
-        "./santi_results_compiled_2026-02-14_08-15-32_actinides.db"  # SQLite database
+        "./santi_results_compiled_2026-02-21_09-49-34_actinides.db"  # SQLite database
     )
 
     # Create workflow (chunks CSV and initializes database)
