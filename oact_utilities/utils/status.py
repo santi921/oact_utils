@@ -30,11 +30,12 @@ def check_file_termination(
         is_gzipped = file_path.endswith(".gz")
 
     # Use deque to efficiently read only last 10 lines without loading entire file
+    # Use errors='replace' to handle corrupted files with encoding issues
     if is_gzipped or file_path.endswith(".gz"):
-        with gzip.open(file_path, "rt") as f:
+        with gzip.open(file_path, "rt", errors="replace") as f:
             last_lines = deque(f, maxlen=10)
     else:
-        with open(file_path) as f:
+        with open(file_path, errors="replace") as f:
             last_lines = deque(f, maxlen=10)
 
     # Check last 10 lines for definitive termination status first.

@@ -1175,8 +1175,8 @@ def parse_job_metrics(
                     "mulliken_population": None,
                 }
 
-            # Unzip to temp file
-            with gzip.open(gz_files[0], "rt") as f_in:
+            # Unzip to temp file (use errors='replace' to handle corrupted files)
+            with gzip.open(gz_files[0], "rt", errors="replace") as f_in:
                 content = f_in.read()
                 with tempfile.NamedTemporaryFile(
                     mode="w", delete=False, suffix=".out"
@@ -1193,7 +1193,7 @@ def parse_job_metrics(
                 # Try to get max forces from engrad file if available
                 engrad_gz = list(job_dir.glob("*.engrad.gz"))
                 if engrad_gz and max_forces is None:
-                    with gzip.open(engrad_gz[0], "rt") as f_in:
+                    with gzip.open(engrad_gz[0], "rt", errors="replace") as f_in:
                         with tempfile.NamedTemporaryFile(
                             mode="w", delete=False, suffix=".engrad"
                         ) as f_out:
@@ -1247,7 +1247,7 @@ def parse_job_metrics(
                 import gzip
                 import tempfile
 
-                with gzip.open(inp_gz[0], "rt") as f_in:
+                with gzip.open(inp_gz[0], "rt", errors="replace") as f_in:
                     with tempfile.NamedTemporaryFile(
                         mode="w", delete=False, suffix=".inp"
                     ) as f_out:
