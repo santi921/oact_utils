@@ -140,9 +140,72 @@ def print_progress_bar(
     print(f"{label}: [{bar}] {pct:.1f}% ({completed}/{total})")
 
 
+def _display_metrics_profile(
+    profile_data: list[tuple[int, dict]], t_extract: float, t_write: float
+):
+    """Display profiling results for metrics extraction bottleneck analysis.
+
+    Args:
+        profile_data: List of (job_id, timing_dict) tuples.
+        t_extract: Total extraction phase time (seconds).
+        t_write: Total database write time (seconds).
+    """
+    if not profile_data:
+        return
+
+    # Aggregate timing data
+    parse_times = [t["parse_sec"] for _, t in profile_data]
+    timing_times = [t["timing_sec"] for _, t in profile_data]
+
+    total_parse = sum(parse_times)
+    total_timing = sum(timing_times)
+
+    # Find slowest 10 jobs
+    slowest = sorted(profile_data, key=lambda x: x[1]["total_sec"], reverse=True)[:10]
+
+    # Print results
+    print("\n" + "=" * 80)
+    print("📊 Metrics Extraction Performance Profile".center(80))
+    print("=" * 80)
+
+    print(f"\n✓ Extracted metrics for {len(profile_data)} jobs")
+    print(f"  Total extraction time: {t_extract:.1f}s")
+    print(f"  Total DB write time: {t_write:.1f}s")
+    print(f"  Jobs/sec rate: {len(profile_data) / t_extract:.1f}")
+
+    # Bottleneck analysis
+    total_worker_time = total_parse + total_timing
+    if total_worker_time > 0:
+        parse_pct = 100 * total_parse / total_worker_time
+        timing_pct = 100 * total_timing / total_worker_time
+
+        print("\n⏱️  Bottleneck breakdown (per-job average):")
+        print(
+            f"  Parsing:        {parse_pct:>5.1f}% ({total_parse/len(profile_data):>6.3f}s/job)"
+        )
+        print(
+            f"  Timing extract: {timing_pct:>5.1f}% ({total_timing/len(profile_data):>6.3f}s/job)"
+        )
+
+    # Slowest jobs
+    if slowest:
+        print("\n🐢 Slowest 10 jobs:")
+        for job_id, timing in slowest:
+            total = timing["total_sec"]
+            parse = timing["parse_sec"]
+            timing_sec = timing["timing_sec"]
+            print(
+                f"  Job {job_id:>6}: {total:.3f}s "
+                f"(parse: {parse:.3f}s, timing: {timing_sec:.3f}s)"
+            )
+
+    print("\n" + "=" * 80)
+
+
 def _extract_metrics_from_dir(
     job_dir: Path,
     unzip: bool = False,
+    profile: bool = False,
 ) -> dict:
     """Extract metrics from a job directory (pure I/O, no DB writes).
 
@@ -151,16 +214,27 @@ def _extract_metrics_from_dir(
     Args:
         job_dir: Path to job directory containing ORCA output.
         unzip: If True, handle gzipped output files (quacc).
+        profile: If True, collect timing data for bottleneck analysis.
 
     Returns:
         Dictionary with extracted metrics and an 'error' key (None on success).
+        If profile=True, includes '_profile' key with timing breakdown.
     """
+    import time
+
     from ..utils.analysis import find_timings_and_cores, parse_job_metrics
     from ..utils.status import pull_log_file
 
-    try:
-        metrics = parse_job_metrics(job_dir, unzip=unzip)
+    t0 = time.perf_counter()
 
+    try:
+        # Phase 1: Parse ORCA output (metrics extraction)
+        t_parse = time.perf_counter()
+        metrics = parse_job_metrics(job_dir, unzip=unzip)
+        t_parse = time.perf_counter() - t_parse
+
+        # Phase 2: Extract timing/core info
+        t_timing = time.perf_counter()
         wall_time = None
         n_cores = None
         timing_warning = None
@@ -172,8 +246,9 @@ def _extract_metrics_from_dir(
             n_cores = n_cores_val
         except Exception as e:
             timing_warning = f"Timing extraction failed: {e}"
+        t_timing = time.perf_counter() - t_timing
 
-        return {
+        result = {
             "max_forces": metrics.get("max_forces"),
             "scf_steps": metrics.get("scf_steps"),
             "final_energy": metrics.get("final_energy"),
@@ -182,6 +257,15 @@ def _extract_metrics_from_dir(
             "error": None,
             "timing_warning": timing_warning,
         }
+
+        if profile:
+            result["_profile"] = {
+                "parse_sec": t_parse,
+                "timing_sec": t_timing,
+                "total_sec": time.perf_counter() - t0,
+            }
+
+        return result
 
     except Exception as e:
         return {"error": str(e)}
@@ -194,6 +278,7 @@ def _parallel_extract_metrics(
     verbose: bool = False,
     workers: int = 4,
     mark_failed_on_error: bool = True,
+    profile: bool = False,
 ) -> tuple[int, int]:
     """Extract metrics in parallel, then batch-write results to DB.
 
@@ -207,10 +292,12 @@ def _parallel_extract_metrics(
         verbose: Print detailed progress messages.
         workers: Number of parallel worker threads.
         mark_failed_on_error: If True, mark jobs as FAILED when parsing fails.
+        profile: If True, collect and display performance profiling data.
 
     Returns:
         Tuple of (extracted_count, failed_count).
     """
+    import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     try:
@@ -226,10 +313,13 @@ def _parallel_extract_metrics(
     # Phase 1: extract metrics in parallel (pure I/O, no DB)
     success_metrics: list[dict] = []
     failed_jobs: list[tuple[int, str]] = []
+    profile_data: list[tuple[int, dict]] = []  # (job_id, timing_dict)
+
+    t_extract_start = time.perf_counter()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_job = {
-            executor.submit(_extract_metrics_from_dir, job_dir, unzip): (
+            executor.submit(_extract_metrics_from_dir, job_dir, unzip, profile): (
                 job_id,
                 job_dir,
             )
@@ -263,6 +353,8 @@ def _parallel_extract_metrics(
                         "n_cores": result["n_cores"],
                     }
                 )
+                if profile and "_profile" in result:
+                    profile_data.append((job_id, result["_profile"]))
                 if verbose:
                     print(
                         f"    Job {job_id}: forces={result['max_forces']}, "
@@ -279,9 +371,13 @@ def _parallel_extract_metrics(
                         f"{result['error']}"
                     )
 
+    t_extract = time.perf_counter() - t_extract_start
+
     # Phase 2: batch-write all successful metrics in one transaction
+    t_write_start = time.perf_counter()
     if success_metrics:
         workflow.update_job_metrics_bulk(success_metrics)
+    t_write = time.perf_counter() - t_write_start
 
     # Phase 3: mark failed jobs
     if mark_failed_on_error:
@@ -292,6 +388,10 @@ def _parallel_extract_metrics(
                 error_message=f"Metrics parse error: {error_msg}",
                 increment_fail_count=True,
             )
+
+    # Phase 4: display profiling results if requested
+    if profile and profile_data:
+        _display_metrics_profile(profile_data, t_extract, t_write)
 
     return len(success_metrics), len(failed_jobs)
 
@@ -536,6 +636,7 @@ def backfill_metrics(
     workers: int = 4,
     recompute: bool = False,
     max_jobs: int | None = None,
+    profile: bool = False,
 ):
     """Extract metrics for completed jobs that don't have them yet.
 
@@ -549,6 +650,7 @@ def backfill_metrics(
         recompute: If True, recompute metrics for all completed jobs, even those
             that already have metrics.
         max_jobs: If set, limit to this many jobs (useful for debugging).
+        profile: If True, collect and display performance profiling data.
     """
     root_dir = Path(root_dir)
 
@@ -598,7 +700,12 @@ def backfill_metrics(
     )
 
     extracted, failed = _parallel_extract_metrics(
-        workflow, work_items, unzip=unzip, verbose=verbose, workers=workers
+        workflow,
+        work_items,
+        unzip=unzip,
+        verbose=verbose,
+        workers=workers,
+        profile=profile,
     )
 
     print(
@@ -620,6 +727,7 @@ def update_all_statuses(
     hours_cutoff: float = 24,
     parallel_status_check: bool = True,
     max_jobs: int | None = None,
+    profile: bool = False,
 ):
     """Scan job directories and update statuses in bulk.
 
@@ -636,6 +744,7 @@ def update_all_statuses(
         hours_cutoff: Hours of inactivity before a job is considered timed out.
         parallel_status_check: If True, parallelize status checking (default: True for scalability).
         max_jobs: If set, limit operations to this many jobs (useful for debugging).
+        profile: If True, collect and display performance profiling data for metrics extraction.
     """
     from functools import partial
 
@@ -712,6 +821,7 @@ def update_all_statuses(
             unzip=unzip,
             verbose=verbose,
             workers=workers,
+            profile=profile,
         )
         print(
             f"Metrics extraction: {metrics_extracted} succeeded, "
@@ -938,6 +1048,11 @@ def main():
         default=None,
         help="Limit status checks and metrics extraction to N jobs (for testing changes)",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Profile metrics extraction to identify bottlenecks (I/O, parsing, DB)",
+    )
 
     args = parser.parse_args()
 
@@ -961,6 +1076,7 @@ def main():
             recheck_completed=args.recheck_completed,
             hours_cutoff=args.hours_cutoff,
             max_jobs=args.debug,
+            profile=args.profile,
         )
 
         # Backfill metrics for previously completed jobs missing them
@@ -974,6 +1090,7 @@ def main():
                 workers=args.workers,
                 recompute=args.recompute_metrics,
                 max_jobs=args.debug,
+                profile=args.profile,
             )
 
     # Reset failed jobs if requested
