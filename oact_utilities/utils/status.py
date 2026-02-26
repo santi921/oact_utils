@@ -29,25 +29,29 @@ def check_file_termination(
     if is_gzipped is None:
         is_gzipped = file_path.endswith(".gz")
 
-    # Use deque to efficiently read only last 10 lines without loading entire file
-    # Use errors='replace' to handle corrupted files with encoding issues
-    if is_gzipped or file_path.endswith(".gz"):
-        with gzip.open(file_path, "rt", errors="replace") as f:
-            last_lines = deque(f, maxlen=10)
-    else:
-        with open(file_path, errors="replace") as f:
-            last_lines = deque(f, maxlen=10)
+    try:
+        # Use deque to efficiently read only last 10 lines without loading entire file
+        # Use errors='replace' to handle corrupted files with encoding issues
+        if is_gzipped or file_path.endswith(".gz"):
+            with gzip.open(file_path, "rt", errors="replace") as f:
+                last_lines = deque(f, maxlen=10)
+        else:
+            with open(file_path, errors="replace") as f:
+                last_lines = deque(f, maxlen=10)
 
-    # Check last 10 lines for definitive termination status first.
-    # Content-based checks take priority over file age so that completed
-    # or failed jobs keep their correct status regardless of how old they are.
-    for line in last_lines:
-        if "ORCA TERMINATED NORMALLY" in line:
-            return 1
-        if "aborting the run" in line:
-            return -1
-        if "Error" in line:
-            return -1
+        # Check last 10 lines for definitive termination status first.
+        # Content-based checks take priority over file age so that completed
+        # or failed jobs keep their correct status regardless of how old they are.
+        for line in last_lines:
+            if "ORCA TERMINATED NORMALLY" in line:
+                return 1
+            if "aborting the run" in line:
+                return -1
+            if "Error" in line:
+                return -1
+    except (OSError, UnicodeDecodeError, EOFError):
+        # Corrupted, incomplete, or inaccessible file — treat as still running
+        return 0
 
     # No definitive signal found — check file age to detect stale/timed-out jobs
     if os.path.getmtime(file_path) < (time.time() - hours_cutoff * 3600):
@@ -66,21 +70,24 @@ def done_geo_opt_ase(opt_log_file, fmax_cutoff=0.01):
         bool: True if optimization is done, False otherwise.
     """
 
-    # iterate thgouth lines to find final forces
-    with open(opt_log_file) as f:
-        lines = f.readlines()
+    try:
+        # iterate thgouth lines to find final forces
+        with open(opt_log_file, errors="replace") as f:
+            lines = f.readlines()
 
-    forces = []
-    for line in lines:
-        # check if it's a float
-        if line.split()[-1].replace(".", "", 1).isdigit():
-            forces.append(float(line.split()[3]))
-    if len(forces) == 0:
-        return False
-    force_check = forces[-1]
-    if force_check < fmax_cutoff:
-        return True
-    else:
+        forces = []
+        for line in lines:
+            # check if it's a float
+            if line.split()[-1].replace(".", "", 1).isdigit():
+                forces.append(float(line.split()[3]))
+        if len(forces) == 0:
+            return False
+        force_check = forces[-1]
+        if force_check < fmax_cutoff:
+            return True
+        else:
+            return False
+    except (OSError, ValueError, IndexError):
         return False
 
 
@@ -205,22 +212,25 @@ def check_geometry_steps(
     else:
         output_file = dir + "/" + files_out[0]
 
-        # Efficiently find last occurrence of "GEOMETRY OPTIMIZATION CYCLE"
-        # without loading entire file into memory
-        # example line: *                GEOMETRY OPTIMIZATION CYCLE   1            *
-        last_cycle_line = None
-        with open(output_file) as f:
-            for line in f:
-                if "GEOMETRY OPTIMIZATION CYCLE" in line:
-                    last_cycle_line = line
+        try:
+            # Efficiently find last occurrence of "GEOMETRY OPTIMIZATION CYCLE"
+            # without loading entire file into memory
+            # example line: *                GEOMETRY OPTIMIZATION CYCLE   1            *
+            last_cycle_line = None
+            with open(output_file, errors="replace") as f:
+                for line in f:
+                    if "GEOMETRY OPTIMIZATION CYCLE" in line:
+                        last_cycle_line = line
 
-        if last_cycle_line:
-            try:
-                cycle_number = int(last_cycle_line.split()[-2])
-                return cycle_number > 1
-            except (ValueError, IndexError):
-                return False
-        return False
+            if last_cycle_line:
+                try:
+                    cycle_number = int(last_cycle_line.split()[-2])
+                    return cycle_number > 1
+                except (ValueError, IndexError):
+                    return False
+            return False
+        except OSError:
+            return False
 
 
 def pull_log_file(root_dir: str) -> str:
@@ -286,22 +296,26 @@ def check_sella_complete(root_dir: str, fmax=0.05) -> bool:
     sella_log = os.path.join(root_dir, "sella.log")
     if not os.path.exists(sella_log):
         return 0
-    # read sella.log and check for final forces
-    with open(sella_log) as f:
-        lines = f.readlines()
-    forces = []
-    for line in lines:
-        # check if it's a float
-        if line.split()[4].replace(".", "", 1).replace("-", "", 1).isdigit():
-            forces.append(float(line.split()[4]))
 
-    if len(forces) == 0:
-        return 0
-    force_check = forces[-1]
+    try:
+        # read sella.log and check for final forces
+        with open(sella_log, errors="replace") as f:
+            lines = f.readlines()
+        forces = []
+        for line in lines:
+            # check if it's a float
+            if line.split()[4].replace(".", "", 1).replace("-", "", 1).isdigit():
+                forces.append(float(line.split()[4]))
 
-    if force_check < fmax:
-        return 1
-    else:
+        if len(forces) == 0:
+            return 0
+        force_check = forces[-1]
+
+        if force_check < fmax:
+            return 1
+        else:
+            return 0
+    except (OSError, ValueError, IndexError):
         return 0
 
 
@@ -390,12 +404,15 @@ def check_job_termination_whole(root_dir: str, df_multiplicity) -> None:
                     output_file = os.path.join(folder_results, file)
                     break
 
-            # read last line of output_file
-            with open(output_file) as f:
-                lines = f.readlines()
-            # if last line contains "ORCA TERMINATED NORMALLY", then get geometry forces
-            if "ORCA TERMINATED NORMALLY" not in lines[-2]:
-                print(f"Job {job} did not terminate normally.")
+            try:
+                # read last line of output_file
+                with open(output_file, errors="replace") as f:
+                    lines = f.readlines()
+                # if last line contains "ORCA TERMINATED NORMALLY", then get geometry forces
+                if "ORCA TERMINATED NORMALLY" not in lines[-2]:
+                    print(f"Job {job} did not terminate normally.")
+            except (OSError, IndexError):
+                print(f"Could not read output file for job {job}.")
 
 
 def check_sucessful_jobs(
