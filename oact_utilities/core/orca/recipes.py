@@ -29,6 +29,7 @@ def single_point_calculation(
     mbis=False,
     orca_cmd: str = "orca",
     copy_files=None,
+    ks_method: str | None = None,
     **calc_kwargs,
 ):
     """
@@ -79,6 +80,7 @@ def single_point_calculation(
         actinide_basis=actinide_basis,
         actinide_ecp=actinide_ecp,
         non_actinide_basis=non_actinide_basis,
+        ks_method=ks_method,
     )
     # print(orcasimpleinput)
     # print(orcablocks)
@@ -125,6 +127,7 @@ def ase_relaxation(
     mbis=False,
     orca_cmd: str = "orca",
     step_counter_start=0,
+    ks_method: str | None = None,
     **calc_kwargs,
 ):
     """
@@ -179,6 +182,7 @@ def ase_relaxation(
         actinide_basis=actinide_basis,
         actinide_ecp=actinide_ecp,
         non_actinide_basis=non_actinide_basis,
+        ks_method=ks_method,
     )
 
     with change_settings(
@@ -221,6 +225,7 @@ def pure_ase_relaxation(
     mbis=False,
     traj_file: str = "opt.traj",
     orca_cmd: str = "orca",
+    ks_method: str | None = None,
     **calc_kwargs,
 ):
     """
@@ -274,6 +279,7 @@ def pure_ase_relaxation(
         actinide_basis=actinide_basis,
         actinide_ecp=actinide_ecp,
         non_actinide_basis=non_actinide_basis,
+        ks_method=ks_method,
     )
 
     input_swaps = orcasimpleinput

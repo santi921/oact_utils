@@ -113,7 +113,7 @@ python -m oact_utilities.workflows.submit_jobs \\
 - You have an exclusive node allocation
 - Running many short-medium jobs (< 2 hours each)
 - Want to maximize node utilization
-- Need real-time progress monitoring
+- Need re al-time progress monitoring
 
 ### 3. Monitor with dashboard
 

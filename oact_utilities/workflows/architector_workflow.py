@@ -82,9 +82,20 @@ class ArchitectorWorkflow:
         self.conn = self._get_connection()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection with WAL mode enabled."""
+        """Get a database connection with WAL mode enabled if possible.
+
+        Falls back to DELETE journal mode on network filesystems (NFS, Lustre)
+        that don't support WAL locking protocols.
+        """
         conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
-        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as e:
+            if "locking protocol" in str(e):
+                # Network filesystem (NFS/Lustre) doesn't support WAL
+                conn.execute("PRAGMA journal_mode=DELETE")
+            else:
+                raise
         return conn
 
     def _execute_with_retry(

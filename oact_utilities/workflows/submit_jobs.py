@@ -43,6 +43,7 @@ class OrcaConfig(TypedDict, total=False):
         mbis: Enable MBIS population analysis (default: False).
         opt: Enable geometry optimization (default: False).
         orca_path: Path to ORCA executable (default: scheduler-specific).
+        ks_method: KS wavefunction type: "rks", "uks", or "roks" (default: None, ORCA auto-detects).
     """
 
     functional: str
@@ -56,6 +57,7 @@ class OrcaConfig(TypedDict, total=False):
     opt: bool
     orca_path: str
     diis_option: str | None
+    ks_method: str | None
 
 
 DEFAULT_ORCA_CONFIG: OrcaConfig = {
@@ -69,6 +71,7 @@ DEFAULT_ORCA_CONFIG: OrcaConfig = {
     "mbis": False,
     "opt": False,
     "diis_option": None,
+    "ks_method": None,
 }
 
 DEFAULT_ORCA_PATHS = {
@@ -154,6 +157,7 @@ def prepare_job_directory(
             actinide_basis=config.get("actinide_basis", "ma-def-TZVP"),
             actinide_ecp=config.get("actinide_ecp"),
             non_actinide_basis=config.get("non_actinide_basis", "def2-TZVPD"),
+            ks_method=config.get("ks_method"),
         )
 
     # Call custom setup function if provided
@@ -1292,6 +1296,13 @@ def main():
         help="Enable geometry optimization",
     )
     orca_group.add_argument(
+        "--ks-method",
+        type=str,
+        choices=["rks", "uks", "roks"],
+        default=None,
+        help="KS wavefunction type: rks (restricted), uks (unrestricted), roks (restricted open-shell). Default: ORCA auto-detects.",
+    )
+    orca_group.add_argument(
         "--orca-path",
         default=None,
         help="Path to ORCA executable (default: scheduler-specific)",
@@ -1313,6 +1324,7 @@ def main():
         "mbis": args.mbis,
         "opt": args.opt,
         "diis_option": "KDIIS" if args.kdiis else None,
+        "ks_method": args.ks_method,
     }
     if args.orca_path:
         orca_config["orca_path"] = args.orca_path
