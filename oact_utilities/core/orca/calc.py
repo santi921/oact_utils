@@ -378,6 +378,7 @@ def get_orca_blocks(
     tight_two_e_int: bool = False,
     error_handle: bool = False,
     error_code: int = 0,
+    ks_method: str | None = None,
 ):
 
     if opt:
@@ -490,6 +491,9 @@ def get_orca_blocks(
     if mbis:
         orcasimpleinput += " MBIS"
 
+    if ks_method is not None:
+        orcasimpleinput += f" {ks_method.upper()}"
+
     if vertical in {Vertical.MetalOrganics, Vertical.Oss} and mult == 1:
         orcasimpleinput += " UKS"
         orcablocks.append(get_symm_break_block(atoms, charge=0))
@@ -540,6 +544,7 @@ def write_orca_inputs(
     tight_two_e_int: bool = False,
     error_handle: bool = False,
     error_code: int = 0,
+    ks_method: str | None = None,
 ):
     """
     One-off method to be used if you wanted to write inputs for an arbitrary
@@ -575,6 +580,7 @@ def write_orca_inputs(
         error_code=error_code,
         tight_two_e_int=tight_two_e_int,
         diis_option=diis_option,
+        ks_method=ks_method,
     )
 
     # print(orcablocks)

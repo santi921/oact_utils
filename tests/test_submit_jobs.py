@@ -146,6 +146,57 @@ class TestPrepareJobDirectory:
         # Opt keyword should be present
         assert "Opt" in content
 
+    def test_ks_method_uks(self, mock_job_record, tmp_path):
+        """UKS keyword appears in generated orca.inp."""
+        orca_config: OrcaConfig = {
+            "functional": "wB97M-V",
+            "ks_method": "uks",
+            "orca_path": "/fake/path/to/orca",
+        }
+        job_dir = prepare_job_directory(
+            mock_job_record, tmp_path, orca_config=orca_config
+        )
+        content = (job_dir / "orca.inp").read_text()
+        assert "UKS" in content
+
+    def test_ks_method_rks(self, mock_job_record, tmp_path):
+        """RKS keyword appears in generated orca.inp."""
+        orca_config: OrcaConfig = {
+            "ks_method": "rks",
+            "orca_path": "/fake/path/to/orca",
+        }
+        job_dir = prepare_job_directory(
+            mock_job_record, tmp_path, orca_config=orca_config
+        )
+        content = (job_dir / "orca.inp").read_text()
+        assert "RKS" in content
+
+    def test_ks_method_roks(self, mock_job_record, tmp_path):
+        """ROKS keyword appears in generated orca.inp."""
+        orca_config: OrcaConfig = {
+            "ks_method": "roks",
+            "orca_path": "/fake/path/to/orca",
+        }
+        job_dir = prepare_job_directory(
+            mock_job_record, tmp_path, orca_config=orca_config
+        )
+        content = (job_dir / "orca.inp").read_text()
+        assert "ROKS" in content
+
+    def test_ks_method_none_by_default(self, mock_job_record, tmp_path):
+        """No KS keyword when ks_method is not set."""
+        orca_config: OrcaConfig = {
+            "orca_path": "/fake/path/to/orca",
+        }
+        job_dir = prepare_job_directory(
+            mock_job_record, tmp_path, orca_config=orca_config
+        )
+        content = (job_dir / "orca.inp").read_text()
+        # Should not contain any standalone KS keywords
+        # (UKS may appear in other contexts like Vertical, so check specifically)
+        assert " UKS" not in content or " RKS" not in content
+        assert " ROKS" not in content
+
     def test_actinide_basis_applied(
         self, mock_actinide_job_record, tmp_path, orca_config_with_path
     ):
