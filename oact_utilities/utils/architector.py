@@ -567,8 +567,7 @@ def create_workflow_db(
                 if spin_column and spin_column in chunk.columns:
                     spin_val = row.get(spin_column)
                     if not pd.isna(spin_val):
-                        # Convert unpaired electrons (uhf) to spin multiplicity (2S+1)
-                        # uhf=0 -> singlet (spin=1), uhf=2 -> triplet (spin=3), etc.
+                        # Spin multiplicity (2S+1) is read directly from CSV
                         spin = int(spin_val)
 
                         # Validate spin multiplicity (Issue #014)

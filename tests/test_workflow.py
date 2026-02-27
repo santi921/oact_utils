@@ -32,7 +32,7 @@ H -0.757 0.586 0.0"""
     data = {
         "aligned_csd_core": [xyz1, xyz2],
         "charge": [0, 0],
-        "uhf": [0, 0],  # unpaired electrons
+        "uhf": [1, 1],  # spin multiplicity (1 = singlet)
         "other_col": ["A", "B"],
     }
 
@@ -228,7 +228,7 @@ def test_create_workflow_db_directly(sample_csv, tmp_path):
     assert row[0] == "H;H"  # elements
     assert row[1] == 2  # natoms
     assert row[2] == 0  # charge
-    assert row[3] == 1  # spin (uhf=0 -> 2S+1 = 1)
+    assert row[3] == 1  # spin multiplicity (singlet)
 
     conn.close()
 
