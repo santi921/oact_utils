@@ -2,7 +2,6 @@
 
 import os
 import re
-from enum import Enum
 from shutil import which
 
 from ase import Atoms
@@ -13,16 +12,12 @@ from sella import Sella
 from oact_utilities.utils.create import read_xyz_from_orca
 
 # ECP sizes taken from Table 6.5 in the Orca 5.0.3 manual
+# Covers def2 basis (Z=37-86) and heavier elements (Z=87-102)
 ECP_SIZE = {
     **{i: 28 for i in range(37, 55)},
     **{i: 46 for i in range(55, 58)},
     **{i: 28 for i in range(58, 72)},
-    **{i: 60 for i in range(72, 87)},
-}
-
-# SV - change from def2 to def
-ECP_SIZE = {
-    **{i: 60 for i in range(87, 88)},
+    **{i: 60 for i in range(72, 89)},
     **{i: 78 for i in range(89, 103)},
 }
 
@@ -288,29 +283,42 @@ TS_OPT_PARAMETERS = {
 }
 
 
-class Vertical(Enum):
-    Default = "default"
-    MetalOrganics = "metal-organics"
-    Oss = "open-shell-singlet"
-
-
-def get_symm_break_block(atoms: Atoms, charge: int) -> str:
+def get_symm_break_block(
+    atoms: Atoms,
+    charge: int,
+    all_electron_elements: set[str] | None = None,
+) -> str:
     """
-    Determine the ORCA Rotate block needed to break symmetry in a singlet
+    Determine the ORCA Rotate block needed to break symmetry in a singlet.
 
     This is determined by taking the sum of atomic numbers less any charge (because
     electrons are negatively charged) and removing any electrons that are in an ECP
     and dividing by 2. This gives the number of occupied orbitals, but since ORCA is
     0-indexed, it gives the index of the LUMO.
 
+    Elements in ``all_electron_elements`` (e.g. actinides with ma-def-TZVP or
+    SARC basis) are treated as having no ECP, so all their electrons count.
+
     We use a rotation angle of 20 degrees or about a 12% mixture of LUMO into HOMO.
     This is somewhat arbitrary but similar to the default setting in Q-Chem, and seemed
     to perform well in tests of open-shell singlets.
+
+    Parameters
+    ----------
+    atoms
+        ASE Atoms object.
+    charge
+        Net charge of the system (electrons are negatively charged).
+    all_electron_elements
+        Element symbols whose basis sets are all-electron (no ECP).
+        ECP subtraction is skipped for these atoms.
     """
+    all_electron_elements = all_electron_elements or set()
     n_electrons = sum(atoms.get_atomic_numbers()) - charge
-    ecp_electrons = sum(
-        ECP_SIZE.get(at_num, 0) for at_num in atoms.get_atomic_numbers()
-    )
+    ecp_electrons = 0
+    for at_num, symbol in zip(atoms.get_atomic_numbers(), atoms.get_chemical_symbols()):
+        if symbol not in all_electron_elements:
+            ecp_electrons += ECP_SIZE.get(at_num, 0)
     n_electrons -= ecp_electrons
     lumo = n_electrons // 2
     return f"%scf rotate {{{lumo-1}, {lumo}, 20, 1, 1}} end end"
@@ -332,27 +340,25 @@ def get_n_basis(atoms: Atoms) -> int:
     return nbasis
 
 
-def get_mem_estimate(
-    atoms: Atoms, vertical: Enum = Vertical.Default, mult: int = 1
-) -> int:
+def get_mem_estimate(atoms: Atoms, mult: int = 1, has_actinides: bool = False) -> int:
     """
     Get an estimate of the memory requirement for given input in MB.
 
     If the estimate is less than 4000MB, we return 4000MB.
 
     :param atoms: atoms to compute the number of basis functions of
-    :param vertical: Which vertical this is for (all metal-organics are
-                     UKS, as are all regular open-shell calcs)
     :param mult: spin multiplicity of input
+    :param has_actinides: whether the molecule contains actinides (forces UKS
+                          scaling for singlets)
     :return: estimated (upper-bound) to the memory requirement of this Orca job
     """
     nbasis = get_n_basis(atoms)
-    if vertical == Vertical.Default and mult == 1:
-        # Default RKS scaling as determined by PDB-ligand pockets in Orca6
+    if mult == 1 and not has_actinides:
+        # RKS scaling as determined by PDB-ligand pockets in Orca6
         a = 0.0076739752343756434
         b = 361.4745947062764
     else:
-        # Default UKS scaling as determined by metal-organics in Orca5
+        # UKS scaling as determined by metal-organics in Orca5
         a = 0.016460518374501867
         b = -320.38502508802776
     mem_est = int(max(a * nbasis**1.5 + b, 4000))
@@ -362,12 +368,12 @@ def get_mem_estimate(
 def get_orca_blocks(
     atoms: Atoms,
     mult: int = 1,
+    charge: int = 0,
     nbo: bool = True,
     mbis: bool = False,
     cores: int = 12,
     opt: bool = False,
     simple_input: str = "omol",
-    vertical: Enum = Vertical.Default,
     scf_MaxIter: int = None,
     functional: str = "wB97M-V",
     basis: str = None,
@@ -480,7 +486,8 @@ def get_orca_blocks(
     orcablocks.append("%pal\n nprocs " + str(cores) + "\nend")
 
     # Include estimate of memory needs
-    mem_est = get_mem_estimate(atoms, vertical, mult)
+    has_actinides = bool(elem_set & set(ACTINIDE_LIST))
+    mem_est = get_mem_estimate(atoms, mult, has_actinides=has_actinides)
     orcablocks.append(f"%maxcore {mem_est}")
 
     if not nbo:
@@ -494,9 +501,22 @@ def get_orca_blocks(
     if ks_method is not None:
         orcasimpleinput += f" {ks_method.upper()}"
 
-    if vertical in {Vertical.MetalOrganics, Vertical.Oss} and mult == 1:
+    # UKS symmetry breaking for actinide singlets.
+    # Actinides use all-electron basis (no ECP) — skip ECP subtraction for them.
+    all_electron_elems = {
+        e for e in elem_set if e in ACTINIDE_LIST or e in {"Ra", "Fr"}
+    }
+    needs_symm_break = mult == 1 and has_actinides
+
+    if needs_symm_break:
         orcasimpleinput += " UKS"
-        orcablocks.append(get_symm_break_block(atoms, charge=0))
+        orcablocks.append(
+            get_symm_break_block(
+                atoms,
+                charge=charge,
+                all_electron_elements=all_electron_elems,
+            )
+        )
 
     if scf_MaxIter:
         for block_line in orcablocks:
@@ -535,7 +555,6 @@ def write_orca_inputs(
     functional: str = "wB97M-V",
     simple_input: str = "omol",
     orca_path: str = None,
-    vertical: Enum = Vertical.Default,
     scf_MaxIter: int = None,
     actinide_basis: str = "ma-def-TZVP",
     actinide_ecp: str | None = None,
@@ -568,9 +587,9 @@ def write_orca_inputs(
         mbis=mbis,
         cores=cores,
         opt=opt,
-        vertical=vertical,
         scf_MaxIter=scf_MaxIter,
         mult=mult,
+        charge=charge,
         functional=functional,
         simple_input=simple_input,
         actinide_basis=actinide_basis,
