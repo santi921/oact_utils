@@ -9,7 +9,7 @@ from quacc import change_settings
 from sella import Sella
 
 from oact_utilities.core.orca._base import run_and_summarize, run_and_summarize_opt
-from oact_utilities.core.orca.calc import Vertical, get_orca_blocks
+from oact_utilities.core.orca.calc import get_orca_blocks
 
 
 def single_point_calculation(
@@ -24,7 +24,6 @@ def single_point_calculation(
     non_actinide_basis: str = "def2-TZVPD",
     nprocs=12,
     outputdir=os.getcwd(),
-    vertical=Vertical.Default,
     nbo=False,
     mbis=False,
     orca_cmd: str = "orca",
@@ -72,9 +71,9 @@ def single_point_calculation(
         mbis=mbis,
         cores=nprocs,
         basis=None,
-        vertical=vertical,
         scf_MaxIter=scf_MaxIter,
         mult=spin_multiplicity,
+        charge=charge,
         functional=functional,
         simple_input=simple_input,
         actinide_basis=actinide_basis,
@@ -121,7 +120,6 @@ def ase_relaxation(
     nprocs=12,
     opt_params=None,
     outputdir=os.getcwd(),
-    vertical=Vertical.Default,
     copy_files=None,
     nbo=False,
     mbis=False,
@@ -173,10 +171,10 @@ def ase_relaxation(
         nbo=nbo,
         mbis=mbis,
         cores=nprocs,
-        vertical=vertical,
         basis=None,
         scf_MaxIter=scf_MaxIter,
         mult=spin_multiplicity,
+        charge=charge,
         functional=functional,
         simple_input=simple_input,
         actinide_basis=actinide_basis,
@@ -220,7 +218,6 @@ def pure_ase_relaxation(
     non_actinide_basis: str = "def2-TZVPD",
     nprocs=12,
     outputdir=os.getcwd(),
-    vertical=Vertical.Default,
     nbo=False,
     mbis=False,
     traj_file: str = "opt.traj",
@@ -270,10 +267,10 @@ def pure_ase_relaxation(
         nbo=nbo,
         mbis=mbis,
         cores=nprocs,
-        vertical=vertical,
         basis=None,
         scf_MaxIter=scf_MaxIter,
         mult=spin_multiplicity,
+        charge=charge,
         functional=functional,
         simple_input=simple_input,
         actinide_basis=actinide_basis,

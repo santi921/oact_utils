@@ -714,6 +714,52 @@ def backfill_metrics(
     )
 
 
+def reset_missing_jobs(
+    workflow: ArchitectorWorkflow,
+    root_dir: str | Path,
+    job_dir_pattern: str = "job_{orig_index}",
+    statuses: list[JobStatus] | None = None,
+) -> int:
+    """Find jobs whose directories don't exist and reset them to TO_RUN.
+
+    Scans jobs in the given statuses, checks if the expected job directory
+    exists on disk, and resets any missing ones. Increments fail_count.
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        root_dir: Root directory containing job subdirectories.
+        job_dir_pattern: Pattern for job directory names.
+        statuses: Job statuses to check. Defaults to RUNNING, FAILED, TIMEOUT.
+
+    Returns:
+        Number of jobs reset.
+    """
+    if statuses is None:
+        statuses = [JobStatus.RUNNING, JobStatus.FAILED, JobStatus.TIMEOUT]
+
+    root_dir = Path(root_dir)
+    jobs = workflow.get_jobs_by_status(statuses, include_geometry=False)
+
+    reset_count = 0
+    for job in jobs:
+        job_dir_name = job_dir_pattern.format(
+            orig_index=job.orig_index,
+            id=job.id,
+        )
+        job_dir = root_dir / job_dir_name
+
+        if not job_dir.exists():
+            workflow.update_status(
+                job.id,
+                JobStatus.TO_RUN,
+                error_message="Directory missing — reset by --reset-missing",
+                increment_fail_count=True,
+            )
+            reset_count += 1
+
+    return reset_count
+
+
 def update_all_statuses(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
@@ -976,6 +1022,12 @@ def main():
         help="Reset all timeout jobs to ready status",
     )
     parser.add_argument(
+        "--reset-missing",
+        metavar="ROOT_DIR",
+        default=None,
+        help="Reset jobs whose directories no longer exist back to TO_RUN. Requires root directory path.",
+    )
+    parser.add_argument(
         "--include-timeout-in-reset",
         action="store_true",
         help="When using --reset-failed, also reset timeout jobs",
@@ -1127,6 +1179,15 @@ def main():
         else:
             workflow.reset_timeout_jobs()
             print(f"\nReset {len(timeout_jobs)} timeout jobs to ready status")
+
+    # Reset jobs with missing directories if requested
+    if args.reset_missing:
+        count = reset_missing_jobs(
+            workflow,
+            args.reset_missing,
+            job_dir_pattern=args.job_dir_pattern,
+        )
+        print(f"\nReset {count} jobs with missing directories to TO_RUN")
 
     # Always show summary
     print_summary(workflow)

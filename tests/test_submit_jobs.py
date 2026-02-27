@@ -193,7 +193,7 @@ class TestPrepareJobDirectory:
         )
         content = (job_dir / "orca.inp").read_text()
         # Should not contain any standalone KS keywords
-        # (UKS may appear in other contexts like Vertical, so check specifically)
+        # (UKS may appear for actinide singlets via symmetry breaking)
         assert " UKS" not in content or " RKS" not in content
         assert " ROKS" not in content
 

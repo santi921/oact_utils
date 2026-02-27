@@ -32,7 +32,7 @@ H -0.757 0.586 0.0"""
     data = {
         "aligned_csd_core": [xyz1, xyz2],
         "charge": [0, 0],
-        "uhf": [0, 0],  # unpaired electrons
+        "uhf": [1, 1],  # spin multiplicity (1 = singlet)
         "other_col": ["A", "B"],
     }
 
@@ -228,7 +228,7 @@ def test_create_workflow_db_directly(sample_csv, tmp_path):
     assert row[0] == "H;H"  # elements
     assert row[1] == 2  # natoms
     assert row[2] == 0  # charge
-    assert row[3] == 1  # spin (uhf=0 -> 2S+1 = 1)
+    assert row[3] == 1  # spin multiplicity (singlet)
 
     conn.close()
 
@@ -722,3 +722,115 @@ def test_update_job_status_normal_termination(tmp_path):
         # Verify in database
         jobs = workflow.get_jobs_by_status(JobStatus.COMPLETED)
         assert len(jobs) == 1
+
+
+def test_reset_missing_jobs(tmp_path):
+    """Test that jobs with missing directories are reset to TO_RUN."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import reset_missing_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+
+    # Insert jobs with various statuses
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+        fail_count=0,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="failed",
+        fail_count=1,
+    )
+    _insert_row(
+        conn,
+        orig_index=2,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+        fail_count=0,
+    )
+    _insert_row(
+        conn,
+        orig_index=3,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="completed",
+        fail_count=0,
+    )
+    conn.commit()
+    conn.close()
+
+    # Create directories for jobs 0 and 3 only — jobs 1 and 2 are "missing"
+    root_dir = tmp_path / "jobs"
+    root_dir.mkdir()
+    (root_dir / "job_0").mkdir()
+    (root_dir / "job_3").mkdir()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        count = reset_missing_jobs(workflow, root_dir)
+
+        # Jobs 1 (failed) and 2 (running) should be reset — their dirs don't exist
+        assert count == 2
+
+        # Verify they are now TO_RUN
+        to_run = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        reset_indices = sorted(j.orig_index for j in to_run)
+        assert reset_indices == [1, 2]
+
+        # Verify fail_count was incremented
+        for job in to_run:
+            if job.orig_index == 1:
+                assert job.fail_count == 2  # was 1, now 2
+            elif job.orig_index == 2:
+                assert job.fail_count == 1  # was 0, now 1
+
+        # Job 0 (running, dir exists) should stay running
+        running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(running) == 1
+        assert running[0].orig_index == 0
+
+        # Job 3 (completed) should not be touched
+        completed = workflow.get_jobs_by_status(JobStatus.COMPLETED)
+        assert len(completed) == 1
+        assert completed[0].orig_index == 3
+
+
+def test_reset_missing_jobs_no_missing(tmp_path):
+    """Test reset_missing_jobs when all directories exist."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import reset_missing_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="running",
+        fail_count=0,
+    )
+    conn.commit()
+    conn.close()
+
+    root_dir = tmp_path / "jobs"
+    root_dir.mkdir()
+    (root_dir / "job_0").mkdir()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        count = reset_missing_jobs(workflow, root_dir)
+        assert count == 0

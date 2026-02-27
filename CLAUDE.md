@@ -185,7 +185,7 @@ SQLite table `structures` with WAL mode for concurrent access:
 | `natoms` | INTEGER | Atom count |
 | `status` | TEXT | Job status (indexed): `to_run`, `running`, `completed`, `failed`, `timeout` |
 | `charge` | INTEGER | Molecular charge |
-| `spin` | INTEGER | Spin multiplicity (2S+1) |
+| `spin` | INTEGER | Spin multiplicity (2S+1), read directly from CSV — no internal conversion from unpaired electrons |
 | `geometry` | TEXT | XYZ string (**heavy** — exclude with `include_geometry=False`) |
 | `job_dir` | TEXT | Path to job directory |
 | `max_forces` | REAL | Max gradient (Eh/Bohr) |
@@ -429,3 +429,4 @@ See `docs/solutions/performance-issues/` for detailed writeups.
 - Parsl is an optional dependency — traditional mode works without it. Import is wrapped in try/except with `PARSL_AVAILABLE` flag
 - SCF parsing: always use `SCF CONVERGED AFTER X CYCLES` pattern, NOT `SCF ITERATIONS` header
 - Status checking: content-based checks MUST run before file-age timeout heuristic
+- Spin format: CSV input already contains spin multiplicity (2S+1) — do NOT convert from unpaired electrons internally. `create_workflow_db` reads spin values as-is and validates via `validate_spin_multiplicity()`
