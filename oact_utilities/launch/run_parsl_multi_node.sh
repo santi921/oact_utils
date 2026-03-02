@@ -75,5 +75,6 @@ python -m oact_utilities.workflows.submit_jobs \
     --actinide-basis "${ACTINIDE_BASIS}" \
     --actinide-ecp "${ACTINIDE_ECP}" \
     --non-actinide-basis "${NON_ACTINIDE_BASIS}" \
-    --scf-maxiter "${SCF_MAXITER}"
+    --scf-maxiter "${SCF_MAXITER}" \
+    --ks-method uks
     #--dry-run # Uncomment to do a dry run (Parsl will spin up and prepare directories but not actually submit jobs)
