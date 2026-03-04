@@ -232,6 +232,14 @@ ORCA_BLOCKS_DK3 = [
 
 NBO_FLAGS = '%nbo NBOKEYLIST = "$NBO NPA NBO E2PERT 0.1 $END" end'  # SV - turn off??
 
+# Mapping from user-facing opt level names to ORCA simple-input keywords.
+_OPT_LEVEL_KEYWORDS: dict[str, str] = {
+    "loose": "LooseOpt",
+    "normal": "Opt",
+    "tight": "TightOpt",
+    "verytight": "VeryTightOpt",
+}
+
 
 LOOSE_OPT_PARAMETERS = {
     "optimizer": Sella,
@@ -373,6 +381,7 @@ def get_orca_blocks(
     mbis: bool = False,
     cores: int = 12,
     opt: bool = False,
+    opt_level: str = "normal",
     simple_input: str = "omol",
     scf_MaxIter: int = None,
     functional: str = "wB97M-V",
@@ -388,7 +397,7 @@ def get_orca_blocks(
 ):
 
     if opt:
-        job = "Opt"
+        job = _OPT_LEVEL_KEYWORDS.get(opt_level, "Opt")
     else:
         job = "EnGrad"
 
@@ -552,6 +561,7 @@ def write_orca_inputs(
     mbis: bool = False,
     cores: int = 12,
     opt: bool = False,
+    opt_level: str = "normal",
     functional: str = "wB97M-V",
     simple_input: str = "omol",
     orca_path: str = None,
@@ -564,7 +574,7 @@ def write_orca_inputs(
     error_handle: bool = False,
     error_code: int = 0,
     ks_method: str | None = None,
-):
+) -> tuple[str, list[str]]:
     """
     One-off method to be used if you wanted to write inputs for an arbitrary
     system. Primarily used for debugging.
@@ -587,6 +597,7 @@ def write_orca_inputs(
         mbis=mbis,
         cores=cores,
         opt=opt,
+        opt_level=opt_level,
         scf_MaxIter=scf_MaxIter,
         mult=mult,
         charge=charge,
@@ -624,3 +635,5 @@ def write_orca_inputs(
     )
 
     calc.write_inputfiles(atoms, ["energy", "forces"])
+
+    return orcasimpleinput, orcablocks

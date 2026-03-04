@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+from ..utils.status import check_job_termination
 from .architector_workflow import ArchitectorWorkflow, JobStatus
 
 
@@ -793,8 +794,6 @@ def update_all_statuses(
         profile: If True, collect and display performance profiling data for metrics extraction.
     """
     from functools import partial
-
-    from ..utils.status import check_job_termination
 
     if check_func is None:
         check_func = partial(check_job_termination, hours_cutoff=hours_cutoff)
