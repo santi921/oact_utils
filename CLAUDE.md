@@ -125,16 +125,17 @@ oact_utilities/
 
 Four configurable templates defined in `core/orca/calc.py`:
 
-| Template | Use Case | Key Settings |
-|----------|----------|-------------|
-| `omol` (default) | Standard DFT | RIJCOSX, def2/J, DIIS, NormalConv, DEFGRID3, ALLPOP |
-| `omol_base` | Difficult SCF convergence | Simplified SCF (MaxIter=600), MediumConv, fewer convergence tweaks |
-| `x2c` | Relativistic (actinides) | DLU-X2C, RIJCOSX, AutoAux |
-| `dk3` | Heavy relativistic | DKH (Douglas-Kroll-Hess), SARC/J |
+| Template         | Use Case                  | Key Settings                                                       |
+| ---------------- | ------------------------- | ------------------------------------------------------------------ |
+| `omol` (default) | Standard DFT              | RIJCOSX, def2/J, DIIS, NormalConv, DEFGRID3, ALLPOP                |
+| `omol_base`      | Difficult SCF convergence | Simplified SCF (MaxIter=600), MediumConv, fewer convergence tweaks |
+| `x2c`            | Relativistic (actinides)  | DLU-X2C, RIJCOSX, AutoAux                                          |
+| `dk3`            | Heavy relativistic        | DKH (Douglas-Kroll-Hess), SARC/J                                   |
 
 All templates now include `Print[ P_Hirshfeld ] 1` in the `%output` block for Hirshfeld population analysis by default.
 
 **Additional ORCA config options:**
+
 - `mbis=True` — append MBIS population analysis to simple input
 - `nbo=True` — enable NBO analysis
 - `diis_option="KDIIS"` — use KDIIS instead of DIIS for improved SCF convergence
@@ -159,12 +160,14 @@ When writing HPC utilities, always support both Flux and SLURM with configurable
 ### Job Submission Modes
 
 **Traditional Mode** — submits each job as a separate Flux/SLURM batch job:
+
 ```bash
 python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
     --scheduler flux --batch-size 50 --n-cores 4
 ```
 
 **Parsl Mode** — concurrent execution on an exclusive allocated node (4x throughput):
+
 ```bash
 flux alloc -N 1 -n 64 -q pbatch -t 8h -B dnn-sim
 python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
@@ -177,24 +180,24 @@ See `docs/parsl_integration.md` for full Parsl architecture details.
 
 SQLite table `structures` with WAL mode for concurrent access:
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PK | Auto-increment |
-| `orig_index` | INTEGER | Original CSV row (indexed) |
-| `elements` | TEXT | Semicolon-separated element symbols |
-| `natoms` | INTEGER | Atom count |
-| `status` | TEXT | Job status (indexed): `to_run`, `running`, `completed`, `failed`, `timeout` |
-| `charge` | INTEGER | Molecular charge |
-| `spin` | INTEGER | Spin multiplicity (2S+1), read directly from CSV — no internal conversion from unpaired electrons |
-| `geometry` | TEXT | XYZ string (**heavy** — exclude with `include_geometry=False`) |
-| `job_dir` | TEXT | Path to job directory |
-| `max_forces` | REAL | Max gradient (Eh/Bohr) |
-| `scf_steps` | INTEGER | Total SCF iterations |
-| `final_energy` | REAL | Final energy (Hartree) |
-| `wall_time` | REAL | Wall time in seconds |
-| `n_cores` | INTEGER | CPU cores used |
-| `error_message` | TEXT | Error message if failed |
-| `fail_count` | INTEGER | Retry counter (incremented on reset) |
+| Column          | Type       | Notes                                                                                             |
+| --------------- | ---------- | ------------------------------------------------------------------------------------------------- |
+| `id`            | INTEGER PK | Auto-increment                                                                                    |
+| `orig_index`    | INTEGER    | Original CSV row (indexed)                                                                        |
+| `elements`      | TEXT       | Semicolon-separated element symbols                                                               |
+| `natoms`        | INTEGER    | Atom count                                                                                        |
+| `status`        | TEXT       | Job status (indexed):`to_run`, `running`, `completed`, `failed`, `timeout`                        |
+| `charge`        | INTEGER    | Molecular charge                                                                                  |
+| `spin`          | INTEGER    | Spin multiplicity (2S+1), read directly from CSV — no internal conversion from unpaired electrons |
+| `geometry`      | TEXT       | XYZ string (**heavy** — exclude with `include_geometry=False`)                                    |
+| `job_dir`       | TEXT       | Path to job directory                                                                             |
+| `max_forces`    | REAL       | Max gradient (Eh/Bohr)                                                                            |
+| `scf_steps`     | INTEGER    | Total SCF iterations                                                                              |
+| `final_energy`  | REAL       | Final energy (Hartree)                                                                            |
+| `wall_time`     | REAL       | Wall time in seconds                                                                              |
+| `n_cores`       | INTEGER    | CPU cores used                                                                                    |
+| `error_message` | TEXT       | Error message if failed                                                                           |
+| `fail_count`    | INTEGER    | Retry counter (incremented on reset)                                                              |
 
 **Performance notes:** Always use `include_geometry=False` or `_LIGHT_COLS` when you don't need XYZ coordinates. Push `LIMIT` into SQL, never slice in Python.
 
@@ -214,6 +217,7 @@ TO_RUN → RUNNING → COMPLETED
 - **TIMEOUT**: No updates for 6+ hours (configurable via `hours_cutoff`)
 
 Status detection in `check_file_termination()` uses **content-based checks first** (priority), then file-age heuristic:
+
 1. Check last 10 lines for `ORCA TERMINATED NORMALLY` → completed
 2. Check for `aborting the run` or `Error` → failed
 3. If file older than `hours_cutoff` → timeout
@@ -231,6 +235,7 @@ Managing large-scale architector calculation campaigns. Key files:
 - `oact_utilities/utils/architector.py` - Database creation from CSV files
 
 **Quick example:**
+
 ```python
 from oact_utilities.utils.architector import create_workflow_db
 from oact_utilities.workflows import ArchitectorWorkflow, JobStatus
@@ -258,6 +263,7 @@ Creating job submission scripts from custom datasets:
 - `oact_utilities/launch/` - Shell scripts for launching Parsl on HPC
 
 **Submit CLI reference:**
+
 ```bash
 python -m oact_utilities.workflows.submit_jobs <db> <root_dir> [options]
 
@@ -287,6 +293,7 @@ Status checking and visualization of running jobs:
 - `oact_utilities/utils/analysis.py` - Results parsing (forces, SCF, energies, timings, populations)
 
 **Dashboard CLI reference:**
+
 ```bash
 python -m oact_utilities.workflows.dashboard <db> [options]
 
@@ -329,6 +336,7 @@ Parsing ORCA outputs, extracting energies, gradients, timings, populations:
   - `_validate_file_path()` - Security: prevent path traversal attacks
 
 **Supported formats:**
+
 - Regular ORCA text output
 - Gzipped quacc output (`.out.gz`, `.engrad.gz`)
 - ORCA `.engrad` binary format
@@ -345,6 +353,7 @@ Check these locations for common issues:
 - `fail_count` column to identify chronic failures
 
 **Workflow debugging:**
+
 ```bash
 # Show failed jobs with error messages
 python -m oact_utilities.workflows.dashboard workflow.db --show-failed
@@ -373,11 +382,13 @@ Tests live in `tests/` with test data in `tests/files/`. When adding new functio
 4. Use `Path(__file__).parent / "files"` for test data paths (no hardcoded paths)
 
 **Test data:**
+
 - `tests/files/orca_direct_example/` - Direct ORCA run outputs (AmO molecule)
 - `tests/files/quacc_example/` - Quacc gzipped outputs (NpF3 molecule)
 - Both used to test parsers against real ORCA output formats
 
 **Current test modules:**
+
 - `test_analysis.py` - Parser functions (forces, SCF, energy, Mulliken, metrics)
 - `test_calculator.py` - ORCA calculator setup
 - `test_hpc.py` - Job file generation
@@ -430,3 +441,5 @@ See `docs/solutions/performance-issues/` for detailed writeups.
 - SCF parsing: always use `SCF CONVERGED AFTER X CYCLES` pattern, NOT `SCF ITERATIONS` header
 - Status checking: content-based checks MUST run before file-age timeout heuristic
 - Spin format: CSV input already contains spin multiplicity (2S+1) — do NOT convert from unpaired electrons internally. `create_workflow_db` reads spin values as-is and validates via `validate_spin_multiplicity()`
+- Don't use emojis and emdashes anywhere
+-

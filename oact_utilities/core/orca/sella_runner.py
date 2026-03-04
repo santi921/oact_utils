@@ -2,11 +2,12 @@
 
 This module provides:
 - run_sella_optimization(): Importable, testable Sella optimization logic.
-- write_sella_runner_shim(): Generates a thin run_sella.py script for HPC batch execution.
+- write_sella_runner_shim(): Generates a config + static shim for HPC batch execution.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import textwrap
 from pathlib import Path
@@ -128,13 +129,15 @@ def write_sella_runner_shim(
     internal: bool = True,
     orca_cmd: str = "orca",
 ) -> Path:
-    """Generate a thin run_sella.py shim with all values embedded.
+    """Generate a JSON config and static shim script for HPC batch execution.
 
-    The generated script simply imports and calls run_sella_optimization()
-    with hardcoded parameter values. No re-parsing of orca.inp needed.
+    Writes two files:
+    - sella_config.json: All optimization parameters as pure data.
+    - run_sella.py: Static script that reads the JSON and calls
+      run_sella_optimization(). No user values are interpolated into code.
 
     Args:
-        outputdir: Directory where run_sella.py will be written.
+        outputdir: Directory where files will be written.
         charge: Molecular charge.
         mult: Spin multiplicity.
         orcasimpleinput: ORCA simple input line.
@@ -149,26 +152,34 @@ def write_sella_runner_shim(
         Path to the generated run_sella.py script.
     """
     outputdir = Path(outputdir)
-    shim_path = outputdir / "run_sella.py"
 
+    # Write parameters as JSON data -- no code generation with user values
+    config = {
+        "charge": charge,
+        "mult": mult,
+        "orcasimpleinput": orcasimpleinput,
+        "orcablocks": orcablocks,
+        "fmax": fmax,
+        "max_steps": max_steps,
+        "order": order,
+        "internal": internal,
+        "orca_cmd": orca_cmd,
+    }
+    config_path = outputdir / "sella_config.json"
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+    # Write a static shim that reads the config -- no interpolation needed
+    shim_path = outputdir / "run_sella.py"
     script = textwrap.dedent(
-        f"""\
+        """\
         #!/usr/bin/env python
-        \"\"\"Generated Sella optimization runner. Do not edit — regenerate via submit_jobs.\"\"\"
+        \"\"\"Generated Sella runner. Reads sella_config.json for parameters.\"\"\"
+        import json
+        from pathlib import Path
         from oact_utilities.core.orca.sella_runner import run_sella_optimization
 
-        run_sella_optimization(
-            job_dir=".",
-            charge={charge!r},
-            mult={mult!r},
-            orcasimpleinput={orcasimpleinput!r},
-            orcablocks={orcablocks!r},
-            fmax={fmax!r},
-            max_steps={max_steps!r},
-            order={order!r},
-            internal={internal!r},
-            orca_cmd={orca_cmd!r},
-        )
+        config = json.loads(Path("sella_config.json").read_text())
+        run_sella_optimization(job_dir=".", **config)
     """
     )
 

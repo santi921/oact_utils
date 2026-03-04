@@ -373,7 +373,9 @@ class TestWriteSlurmJobFile:
         assert "TightOpt" in content
 
     def test_optimizer_sella_creates_shim(self, mock_job_record, tmp_path):
-        """Sella optimizer generates run_sella.py shim."""
+        """Sella optimizer generates run_sella.py shim and sella_config.json."""
+        import json
+
         orca_config: OrcaConfig = {
             "optimizer": "sella",
             "orca_path": "/fake/path/to/orca",
@@ -385,7 +387,16 @@ class TestWriteSlurmJobFile:
         assert shim.exists()
         content = shim.read_text()
         assert "run_sella_optimization" in content
-        assert "fmax=0.05" in content
+        assert "sella_config.json" in content
+
+        # Verify JSON config contains correct parameters
+        config_file = job_dir / "sella_config.json"
+        assert config_file.exists()
+        config = json.loads(config_file.read_text())
+        assert config["fmax"] == 0.05
+        assert config["orca_cmd"] == "/fake/path/to/orca"
+        assert config["charge"] == 0
+        assert config["mult"] == 1
 
     def test_optimizer_none_no_opt(self, mock_job_record, tmp_path):
         """No Opt keyword when optimizer is None (single-point)."""
