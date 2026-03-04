@@ -397,8 +397,9 @@ class TestWriteSlurmJobFile:
             mock_job_record, tmp_path, orca_config=orca_config
         )
         content = (job_dir / "orca.inp").read_text()
-        # Should not contain Opt keyword (single-point)
-        assert "Opt" not in content or "AllPop" in content  # AllPop contains no Opt
+        # Should not contain Opt/TightOpt/etc. keyword (single-point = EnGrad only)
+        simple_line = [ln for ln in content.splitlines() if ln.startswith("!")][0]
+        assert "Opt" not in simple_line
         assert not (job_dir / "run_sella.py").exists()
 
 

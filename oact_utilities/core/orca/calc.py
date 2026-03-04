@@ -397,7 +397,12 @@ def get_orca_blocks(
 ):
 
     if opt:
-        job = _OPT_LEVEL_KEYWORDS.get(opt_level, "Opt")
+        if opt_level not in _OPT_LEVEL_KEYWORDS:
+            raise ValueError(
+                f"Invalid opt_level {opt_level!r}. "
+                f"Must be one of: {list(_OPT_LEVEL_KEYWORDS)}"
+            )
+        job = _OPT_LEVEL_KEYWORDS[opt_level]
     else:
         job = "EnGrad"
 

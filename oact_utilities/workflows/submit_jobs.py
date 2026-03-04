@@ -45,7 +45,7 @@ class OrcaConfig(TypedDict, total=False):
         optimizer: Optimizer engine: "orca" (native), "sella" (external ASE), or None (single-point).
         opt_level: ORCA optimization convergence level (only with optimizer="orca").
         fmax: Sella force convergence threshold in Eh/Bohr (only with optimizer="sella").
-        max_opt_steps: Maximum Sella optimization steps (only with optimizer="sella", None=unlimited).
+        max_opt_steps: Maximum Sella optimization steps (only with optimizer="sella", default: 100).
         orca_path: Path to ORCA executable (default: scheduler-specific).
         ks_method: KS wavefunction type: "rks", "uks", or "roks" (default: None, ORCA auto-detects).
     """
@@ -180,7 +180,9 @@ def prepare_job_directory(
         if optimizer == "sella":
             orcablocks_str = "\n".join(orcablocks_list)
 
-            max_steps = config.get("max_opt_steps") or 100
+            max_steps = config.get("max_opt_steps")
+            if max_steps is None:
+                max_steps = 100
             write_sella_runner_shim(
                 outputdir=job_dir,
                 charge=charge,

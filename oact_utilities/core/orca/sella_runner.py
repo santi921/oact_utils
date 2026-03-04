@@ -173,6 +173,6 @@ def write_sella_runner_shim(
     )
 
     shim_path.write_text(script)
-    shim_path.chmod(0o755)
+    shim_path.chmod(0o700)
 
     return shim_path
