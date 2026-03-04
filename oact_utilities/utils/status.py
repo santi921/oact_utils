@@ -41,12 +41,18 @@ def check_file_termination(
             with open(file_path, errors="replace") as f:
                 last_lines = deque(f, maxlen=10)
 
-        # Check last 10 lines for definitive termination status first.
+        # Check last 10 lines for definitive termination status.
         # Content-based checks take priority over file age so that completed
         # or failed jobs keep their correct status regardless of how old they are.
+        #
+        # IMPORTANT: scan ALL lines for success first, then for failure.
+        # ORCA can print benign lines containing "Error" (e.g.,
+        # "Some of the Onep Onebody Integrals have an Error larger than 1.0e-05")
+        # before the final "ORCA TERMINATED NORMALLY" line. A single-pass loop
+        # would short-circuit on the "Error" line and miss the success signal.
+        if any("ORCA TERMINATED NORMALLY" in line for line in last_lines):
+            return 1
         for line in last_lines:
-            if "ORCA TERMINATED NORMALLY" in line:
-                return 1
             if "aborting the run" in line:
                 return -1
             if "Error" in line:
