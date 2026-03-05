@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import gzip
 import os
 import re
@@ -39,12 +41,18 @@ def check_file_termination(
             with open(file_path, errors="replace") as f:
                 last_lines = deque(f, maxlen=10)
 
-        # Check last 10 lines for definitive termination status first.
+        # Check last 10 lines for definitive termination status.
         # Content-based checks take priority over file age so that completed
         # or failed jobs keep their correct status regardless of how old they are.
+        #
+        # IMPORTANT: scan ALL lines for success first, then for failure.
+        # ORCA can print benign lines containing "Error" (e.g.,
+        # "Some of the Onep Onebody Integrals have an Error larger than 1.0e-05")
+        # before the final "ORCA TERMINATED NORMALLY" line. A single-pass loop
+        # would short-circuit on the "Error" line and miss the success signal.
+        if any("ORCA TERMINATED NORMALLY" in line for line in last_lines):
+            return 1
         for line in last_lines:
-            if "ORCA TERMINATED NORMALLY" in line:
-                return 1
             if "aborting the run" in line:
                 return -1
             if "Error" in line:
@@ -91,21 +99,76 @@ def done_geo_opt_ase(opt_log_file, fmax_cutoff=0.01):
         return False
 
 
-def check_job_termination(
-    dir: str, check_many: bool = False, flux_tf: bool = False, hours_cutoff=6
-) -> int:
-    """
-    Utility function to check if a job in a given directory has terminated successfully.
+def _check_sella_termination(dir: str, hours_cutoff: int = 6) -> int:
+    """Check Sella optimization termination via sella_status.txt.
 
-    Supports both regular (.out, .logs) and gzipped (.out.gz) ORCA output files.
+    The sella_status.txt file is the authoritative completion signal written
+    by run_sella_optimization() in sella_runner.py.
 
     Args:
-        dir (str): Path to the directory containing the job.
-        check_many (bool, optional): Whether to check multiple output files. Defaults to False.
-        flux_tf (bool, optional): Whether to check for flux output files. Defaults to False.
+        dir: Path to the job directory.
+        hours_cutoff: Hours before considering a job timed out.
+
     Returns:
-        int: 1 if the job terminated successfully, -1 if it failed, -2 if timeout, 0 if still running or incomplete.
+        1 if converged, -1 if error or not converged, -2 if timeout,
+        0 if still running.
     """
+    status_file = os.path.join(dir, "sella_status.txt")
+    if os.path.exists(status_file):
+        try:
+            with open(status_file, errors="replace") as f:
+                content = f.read()
+            if "CONVERGED" in content and "NOT_CONVERGED" not in content:
+                return 1
+            if "NOT_CONVERGED" in content or "ERROR" in content:
+                return -1
+        except OSError:
+            pass
+
+    # No status file yet — check if sella.log exists and is stale
+    sella_log = os.path.join(dir, "sella.log")
+    if os.path.exists(sella_log):
+        if os.path.getmtime(sella_log) < (time.time() - hours_cutoff * 3600):
+            return -2
+        return 0
+
+    # No Sella artifacts at all — fall back to directory age
+    if os.path.getmtime(dir) < (time.time() - hours_cutoff * 3600):
+        return -2
+    return 0
+
+
+def check_job_termination(
+    dir: str,
+    check_many: bool = False,
+    flux_tf: bool = False,
+    hours_cutoff=6,
+    optimizer: str | None = None,
+) -> int:
+    """Check if a job in a given directory has terminated successfully.
+
+    Supports both regular (.out, .logs) and gzipped (.out.gz) ORCA output files.
+    When optimizer="sella", checks sella_status.txt instead of ORCA output.
+
+    Args:
+        dir: Path to the directory containing the job.
+        check_many: Whether to check multiple output files. Defaults to False.
+        flux_tf: Whether to check for flux output files. Defaults to False.
+        hours_cutoff: Hours before considering a job timed out.
+        optimizer: Optimizer engine ("orca", "sella", or None). When "sella",
+            uses sella_status.txt as the authoritative termination signal.
+
+    Returns:
+        1 if the job terminated successfully, -1 if it failed,
+        -2 if timeout, 0 if still running or incomplete.
+    """
+    # Sella jobs: check sella_status.txt instead of ORCA output.
+    # Auto-detect when optimizer is None by looking for run_sella.py marker.
+    if optimizer == "sella" or (
+        optimizer is None and os.path.exists(os.path.join(dir, "run_sella.py"))
+    ):
+        return _check_sella_termination(dir, hours_cutoff=hours_cutoff)
+
     # sweep folder file for flux*out files
     files = os.listdir(dir)
     # print("files: ", files)

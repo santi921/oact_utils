@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from oact_utilities.utils.status import (
+    _check_sella_termination,
     check_file_termination,
     check_job_termination,
     pull_log_file,
@@ -155,3 +156,61 @@ def test_check_file_termination_abort():
         # Clean up
         if os.path.exists(temp_file):
             os.unlink(temp_file)
+
+
+# ---------------------------------------------------------------------------
+# Sella termination tests
+# ---------------------------------------------------------------------------
+
+
+def test_sella_termination_converged(tmp_path):
+    """_check_sella_termination returns 1 for CONVERGED status."""
+    status_file = tmp_path / "sella_status.txt"
+    status_file.write_text("status: CONVERGED\nsteps: 42\nfinal_fmax: 0.001\n")
+    assert _check_sella_termination(str(tmp_path)) == 1
+
+
+def test_sella_termination_not_converged(tmp_path):
+    """_check_sella_termination returns -1 for NOT_CONVERGED status."""
+    status_file = tmp_path / "sella_status.txt"
+    status_file.write_text("status: NOT_CONVERGED\nsteps: 100\nfinal_fmax: 0.1\n")
+    assert _check_sella_termination(str(tmp_path)) == -1
+
+
+def test_sella_termination_error(tmp_path):
+    """_check_sella_termination returns -1 for ERROR status."""
+    status_file = tmp_path / "sella_status.txt"
+    status_file.write_text("status: ERROR\nmessage: SCF failed\n")
+    assert _check_sella_termination(str(tmp_path)) == -1
+
+
+def test_sella_termination_running(tmp_path):
+    """_check_sella_termination returns 0 when sella.log exists but no status file."""
+    sella_log = tmp_path / "sella.log"
+    sella_log.write_text("Step Time Energy fmax\n")
+    assert _check_sella_termination(str(tmp_path)) == 0
+
+
+def test_sella_termination_timeout(tmp_path):
+    """_check_sella_termination returns -2 when sella.log is stale."""
+    sella_log = tmp_path / "sella.log"
+    sella_log.write_text("Step Time Energy fmax\n")
+    seven_hours_ago = time.time() - (7 * 3600)
+    os.utime(str(sella_log), (seven_hours_ago, seven_hours_ago))
+    assert _check_sella_termination(str(tmp_path)) == -2
+
+
+def test_check_job_termination_sella_optimizer(tmp_path):
+    """check_job_termination dispatches to Sella check when optimizer='sella'."""
+    status_file = tmp_path / "sella_status.txt"
+    status_file.write_text("status: CONVERGED\nsteps: 10\nfinal_fmax: 0.01\n")
+    assert check_job_termination(str(tmp_path), optimizer="sella") == 1
+
+
+def test_check_job_termination_no_optimizer_ignores_sella(tmp_path):
+    """check_job_termination ignores sella_status.txt when optimizer is None."""
+    status_file = tmp_path / "sella_status.txt"
+    status_file.write_text("status: CONVERGED\n")
+    # No ORCA .out file, so should return 0 or -2 (not 1)
+    status = check_job_termination(str(tmp_path), optimizer=None)
+    assert status != 1

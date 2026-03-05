@@ -11,9 +11,10 @@ import random
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, TypedDict
+from typing import Callable, Literal, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
+from ..core.orca.sella_runner import write_sella_runner_shim
 from ..utils.analysis import find_timings_and_cores, parse_job_metrics
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import pull_log_file
@@ -41,7 +42,10 @@ class OrcaConfig(TypedDict, total=False):
         scf_MaxIter: Maximum SCF iterations (default: None, uses ORCA default).
         nbo: Enable NBO analysis (default: False).
         mbis: Enable MBIS population analysis (default: False).
-        opt: Enable geometry optimization (default: False).
+        optimizer: Optimizer engine: "orca" (native), "sella" (external ASE), or None (single-point).
+        opt_level: ORCA optimization convergence level (only with optimizer="orca").
+        fmax: Sella force convergence threshold in Eh/Bohr (only with optimizer="sella").
+        max_opt_steps: Maximum Sella optimization steps (only with optimizer="sella", default: 100).
         orca_path: Path to ORCA executable (default: scheduler-specific).
         ks_method: KS wavefunction type: "rks", "uks", or "roks" (default: None, ORCA auto-detects).
     """
@@ -54,7 +58,10 @@ class OrcaConfig(TypedDict, total=False):
     scf_MaxIter: int | None
     nbo: bool
     mbis: bool
-    opt: bool
+    optimizer: Literal["orca", "sella"] | None
+    opt_level: Literal["loose", "normal", "tight", "verytight"]
+    fmax: float
+    max_opt_steps: int | None
     orca_path: str
     diis_option: str | None
     ks_method: str | None
@@ -69,7 +76,10 @@ DEFAULT_ORCA_CONFIG: OrcaConfig = {
     "scf_MaxIter": None,
     "nbo": False,
     "mbis": False,
-    "opt": False,
+    "optimizer": None,
+    "opt_level": "normal",
+    "fmax": 0.05,
+    "max_opt_steps": None,
     "diis_option": None,
     "ks_method": None,
 }
@@ -140,7 +150,12 @@ def prepare_job_directory(
         # DB stores spin multiplicity directly
         mult = job_record.spin if job_record.spin is not None else 1
 
-        write_orca_inputs(
+        optimizer = config.get("optimizer")
+        # ORCA native opt: set opt=True so get_orca_blocks adds "Opt"/"TightOpt"/etc.
+        # Sella opt: set opt=False so get_orca_blocks adds "EnGrad" (Sella drives optimization)
+        use_orca_opt = optimizer == "orca"
+
+        orcasimpleinput, orcablocks_list = write_orca_inputs(
             atoms=atoms,
             output_directory=str(job_dir),
             charge=charge,
@@ -149,7 +164,8 @@ def prepare_job_directory(
             mbis=config.get("mbis", False),
             diis_option=config.get("diis_option"),
             cores=n_cores,
-            opt=config.get("opt", False),
+            opt=use_orca_opt,
+            opt_level=config.get("opt_level", "normal"),
             functional=config.get("functional", "wB97M-V"),
             simple_input=config.get("simple_input", "omol"),
             orca_path=config.get("orca_path"),
@@ -159,6 +175,24 @@ def prepare_job_directory(
             non_actinide_basis=config.get("non_actinide_basis", "def2-TZVPD"),
             ks_method=config.get("ks_method"),
         )
+
+        # For Sella jobs: generate the runner shim script
+        if optimizer == "sella":
+            orcablocks_str = "\n".join(orcablocks_list)
+
+            max_steps = config.get("max_opt_steps")
+            if max_steps is None:
+                max_steps = 100
+            write_sella_runner_shim(
+                outputdir=job_dir,
+                charge=charge,
+                mult=mult,
+                orcasimpleinput=orcasimpleinput,
+                orcablocks=orcablocks_str,
+                fmax=config.get("fmax", 0.05),
+                max_steps=max_steps,
+                orca_cmd=config.get("orca_path", "orca"),
+            )
 
     # Call custom setup function if provided
     if setup_func:
@@ -177,6 +211,7 @@ def write_flux_job_file(
     conda_env: str = "py10mpi",
     input_file: str = "orca.inp",
     ld_library_path: str | None = None,
+    optimizer: str | None = None,
 ) -> Path:
     """Write a Flux job submission script.
 
@@ -189,6 +224,7 @@ def write_flux_job_file(
         orca_path: Path to ORCA executable.
         conda_env: Conda environment to activate.
         input_file: Name of the ORCA input file.
+        optimizer: Optimizer engine ("orca", "sella", or None for single-point).
 
     Returns:
         Path to the created flux job file.
@@ -196,6 +232,12 @@ def write_flux_job_file(
     # Use absolute path so job runs in correct directory regardless of submission location
     job_dir_abs = job_dir.resolve()
     flux_script = job_dir_abs / "flux_job.flux"
+
+    # Determine run command based on optimizer
+    if optimizer == "sella":
+        run_cmd = "python run_sella.py > sella_driver.log 2>&1\n"
+    else:
+        run_cmd = f"{orca_path} {input_file}\n"
 
     lines = [
         "#!/bin/sh\n",
@@ -214,7 +256,7 @@ def write_flux_job_file(
             if ld_library_path
             else f"export LD_LIBRARY_PATH={DEFAULT_LD_LIBRARY_PATHS['flux']}:$LD_LIBRARY_PATH\n"
         ),
-        f"{orca_path} {input_file}\n",
+        run_cmd,
     ]
 
     with open(flux_script, "w") as f:
@@ -236,6 +278,7 @@ def write_slurm_job_file(
     conda_env: str = "py10mpi",
     input_file: str = "orca.inp",
     ld_library_path: str | None = None,
+    optimizer: str | None = None,
 ) -> Path:
     """Write a SLURM job submission script.
 
@@ -248,6 +291,8 @@ def write_slurm_job_file(
         orca_path: Path to ORCA executable.
         conda_env: Conda environment to activate.
         input_file: Name of the ORCA input file.
+        ld_library_path: Override LD_LIBRARY_PATH.
+        optimizer: Optimizer engine ("orca", "sella", or None for single-point).
 
     Returns:
         Path to the created SLURM job file.
@@ -255,6 +300,12 @@ def write_slurm_job_file(
     # Use absolute path so job runs in correct directory regardless of submission location
     job_dir_abs = job_dir.resolve()
     slurm_script = job_dir_abs / "slurm_job.sh"
+
+    # Determine run command based on optimizer
+    if optimizer == "sella":
+        run_cmd = "python run_sella.py > sella_driver.log 2>&1\n"
+    else:
+        run_cmd = f"{orca_path} {input_file}\n"
 
     lines = [
         "#!/bin/sh\n",
@@ -276,7 +327,7 @@ def write_slurm_job_file(
             if ld_library_path
             else f"export LD_LIBRARY_PATH={DEFAULT_LD_LIBRARY_PATHS['slurm']}:$LD_LIBRARY_PATH\n"
         ),
-        f"{orca_path} {input_file}\n",
+        run_cmd,
     ]
 
     with open(slurm_script, "w") as f:
@@ -338,10 +389,13 @@ if PARSL_AVAILABLE:
         orca_config: dict,
         timeout_seconds: int = 7200,
     ) -> dict:
-        """Execute ORCA job within Parsl worker.
+        """Execute ORCA (or Sella) job within Parsl worker.
 
         This runs as a Parsl python_app, executing directly on the worker node.
         Parsl handles CPU affinity and worker management automatically.
+
+        When optimizer="sella", runs ``python run_sella.py`` instead of ORCA
+        directly. The Sella shim script is generated by prepare_job_directory().
 
         ORCA output is written to files (orca.out / orca.err) instead of being
         captured via pipes.  Pipe-based capture can deadlock when ORCA's
@@ -371,18 +425,32 @@ if PARSL_AVAILABLE:
         from pathlib import Path
 
         job_dir_path = Path(job_dir)
-        input_file = job_dir_path / "orca.inp"
+        optimizer = orca_config.get("optimizer")
 
-        # Verify input file exists
-        if not input_file.exists():
-            return {
-                "job_id": job_id,
-                "status": "failed",
-                "error": f"Input file not found: {input_file}",
-            }
-
-        # Get ORCA path from config
-        orca_cmd = orca_config.get("orca_path", "orca")
+        # Determine command based on optimizer
+        if optimizer == "sella":
+            sella_script = job_dir_path / "run_sella.py"
+            if not sella_script.exists():
+                return {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": f"Sella script not found: {sella_script}",
+                }
+            cmd = ["python", str(sella_script)]
+            stdout_path = job_dir_path / "sella_driver.log"
+            stderr_path = job_dir_path / "sella_driver.err"
+        else:
+            input_file = job_dir_path / "orca.inp"
+            if not input_file.exists():
+                return {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": f"Input file not found: {input_file}",
+                }
+            orca_cmd = orca_config.get("orca_path", "orca")
+            cmd = [orca_cmd, str(input_file)]
+            stdout_path = job_dir_path / "orca.out"
+            stderr_path = job_dir_path / "orca.err"
 
         # --- Environment isolation for concurrent ORCA instances ---
         env = os.environ.copy()
@@ -401,19 +469,16 @@ if PARSL_AVAILABLE:
 
         start_time = time.time()
 
-        stdout_path = job_dir_path / "orca.out"
-        stderr_path = job_dir_path / "orca.err"
-
         proc = None
         try:
-            # Write ORCA output directly to files to avoid pipe buffer deadlocks.
-            # start_new_session=True puts ORCA + its MPI children in a new
+            # Write output directly to files to avoid pipe buffer deadlocks.
+            # start_new_session=True puts the process + children in a new
             # process group so we can kill the entire tree on timeout.
             f_out = open(stdout_path, "w")
             f_err = open(stderr_path, "w")
 
             proc = subprocess.Popen(
-                [orca_cmd, str(input_file)],
+                cmd,
                 cwd=job_dir,
                 stdout=f_out,
                 stderr=f_err,
@@ -439,6 +504,29 @@ if PARSL_AVAILABLE:
             elapsed = time.time() - start_time
 
             if proc.returncode == 0:
+                # For Sella jobs, check sella_status.txt — the process can
+                # exit 0 even when the optimization did not converge.
+                if optimizer == "sella":
+                    status_path = job_dir_path / "sella_status.txt"
+                    try:
+                        status_text = status_path.read_text()
+                        if "NOT_CONVERGED" in status_text or "ERROR" in status_text:
+                            return {
+                                "job_id": job_id,
+                                "status": "failed",
+                                "error": "Sella optimization did not converge",
+                                "wall_time": elapsed,
+                            }
+                    except OSError:
+                        # Status file missing/unreadable after clean exit —
+                        # something unexpected happened; fail safe.
+                        return {
+                            "job_id": job_id,
+                            "status": "failed",
+                            "error": "Sella status file not found after process exit",
+                            "wall_time": elapsed,
+                        }
+
                 return {
                     "job_id": job_id,
                     "status": "completed",
@@ -1038,6 +1126,7 @@ def submit_batch(
 
             # Write job submission script
             orca_path = config.get("orca_path", DEFAULT_ORCA_PATHS["flux"])
+            optimizer = config.get("optimizer")
             if scheduler.lower() == "flux":
                 job_script = write_flux_job_file(
                     job_dir,
@@ -1047,6 +1136,7 @@ def submit_batch(
                     allocation=allocation,
                     orca_path=orca_path,
                     conda_env=conda_env,
+                    optimizer=optimizer,
                 )
                 submit_cmd = ["flux", "batch", job_script.name]
 
@@ -1059,6 +1149,7 @@ def submit_batch(
                     allocation=allocation,
                     orca_path=orca_path,
                     conda_env=conda_env,
+                    optimizer=optimizer,
                 )
                 submit_cmd = ["sbatch", job_script.name]
             else:
@@ -1291,9 +1382,28 @@ def main():
         help="Enable KDIIS SCF convergence acceleration",
     )
     orca_group.add_argument(
-        "--opt",
-        action="store_true",
-        help="Enable geometry optimization",
+        "--optimizer",
+        choices=["orca", "sella"],
+        default=None,
+        help="Geometry optimizer: 'orca' (native), 'sella' (external ASE). Default: None (single-point).",
+    )
+    orca_group.add_argument(
+        "--opt-level",
+        choices=["loose", "normal", "tight", "verytight"],
+        default="normal",
+        help="ORCA optimization convergence level (only with --optimizer orca). Default: normal.",
+    )
+    orca_group.add_argument(
+        "--fmax",
+        type=float,
+        default=0.05,
+        help="Sella force convergence threshold in Eh/Bohr (only with --optimizer sella). Default: 0.05.",
+    )
+    orca_group.add_argument(
+        "--max-opt-steps",
+        type=int,
+        default=None,
+        help="Maximum Sella optimization steps (only with --optimizer sella). Default: 100.",
     )
     orca_group.add_argument(
         "--ks-method",
@@ -1310,6 +1420,16 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate optimizer-specific args
+    if args.optimizer == "orca" and args.max_opt_steps is not None:
+        parser.error("--max-opt-steps is only valid with --optimizer sella")
+    if args.optimizer == "orca" and args.fmax != 0.05:
+        parser.error("--fmax is only valid with --optimizer sella")
+    if args.optimizer == "sella" and args.opt_level != "normal":
+        parser.error("--opt-level is only valid with --optimizer orca")
+    if args.optimizer is None and args.opt_level != "normal":
+        parser.error("--opt-level requires --optimizer orca")
+
     # Build ORCA config from CLI arguments
     orca_config: OrcaConfig = {
         "functional": args.functional,
@@ -1322,7 +1442,10 @@ def main():
         "scf_MaxIter": args.scf_maxiter,
         "nbo": args.nbo,
         "mbis": args.mbis,
-        "opt": args.opt,
+        "optimizer": args.optimizer,
+        "opt_level": args.opt_level,
+        "fmax": args.fmax,
+        "max_opt_steps": args.max_opt_steps,
         "diis_option": "KDIIS" if args.kdiis else None,
         "ks_method": args.ks_method,
     }

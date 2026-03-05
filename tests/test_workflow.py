@@ -834,3 +834,29 @@ def test_reset_missing_jobs_no_missing(tmp_path):
     with ArchitectorWorkflow(db_path) as workflow:
         count = reset_missing_jobs(workflow, root_dir)
         assert count == 0
+
+
+def test_ensure_schema_adds_optimizer_column(tmp_path):
+    """_ensure_schema auto-migrates old DBs by adding the optimizer column."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="ready",
+    )
+    conn.commit()
+    conn.close()
+
+    # Opening the workflow should auto-add the optimizer column
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Verify the column exists by querying it
+        cur = workflow.conn.execute("SELECT optimizer FROM structures WHERE id = 1")
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] is None  # Default should be NULL

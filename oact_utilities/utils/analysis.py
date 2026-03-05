@@ -1126,6 +1126,275 @@ def parse_mulliken_population(
         return None
 
 
+# Pre-compiled regex for single-pass parser (compiled once at module level)
+_SCF_CONVERGED_RE = re.compile(r"SCF CONVERGED AFTER\s+(\d+)\s+CYCLES")
+
+
+def parse_orca_output_single_pass(
+    output_file: str | Path,
+    hours_cutoff: float = 6.0,
+    expected_charge: int | None = None,
+    expected_multiplicity: int | None = None,
+) -> dict:
+    """Read an ORCA output file once and extract all metrics in a single pass.
+
+    This replaces multiple separate file reads (parse_max_forces, parse_scf_steps,
+    parse_final_energy, check_file_termination, parse_mulliken_population,
+    find_timings_and_cores) with one sequential read, reducing I/O from 6x to 1x.
+
+    Args:
+        output_file: Path to ORCA .out file.
+        hours_cutoff: Timeout threshold in hours for stale output files.
+        expected_charge: Expected total molecular charge for population validation.
+        expected_multiplicity: Expected spin multiplicity (2S+1) for validation.
+
+    Returns:
+        Dictionary with keys:
+            - max_forces: Maximum force (float or None)
+            - scf_steps: Total SCF iterations (int or None)
+            - final_energy: Final energy in Hartree (float or None)
+            - nprocs: Number of processors (int or None)
+            - wall_time: Total wall time in seconds (float or None)
+            - time_dict: Detailed timing breakdown (dict)
+            - termination_status: 1=normal, -1=failed, -2=timeout, 0=running
+            - success: True if terminated normally (bool)
+            - is_timeout: True if timed out (bool)
+            - mulliken_population: Population analysis dict or None
+    """
+    import time as time_mod
+
+    output_file = Path(output_file)
+
+    # Accumulators
+    max_forces: float | None = None
+    scf_total = 0
+    scf_found = False
+    final_energy: float | None = None
+    nprocs: int | None = None
+    last_lines: deque[str] = deque(maxlen=10)
+
+    # Population parsing state machine
+    # States: None, "skip_separator", "reading_data"
+    pop_state: str | None = None
+    pop_target: str | None = None  # "mulliken" or "loewdin"
+    mulliken_data: dict[str, list] = {
+        "charges": [],
+        "spins": [],
+        "elements": [],
+        "indices": [],
+    }
+    loewdin_data: dict[str, list] = {
+        "charges": [],
+        "spins": [],
+        "elements": [],
+        "indices": [],
+    }
+
+    try:
+        with open(output_file, errors="replace") as f:
+            for line in f:
+                last_lines.append(line)
+
+                # -- Population state machine (checked first for throughput) --
+                if pop_state == "skip_separator":
+                    pop_state = "reading_data"
+                    continue
+                elif pop_state == "reading_data":
+                    stripped = line.strip()
+                    if stripped.startswith("Sum of"):
+                        pop_state = None
+                    elif stripped and not stripped.startswith("-"):
+                        target = (
+                            mulliken_data if pop_target == "mulliken" else loewdin_data
+                        )
+                        parts = stripped.split()
+                        if len(parts) >= 4:
+                            try:
+                                idx = int(parts[0])
+                                if parts[1].endswith(":"):
+                                    element = parts[1].rstrip(":")
+                                    charge = float(parts[2])
+                                    spin = float(parts[3])
+                                elif len(parts) >= 5 and parts[2] == ":":
+                                    element = parts[1]
+                                    charge = float(parts[3])
+                                    spin = float(parts[4])
+                                else:
+                                    continue
+                                target["indices"].append(idx)
+                                target["elements"].append(element)
+                                target["charges"].append(charge)
+                                target["spins"].append(spin)
+                            except (ValueError, IndexError):
+                                pass
+                    continue
+
+                # -- Population section headers --
+                if "MULLIKEN ATOMIC CHARGES AND SPIN POPULATIONS" in line:
+                    pop_state = "skip_separator"
+                    pop_target = "mulliken"
+                    mulliken_data = {
+                        "charges": [],
+                        "spins": [],
+                        "elements": [],
+                        "indices": [],
+                    }
+                    continue
+                elif "LOEWDIN ATOMIC CHARGES AND SPIN POPULATIONS" in line:
+                    pop_state = "skip_separator"
+                    pop_target = "loewdin"
+                    loewdin_data = {
+                        "charges": [],
+                        "spins": [],
+                        "elements": [],
+                        "indices": [],
+                    }
+                    continue
+
+                # -- Simple metrics (string containment checks) --
+                if "MAX gradient" in line:
+                    parts = line.split()
+                    try:
+                        max_forces = float(parts[-1])
+                    except (ValueError, IndexError):
+                        pass
+
+                elif "FINAL SINGLE POINT ENERGY" in line:
+                    parts = line.split()
+                    try:
+                        final_energy = float(parts[-1])
+                    except (ValueError, IndexError):
+                        pass
+
+                elif nprocs is None and "nprocs" in line:
+                    try:
+                        nprocs = int(line.strip().split()[-1])
+                    except (ValueError, IndexError):
+                        pass
+
+                else:
+                    match = _SCF_CONVERGED_RE.search(line)
+                    if match:
+                        scf_total += int(match.group(1))
+                        scf_found = True
+
+    except (OSError, UnicodeDecodeError, EOFError):
+        # Corrupted or inaccessible file
+        return {
+            "max_forces": None,
+            "scf_steps": None,
+            "final_energy": None,
+            "nprocs": None,
+            "wall_time": None,
+            "time_dict": {},
+            "termination_status": 0,
+            "success": False,
+            "is_timeout": False,
+            "mulliken_population": None,
+        }
+
+    # -- Termination status from last 10 lines --
+    if any("ORCA TERMINATED NORMALLY" in ln for ln in last_lines):
+        termination_status = 1
+    elif any(("aborting the run" in ln or "Error" in ln) for ln in last_lines):
+        termination_status = -1
+    else:
+        # No definitive signal -- check file age for timeout
+        try:
+            if os.path.getmtime(output_file) < (time_mod.time() - hours_cutoff * 3600):
+                termination_status = -2
+            else:
+                termination_status = 0
+        except OSError:
+            termination_status = 0
+
+    # -- Timing extraction from last lines --
+    time_dict: dict[str, float] = {}
+    if termination_status == 1:
+        for ln in last_lines:
+            try:
+                if "Sum of individual times" in ln:
+                    time_dict["Total"] = float(ln.split()[5])
+                elif "Startup" in ln:
+                    time_dict["Startup"] = float(ln.split()[3])
+                elif "SCF iterations " in ln:
+                    time_dict["SCF_iterations"] = float(ln.split()[3])
+                elif "Property" in ln:
+                    time_dict["Property"] = float(ln.split()[3])
+                elif "Gradient" in ln:
+                    time_dict["Gradient"] = float(ln.split()[4])
+                elif "Geometry" in ln:
+                    time_dict["Geometry"] = float(ln.split()[3])
+            except (ValueError, IndexError):
+                pass
+
+    # -- Build population result --
+    mulliken_pop = _build_population_result(
+        mulliken_data,
+        loewdin_data,
+        expected_charge,
+        expected_multiplicity,
+    )
+
+    return {
+        "max_forces": max_forces,
+        "scf_steps": scf_total if scf_found else None,
+        "final_energy": final_energy,
+        "nprocs": nprocs,
+        "wall_time": time_dict.get("Total"),
+        "time_dict": time_dict,
+        "termination_status": termination_status,
+        "success": termination_status == 1,
+        "is_timeout": termination_status == -2,
+        "mulliken_population": mulliken_pop,
+    }
+
+
+def _build_population_result(
+    mulliken_data: dict[str, list],
+    loewdin_data: dict[str, list],
+    expected_charge: int | None,
+    expected_multiplicity: int | None,
+) -> dict[str, list] | None:
+    """Build population analysis result dict from parsed data.
+
+    Args:
+        mulliken_data: Parsed Mulliken charges/spins/elements/indices.
+        loewdin_data: Parsed Loewdin charges/spins/elements/indices.
+        expected_charge: Expected total charge for validation.
+        expected_multiplicity: Expected multiplicity for validation.
+
+    Returns:
+        Population analysis dict or None if no data found.
+    """
+    result: dict[str, list] = {
+        "mulliken_charges": mulliken_data["charges"],
+        "mulliken_spins": mulliken_data["spins"],
+        "loewdin_charges": loewdin_data["charges"],
+        "loewdin_spins": loewdin_data["spins"],
+        "elements": mulliken_data["elements"] or loewdin_data["elements"],
+        "indices": mulliken_data["indices"] or loewdin_data["indices"],
+    }
+
+    if not result["mulliken_charges"] and not result["loewdin_charges"]:
+        return None
+
+    # Validate charge and spin conservation
+    charges = result.get("mulliken_charges") or result.get("loewdin_charges")
+    spins = result.get("mulliken_spins") or result.get("loewdin_spins")
+
+    if charges and spins and expected_charge is not None:
+        validation = validate_charge_spin_conservation(
+            charges=charges,
+            spins=spins,
+            expected_charge=expected_charge,
+            expected_multiplicity=expected_multiplicity,
+        )
+        result["validation"] = validation
+
+    return result
+
+
 def parse_job_metrics(
     job_dir: str | Path, unzip: bool = False, hours_cutoff: float = 6.0
 ) -> dict[str, float | int | None]:
@@ -1156,8 +1425,21 @@ def parse_job_metrics(
     """
     job_dir = Path(job_dir)
 
+    _empty_result: dict = {
+        "max_forces": None,
+        "scf_steps": None,
+        "final_energy": None,
+        "success": False,
+        "is_timeout": False,
+        "termination_status": 0,
+        "mulliken_population": None,
+    }
+
     try:
-        # Find output file
+        # Parse charge/multiplicity from .inp file for population validation
+        expected_charge = None
+        expected_multiplicity = None
+
         if unzip:
             import gzip
             import tempfile
@@ -1165,15 +1447,7 @@ def parse_job_metrics(
             # Look for gzipped output
             gz_files = list(job_dir.glob("*.out.gz"))
             if not gz_files:
-                return {
-                    "max_forces": None,
-                    "scf_steps": None,
-                    "final_energy": None,
-                    "success": False,
-                    "is_timeout": False,
-                    "termination_status": 0,
-                    "mulliken_population": None,
-                }
+                return dict(_empty_result)
 
             # Unzip to temp file (use errors='replace' to handle corrupted files)
             with gzip.open(gz_files[0], "rt", errors="replace") as f_in:
@@ -1185,115 +1459,96 @@ def parse_job_metrics(
                     temp_path = f_out.name
 
             try:
-                output_file = temp_path
-                max_forces = parse_max_forces(output_file)
-                scf_steps = parse_scf_steps(output_file)
-                final_energy = parse_final_energy(output_file)
-
-                # Try to get max forces from engrad file if available
-                engrad_gz = list(job_dir.glob("*.engrad.gz"))
-                if engrad_gz and max_forces is None:
-                    with gzip.open(engrad_gz[0], "rt", errors="replace") as f_in:
+                # Parse charge/mult from gzipped .inp
+                inp_gz = list(job_dir.glob("*.inp.gz"))
+                if inp_gz:
+                    with gzip.open(inp_gz[0], "rt", errors="replace") as f_in:
                         with tempfile.NamedTemporaryFile(
-                            mode="w", delete=False, suffix=".engrad"
+                            mode="w", delete=False, suffix=".inp"
                         ) as f_out:
                             f_out.write(f_in.read())
-                            engrad_temp = f_out.name
+                            inp_temp = f_out.name
                     try:
-                        engrad_data = get_engrad(engrad_temp)
-                        max_forces = engrad_data.get("max_force_Eh_per_bohr")
+                        charge_mult = parse_charge_mult_from_inp(inp_temp)
+                        if charge_mult is not None:
+                            expected_charge, expected_multiplicity = charge_mult
                     finally:
-                        os.unlink(engrad_temp)
+                        os.unlink(inp_temp)
 
-                # Check termination from temp file (for gzipped files)
-                termination_status = check_file_termination(
-                    temp_path, is_gzipped=False, hours_cutoff=hours_cutoff
+                # Single-pass parse of the unzipped temp file
+                result = parse_orca_output_single_pass(
+                    temp_path,
+                    hours_cutoff=hours_cutoff,
+                    expected_charge=expected_charge,
+                    expected_multiplicity=expected_multiplicity,
                 )
-                success = termination_status == 1
-                is_timeout = termination_status == -2
 
+                # Try engrad for more reliable max forces
+                if result["max_forces"] is None:
+                    engrad_gz = list(job_dir.glob("*.engrad.gz"))
+                    if engrad_gz:
+                        with gzip.open(engrad_gz[0], "rt", errors="replace") as f_in:
+                            with tempfile.NamedTemporaryFile(
+                                mode="w", delete=False, suffix=".engrad"
+                            ) as f_out:
+                                f_out.write(f_in.read())
+                                engrad_temp = f_out.name
+                        try:
+                            engrad_data = get_engrad(engrad_temp)
+                            result["max_forces"] = engrad_data.get(
+                                "max_force_Eh_per_bohr"
+                            )
+                        finally:
+                            os.unlink(engrad_temp)
             finally:
                 os.unlink(temp_path)
         else:
-            # Regular output file
+            # Regular (non-gzipped) output file
             output_file = pull_log_file(str(job_dir))
-            max_forces = parse_max_forces(output_file)
-            scf_steps = parse_scf_steps(output_file)
-            final_energy = parse_final_energy(output_file)
 
-            # Try to get max forces from engrad file if available and not yet found
-            engrad_file = job_dir / "orca.engrad"
-            if engrad_file.exists() and max_forces is None:
-                try:
-                    engrad_data = get_engrad(str(engrad_file))
-                    max_forces = engrad_data.get("max_force_Eh_per_bohr")
-                except Exception:
-                    pass
-
-            # Check if job completed successfully using robust termination check
-            # This properly detects timeouts, errors, and aborted runs
-            termination_status = check_file_termination(
-                str(output_file), is_gzipped=False, hours_cutoff=hours_cutoff
-            )
-            success = termination_status == 1  # 1 = normal termination
-            is_timeout = termination_status == -2  # -2 = timeout
-
-        # Try to parse charge/multiplicity from .inp file for validation
-        expected_charge = None
-        expected_multiplicity = None
-        if unzip:
-            inp_gz = list(job_dir.glob("*.inp.gz"))
-            if inp_gz:
-                import gzip
-                import tempfile
-
-                with gzip.open(inp_gz[0], "rt", errors="replace") as f_in:
-                    with tempfile.NamedTemporaryFile(
-                        mode="w", delete=False, suffix=".inp"
-                    ) as f_out:
-                        f_out.write(f_in.read())
-                        inp_temp = f_out.name
-                try:
-                    charge_mult = parse_charge_mult_from_inp(inp_temp)
-                    if charge_mult is not None:
-                        expected_charge, expected_multiplicity = charge_mult
-                finally:
-                    os.unlink(inp_temp)
-        else:
+            # Parse charge/mult from .inp
             inp_files = list(job_dir.glob("*.inp"))
             if inp_files:
                 charge_mult = parse_charge_mult_from_inp(inp_files[0])
                 if charge_mult is not None:
                     expected_charge, expected_multiplicity = charge_mult
 
-        # Try to parse Mulliken population analysis
-        mulliken_pop = parse_mulliken_population(
-            output_file,
-            expected_charge=expected_charge,
-            expected_multiplicity=expected_multiplicity,
-        )
+            # Single-pass parse -- reads file once instead of 6 separate reads
+            result = parse_orca_output_single_pass(
+                output_file,
+                hours_cutoff=hours_cutoff,
+                expected_charge=expected_charge,
+                expected_multiplicity=expected_multiplicity,
+            )
 
+            # Try engrad for more reliable max forces
+            engrad_file = job_dir / "orca.engrad"
+            if engrad_file.exists() and result["max_forces"] is None:
+                try:
+                    engrad_data = get_engrad(str(engrad_file))
+                    result["max_forces"] = engrad_data.get("max_force_Eh_per_bohr")
+                except Exception:
+                    pass
+
+        # Return subset matching the original parse_job_metrics contract
         return {
-            "max_forces": max_forces,
-            "scf_steps": scf_steps,
-            "final_energy": final_energy,
-            "success": success,
-            "is_timeout": is_timeout,
-            "termination_status": termination_status,
-            "mulliken_population": mulliken_pop,
+            "max_forces": result["max_forces"],
+            "scf_steps": result["scf_steps"],
+            "final_energy": result["final_energy"],
+            "success": result["success"],
+            "is_timeout": result["is_timeout"],
+            "termination_status": result["termination_status"],
+            "mulliken_population": result["mulliken_population"],
+            # Pass through extra fields for dashboard use
+            "nprocs": result.get("nprocs"),
+            "wall_time": result.get("wall_time"),
+            "time_dict": result.get("time_dict"),
         }
 
     except Exception as e:
-        return {
-            "max_forces": None,
-            "scf_steps": None,
-            "final_energy": None,
-            "success": False,
-            "is_timeout": False,
-            "termination_status": 0,
-            "mulliken_population": None,
-            "error": str(e),
-        }
+        result = dict(_empty_result)
+        result["error"] = str(e)
+        return result
 
 
 def parse_sella_log(sella_log_file, filter: bool = False) -> dict:

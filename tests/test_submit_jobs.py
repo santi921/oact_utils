@@ -130,7 +130,7 @@ class TestPrepareJobDirectory:
         """Test that custom ORCA config is applied."""
         orca_config: OrcaConfig = {
             "functional": "B3LYP",
-            "opt": True,
+            "optimizer": "orca",
             "orca_path": "/fake/path/to/orca",
         }
         job_dir = prepare_job_directory(
@@ -358,6 +358,120 @@ class TestWriteSlurmJobFile:
 
         content = slurm_script.read_text()
         assert "#SBATCH --ntasks-per-node 8" in content
+
+    def test_optimizer_orca_tight(self, mock_job_record, tmp_path):
+        """TightOpt keyword appears when optimizer=orca, opt_level=tight."""
+        orca_config: OrcaConfig = {
+            "optimizer": "orca",
+            "opt_level": "tight",
+            "orca_path": "/fake/path/to/orca",
+        }
+        job_dir = prepare_job_directory(
+            mock_job_record, tmp_path, orca_config=orca_config
+        )
+        content = (job_dir / "orca.inp").read_text()
+        assert "TightOpt" in content
+
+    def test_optimizer_sella_creates_shim(self, mock_job_record, tmp_path):
+        """Sella optimizer generates run_sella.py shim and sella_config.json."""
+        import json
+
+        orca_config: OrcaConfig = {
+            "optimizer": "sella",
+            "orca_path": "/fake/path/to/orca",
+        }
+        job_dir = prepare_job_directory(
+            mock_job_record, tmp_path, orca_config=orca_config
+        )
+        shim = job_dir / "run_sella.py"
+        assert shim.exists()
+        content = shim.read_text()
+        assert "run_sella_optimization" in content
+        assert "sella_config.json" in content
+
+        # Verify JSON config contains correct parameters
+        config_file = job_dir / "sella_config.json"
+        assert config_file.exists()
+        config = json.loads(config_file.read_text())
+        assert config["fmax"] == 0.05
+        assert config["orca_cmd"] == "/fake/path/to/orca"
+        assert config["charge"] == 0
+        assert config["mult"] == 1
+
+    def test_optimizer_none_no_opt(self, mock_job_record, tmp_path):
+        """No Opt keyword when optimizer is None (single-point)."""
+        orca_config: OrcaConfig = {
+            "optimizer": None,
+            "orca_path": "/fake/path/to/orca",
+        }
+        job_dir = prepare_job_directory(
+            mock_job_record, tmp_path, orca_config=orca_config
+        )
+        content = (job_dir / "orca.inp").read_text()
+        # Should not contain Opt/TightOpt/etc. keyword (single-point = EnGrad only)
+        simple_line = [ln for ln in content.splitlines() if ln.startswith("!")][0]
+        assert "Opt" not in simple_line
+        assert not (job_dir / "run_sella.py").exists()
+
+
+class TestFluxSellaJobFile:
+    """Tests for Flux job file with Sella optimizer."""
+
+    def test_flux_sella_runs_python(self, tmp_path):
+        """Flux script runs python run_sella.py for Sella jobs."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        flux_script = write_flux_job_file(job_dir, optimizer="sella")
+        content = flux_script.read_text()
+
+        assert "python run_sella.py" in content
+        assert "orca orca.inp" not in content
+
+    def test_flux_orca_runs_orca(self, tmp_path):
+        """Flux script runs ORCA directly for ORCA optimizer."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        orca_path = "/path/to/orca"
+        flux_script = write_flux_job_file(
+            job_dir, orca_path=orca_path, optimizer="orca"
+        )
+        content = flux_script.read_text()
+
+        assert orca_path in content
+        assert "orca.inp" in content
+        assert "python run_sella.py" not in content
+
+
+class TestSlurmSellaJobFile:
+    """Tests for SLURM job file with Sella optimizer."""
+
+    def test_slurm_sella_runs_python(self, tmp_path):
+        """SLURM script runs python run_sella.py for Sella jobs."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        slurm_script = write_slurm_job_file(job_dir, optimizer="sella")
+        content = slurm_script.read_text()
+
+        assert "python run_sella.py" in content
+        assert "orca orca.inp" not in content
+
+    def test_slurm_orca_runs_orca(self, tmp_path):
+        """SLURM script runs ORCA directly for non-Sella jobs."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        orca_path = "/path/to/orca"
+        slurm_script = write_slurm_job_file(
+            job_dir, orca_path=orca_path, optimizer="orca"
+        )
+        content = slurm_script.read_text()
+
+        assert orca_path in content
+        assert "orca.inp" in content
+        assert "python run_sella.py" not in content
 
 
 class TestDefaultOrcaPaths:

@@ -80,6 +80,7 @@ class ArchitectorWorkflow:
             raise FileNotFoundError(f"Database not found at {db_path}")
         self.timeout = timeout
         self.conn = self._get_connection()
+        self._ensure_schema()
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get a database connection with WAL mode enabled if possible.
@@ -97,6 +98,31 @@ class ArchitectorWorkflow:
             else:
                 raise
         return conn
+
+    def _ensure_schema(self) -> None:
+        """Auto-migrate schema by adding missing columns.
+
+        Adds the ``optimizer`` TEXT column if it doesn't already exist.
+        This allows older databases (pre-optimizer feature) to work
+        seamlessly without a manual migration step.
+
+        Safe under concurrent access: catches the duplicate column error
+        that arises when another process adds the column between our
+        PRAGMA check and the ALTER TABLE statement.
+        """
+        cur = self.conn.execute("PRAGMA table_info(structures)")
+        existing_cols = {row[1] for row in cur.fetchall()}
+        if "optimizer" not in existing_cols:
+            try:
+                self.conn.execute(
+                    "ALTER TABLE structures ADD COLUMN optimizer TEXT DEFAULT NULL"
+                )
+                self._commit_with_retry()
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" in str(e).lower():
+                    pass  # Another process already added the column
+                else:
+                    raise
 
     def _execute_with_retry(
         self, query: str, params: tuple = (), max_retries: int = 10

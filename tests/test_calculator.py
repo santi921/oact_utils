@@ -127,6 +127,43 @@ def test_all_actinides_detected():
 
 
 # ---------------------------------------------------------------------------
+# opt_level tests
+# ---------------------------------------------------------------------------
+
+
+def test_opt_level_normal():
+    """opt_level='normal' produces 'Opt' keyword."""
+    h2 = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]])
+    simple, _ = get_orca_blocks(h2, opt=True, opt_level="normal")
+    assert " Opt " in simple or simple.endswith(" Opt") or "Opt " in simple
+
+
+def test_opt_level_tight():
+    """opt_level='tight' produces 'TightOpt' keyword."""
+    h2 = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]])
+    simple, _ = get_orca_blocks(h2, opt=True, opt_level="tight")
+    assert "TightOpt" in simple
+
+
+def test_opt_level_verytight():
+    """opt_level='verytight' produces 'VeryTightOpt' keyword."""
+    h2 = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]])
+    simple, _ = get_orca_blocks(h2, opt=True, opt_level="verytight")
+    assert "VeryTightOpt" in simple
+
+
+def test_opt_level_loose():
+    """opt_level='loose' produces 'LooseOpt' keyword."""
+    h2 = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]])
+    simple, _ = get_orca_blocks(h2, opt=True, opt_level="loose")
+    assert "LooseOpt" in simple
+
+
+def test_opt_false_ignores_level():
+    """opt=False should not include any Opt keyword regardless of opt_level."""
+    h2 = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]])
+    simple, _ = get_orca_blocks(h2, opt=False, opt_level="tight")
+    assert "Opt" not in simple
 # Double-UKS prevention (ks_method + actinide singlet auto-detection)
 # ---------------------------------------------------------------------------
 
