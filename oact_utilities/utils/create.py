@@ -248,6 +248,7 @@ def write_inputs_ase(
     tight_two_e_int: bool = False,
     mbis: bool = False,
     restart=True,
+    ks_method: str | None = None,
 ):
     """
     Write ORCA input files for a given set of parameters.
@@ -297,6 +298,10 @@ def write_inputs_ase(
         else:
             f.write(f"    actinide_ecp = '{actinide_ecp}'\n")
         f.write(f"    non_actinide_basis = '{non_actinide_basis}'\n")
+        if ks_method is not None:
+            f.write(f"    ks_method = '{ks_method}'\n")
+        else:
+            f.write("    ks_method = None\n")
         f.write("    time_start = time.time()\n")
         f.write("    res_dict = pure_ase_relaxation(\n")
         f.write("        atoms=atoms_orca,\n")
@@ -319,7 +324,8 @@ def write_inputs_ase(
         f.write(f"        opt={opt},\n")
         f.write(f"        error_handle={error_handle},\n")
         f.write(f"        error_code={error_code},\n")
-        f.write(f"        tight_two_e_int={tight_two_e_int}\n")
+        f.write(f"        tight_two_e_int={tight_two_e_int},\n")
+        f.write("        ks_method=ks_method\n")
         f.write("    )\n")
         f.write("    time_end = time.time()\n")
         f.write("    print('Total time (s): ', time_end - time_start)\n\n")

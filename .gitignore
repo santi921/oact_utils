@@ -244,7 +244,7 @@ __marimo__/
 *json
 *traj
 *symlink*
-*in
+*.in
 log
 *flux
 *pkl

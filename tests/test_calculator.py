@@ -164,3 +164,40 @@ def test_opt_false_ignores_level():
     h2 = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]])
     simple, _ = get_orca_blocks(h2, opt=False, opt_level="tight")
     assert "Opt" not in simple
+# Double-UKS prevention (ks_method + actinide singlet auto-detection)
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_uks_no_duplicate():
+    """Explicit ks_method='uks' on actinide singlet should NOT produce 'UKS UKS'."""
+    atoms = _make_uo2()
+    simple, blocks = get_orca_blocks(atoms, mult=1, charge=0, ks_method="uks")
+    # Count occurrences of UKS in the simple input
+    uks_count = simple.upper().split().count("UKS")
+    assert uks_count == 1, f"Expected 1 UKS, got {uks_count}: {simple}"
+    # Rotate block should still be present (symmetry breaking still needed)
+    assert any("rotate" in b for b in blocks)
+
+
+def test_explicit_rks_still_gets_uks_for_actinide_singlet():
+    """Explicit ks_method='rks' on actinide singlet should still add UKS (auto-detection)."""
+    atoms = _make_uo2()
+    simple, blocks = get_orca_blocks(atoms, mult=1, charge=0, ks_method="rks")
+    # Auto-detection should add UKS even though RKS was requested
+    assert "UKS" in simple
+    assert "RKS" in simple
+    # Rotate block should be present
+    assert any("rotate" in b for b in blocks)
+
+
+def test_ks_method_appended_to_simple_input():
+    """Explicit ks_method should appear in the simple input line."""
+    atoms = _make_uo2()
+    # Non-singlet with explicit UKS (no auto-detection)
+    simple, _ = get_orca_blocks(atoms, mult=3, charge=0, ks_method="uks")
+    assert "UKS" in simple
+
+    # Non-actinide with explicit ROKS
+    h2o = Atoms("OH2", positions=[[0, 0, 0], [0, 0, 0.96], [0.93, 0, -0.24]])
+    simple, _ = get_orca_blocks(h2o, mult=3, charge=0, ks_method="roks")
+    assert "ROKS" in simple

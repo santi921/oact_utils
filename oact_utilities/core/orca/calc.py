@@ -523,7 +523,9 @@ def get_orca_blocks(
     needs_symm_break = mult == 1 and has_actinides
 
     if needs_symm_break:
-        orcasimpleinput += " UKS"
+        # Only add UKS keyword if not already explicitly set via ks_method
+        if ks_method is None or ks_method.upper() != "UKS":
+            orcasimpleinput += " UKS"
         orcablocks.append(
             get_symm_break_block(
                 atoms,

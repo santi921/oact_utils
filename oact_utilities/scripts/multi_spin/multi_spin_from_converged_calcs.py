@@ -128,6 +128,7 @@ def wrapper_write_job_folder(
     tight_two_e_int: bool = False,
     skip_done: bool = True,
     skip_running: bool = True,
+    ks_method: str | None = None,
 ) -> None:
     """
     Create job folders and write input files for either Sella/ASE or ORCA jobs.
@@ -204,6 +205,7 @@ def wrapper_write_job_folder(
             error_handle=True,
             error_code=error_code,
             tight_two_e_int=tight_two_e_int,
+            ks_method=ks_method,
         )
 
         traj_file = os.path.join(output_folder, "opt.traj")
@@ -228,6 +230,7 @@ def wrapper_write_job_folder(
             simple_input=lot,
             orca_path=orca_exe,
             traj_file=traj_file,
+            ks_method=ks_method,
         )
 
         write_flux_no_template_sella_ase(
@@ -263,6 +266,7 @@ def wrapper_write_job_folder(
             error_handle=True,
             error_code=error_code,
             tight_two_e_int=tight_two_e_int,
+            ks_method=ks_method,
         )
 
         write_flux_no_template(
@@ -678,4 +682,5 @@ def main():
         )
 
 
-main()
+if __name__ == "__main__":
+    main()
