@@ -56,19 +56,19 @@ def print_summary(workflow: ArchitectorWorkflow):
     print("-" * 40)
 
     completed_count = counts.get(JobStatus.COMPLETED, 0)
-    for col_label, condition in metric_cols:
-        # Count across all rows
-        cur_all = workflow._execute_with_retry(
-            f"SELECT COUNT(*) FROM structures WHERE {condition}"
-        )
-        n_all = cur_all.fetchone()[0]
 
-        # Count for completed rows only
-        cur_comp = workflow._execute_with_retry(
-            f"SELECT COUNT(*) FROM structures WHERE status = 'completed' AND {condition}"
-        )
-        n_comp = cur_comp.fetchone()[0]
+    # Single query to get all metric counts (avoids 12 round-trips on Lustre)
+    cols_sql = ", ".join(
+        f"SUM(CASE WHEN {cond} THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN status = 'completed' AND {cond} THEN 1 ELSE 0 END)"
+        for _, cond in metric_cols
+    )
+    cur = workflow._execute_with_retry(f"SELECT {cols_sql} FROM structures")
+    row = cur.fetchone()
 
+    for i, (col_label, _condition) in enumerate(metric_cols):
+        n_all = row[i * 2] or 0
+        n_comp = row[i * 2 + 1] or 0
         pct_comp = 100 * n_comp / completed_count if completed_count > 0 else 0
         pct_all = 100 * n_all / total if total > 0 else 0
         print(

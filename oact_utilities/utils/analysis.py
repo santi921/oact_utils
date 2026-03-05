@@ -1530,11 +1530,13 @@ def parse_job_metrics(
                 except Exception:
                     pass
 
-        # Check for Sella optimization results and merge metrics
+        # Check for Sella optimization results and merge metrics.
+        # Use run_sella.py as canonical Sella detection marker (matches
+        # check_job_termination in status.py), then read sella_status.txt
+        # for actual convergence data.
         sella_status_file = job_dir / "sella_status.txt"
-        sella_log_file = job_dir / "sella.log"
 
-        if sella_status_file.exists():
+        if (job_dir / "run_sella.py").exists() and sella_status_file.exists():
             sella_status = _parse_sella_status(sella_status_file)
             sella_converged = sella_status.get("status") == "CONVERGED"
 
@@ -1546,11 +1548,9 @@ def parse_job_metrics(
             if sella_status.get("final_fmax") is not None:
                 result["max_forces"] = sella_status["final_fmax"]
 
-            # Pull total steps from Sella log
-            if sella_log_file.exists():
-                sella_data = parse_sella_log(str(sella_log_file))
-                if sella_data and "steps" in sella_data:
-                    result["sella_steps"] = sella_data["steps"][-1]
+            # Pull total steps from sella_status.txt (avoids extra file read)
+            if sella_status.get("steps") is not None:
+                result["sella_steps"] = sella_status["steps"]
 
             # Note: scf_steps and wall_time from orca.out reflect only the
             # last Sella ORCA call, not the full optimization.
