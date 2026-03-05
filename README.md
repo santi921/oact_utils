@@ -135,7 +135,7 @@ See [CLAUDE.md](CLAUDE.md) for detailed development guidelines.
 
 ## Key Dependencies
 
-- **ORCA 6.0+** - Quantum chemistry engine
+- **ORCA 6.1+** - Quantum chemistry engine USE THIS VARIANT FOR OMOL COMPAT
 - **ASE** - Atomic Simulation Environment
 - **quacc** - Workflow management
 - **Sella** - Geometry optimization
