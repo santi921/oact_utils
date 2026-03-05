@@ -1,5 +1,6 @@
 import os
 import re
+import time as time_mod
 import warnings
 from collections import deque
 from pathlib import Path
@@ -1161,8 +1162,6 @@ def parse_orca_output_single_pass(
             - is_timeout: True if timed out (bool)
             - mulliken_population: Population analysis dict or None
     """
-    import time as time_mod
-
     output_file = Path(output_file)
 
     # Accumulators
@@ -1171,7 +1170,7 @@ def parse_orca_output_single_pass(
     scf_found = False
     final_energy: float | None = None
     nprocs: int | None = None
-    last_lines: deque[str] = deque(maxlen=10)
+    last_lines: deque[str] = deque(maxlen=30)
 
     # Population parsing state machine
     # States: None, "skip_separator", "reading_data"

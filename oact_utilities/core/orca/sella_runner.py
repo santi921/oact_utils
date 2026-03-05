@@ -11,9 +11,14 @@ import json
 import os
 import shutil
 import textwrap
+import threading
 from pathlib import Path
 
 from oact_utilities.utils.create import read_geom_from_inp_file
+
+# Guard os.chdir() calls -- process-global side effect that is unsafe
+# if multiple threads call run_sella_optimization concurrently.
+_chdir_lock = threading.Lock()
 
 
 def _save_step_outputs(job_path: Path, step_counter: list[int]) -> None:
@@ -87,76 +92,82 @@ def run_sella_optimization(
     job_path = Path(job_dir).resolve()
 
     # ORCA needs cwd set to the job directory for scratch files.
-    # Save and restore to avoid leaking a process-global side effect.
-    saved_cwd = os.getcwd()
-    os.chdir(job_path)
-
-    try:
-        # Read initial geometry from orca.inp using our parser
-        # (ASE orca-input format not available in all versions)
-        atoms = read_geom_from_inp_file(str(job_path / "orca.inp"), ase_format_tf=True)
-
-        # Set up ORCA calculator for energy+gradient evaluations
-        calc = ORCA(
-            profile=OrcaProfile(command=orca_cmd),
-            charge=charge,
-            mult=mult,
-            orcasimpleinput=orcasimpleinput,
-            orcablocks=orcablocks,
-            directory=str(job_path),
-        )
-        atoms.calc = calc
-
-        traj_file = str(job_path / "opt.traj")
-        log_file = str(job_path / "sella.log")
-        status_file = job_path / "sella_status.txt"
+    # Lock spans the entire chdir-to-restore window so concurrent threads
+    # cannot interleave their own os.chdir calls.
+    with _chdir_lock:
+        saved_cwd = os.getcwd()
+        os.chdir(job_path)
 
         try:
-            opt = Sella(
-                atoms,
-                trajectory=traj_file,
-                logfile=log_file,
-                append_trajectory=True,
-                internal=internal,
-                order=order,
+            # Read initial geometry from orca.inp using our parser
+            # (ASE orca-input format not available in all versions)
+            atoms = read_geom_from_inp_file(
+                str(job_path / "orca.inp"), ase_format_tf=True
             )
 
-            if save_all_steps:
-                step_counter: list[int] = [0]
-                opt.attach(
-                    _save_step_outputs,
-                    interval=1,
-                    job_path=job_path,
-                    step_counter=step_counter,
+            # Set up ORCA calculator for energy+gradient evaluations
+            calc = ORCA(
+                profile=OrcaProfile(command=orca_cmd),
+                charge=charge,
+                mult=mult,
+                orcasimpleinput=orcasimpleinput,
+                orcablocks=orcablocks,
+                directory=str(job_path),
+            )
+            atoms.calc = calc
+
+            traj_file = str(job_path / "opt.traj")
+            log_file = str(job_path / "sella.log")
+            status_file = job_path / "sella_status.txt"
+
+            try:
+                opt = Sella(
+                    atoms,
+                    trajectory=traj_file,
+                    logfile=log_file,
+                    append_trajectory=True,
+                    internal=internal,
+                    order=order,
                 )
 
-            converged = opt.run(fmax=fmax, steps=max_steps)
-            n_steps = opt.nsteps
+                if save_all_steps:
+                    step_counter: list[int] = [0]
+                    opt.attach(
+                        _save_step_outputs,
+                        interval=1,
+                        job_path=job_path,
+                        step_counter=step_counter,
+                    )
 
-            # Get final max force
-            forces = atoms.get_forces()
-            final_fmax = float((forces**2).sum(axis=1).max() ** 0.5)
+                converged = opt.run(fmax=fmax, steps=max_steps)
+                n_steps = opt.nsteps
 
-            # Write final geometry
-            write(str(job_path / "orca.xyz"), atoms, format="xyz")
+                # Get final max force
+                forces = atoms.get_forces()
+                final_fmax = float((forces**2).sum(axis=1).max() ** 0.5)
 
-            if converged:
-                status_file.write_text(
-                    f"status: CONVERGED\nsteps: {n_steps}\nfinal_fmax: {final_fmax:.6f}\n"
-                )
-            else:
-                status_file.write_text(
-                    f"status: NOT_CONVERGED\nsteps: {n_steps}\nfinal_fmax: {final_fmax:.6f}\n"
-                )
+                # Write final geometry
+                write(str(job_path / "orca.xyz"), atoms, format="xyz")
 
-        except Exception as e:
-            # Write error status so the status checker can detect the failure
-            msg = str(e).replace("\n", " ")[:200]
-            status_file.write_text(f"status: ERROR\nmessage: {msg}\n")
-            raise
+                if converged:
+                    status_file.write_text(
+                        f"status: CONVERGED\nsteps: {n_steps}\n"
+                        f"final_fmax: {final_fmax:.6f}\n"
+                    )
+                else:
+                    status_file.write_text(
+                        f"status: NOT_CONVERGED\nsteps: {n_steps}\n"
+                        f"final_fmax: {final_fmax:.6f}\n"
+                    )
 
-    finally:
-        os.chdir(saved_cwd)
+            except Exception as e:
+                # Write error status so the status checker can detect the failure
+                msg = str(e).replace("\n", " ")[:200]
+                status_file.write_text(f"status: ERROR\nmessage: {msg}\n")
+                raise
+
+        finally:
+            os.chdir(saved_cwd)
 
 
 def write_sella_runner_shim(
