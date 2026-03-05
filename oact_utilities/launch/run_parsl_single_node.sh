@@ -38,6 +38,7 @@ SIMPLE_INPUT="omol"
 ACTINIDE_BASIS="ma-def-TZVP"
 ACTINIDE_ECP="def-ECP"
 NON_ACTINIDE_BASIS="def2-TZVPD"
+SCF_MAXITER=500
 # -----------------------------------
 
 source ~/.bashrc
@@ -59,4 +60,6 @@ python -m oact_utilities.workflows.submit_jobs \
     --simple-input "${SIMPLE_INPUT}" \
     --actinide-basis "${ACTINIDE_BASIS}" \
     --actinide-ecp "${ACTINIDE_ECP}" \
-    --non-actinide-basis "${NON_ACTINIDE_BASIS}"
+    --non-actinide-basis "${NON_ACTINIDE_BASIS}" \
+    --scf-maxiter "${SCF_MAXITER}" \
+    --ks-method uks
