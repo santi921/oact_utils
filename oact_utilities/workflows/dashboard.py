@@ -40,7 +40,43 @@ def print_summary(workflow: ArchitectorWorkflow):
         print(f"{status.value:<15} {count:>10} {pct:>9.1f}%")
 
     print("-" * 40)
-    print(f"{'TOTAL':<15} {total:>10} {100.0:>9.1f}%\n")
+    print(f"{'TOTAL':<15} {total:>10} {100.0:>9.1f}%")
+
+    # Metrics availability breakdown
+    metric_cols = [
+        ("job_dir", "job_dir IS NOT NULL AND job_dir != ''"),
+        ("max_forces", "max_forces IS NOT NULL"),
+        ("final_energy", "final_energy IS NOT NULL"),
+        ("scf_steps", "scf_steps IS NOT NULL"),
+        ("wall_time", "wall_time IS NOT NULL"),
+        ("n_cores", "n_cores IS NOT NULL"),
+    ]
+
+    print(f"\n{'Metric':<15} {'Completed':>12} {'All Jobs':>12}")
+    print("-" * 40)
+
+    completed_count = counts.get(JobStatus.COMPLETED, 0)
+    for col_label, condition in metric_cols:
+        # Count across all rows
+        cur_all = workflow._execute_with_retry(
+            f"SELECT COUNT(*) FROM structures WHERE {condition}"
+        )
+        n_all = cur_all.fetchone()[0]
+
+        # Count for completed rows only
+        cur_comp = workflow._execute_with_retry(
+            f"SELECT COUNT(*) FROM structures WHERE status = 'completed' AND {condition}"
+        )
+        n_comp = cur_comp.fetchone()[0]
+
+        pct_comp = 100 * n_comp / completed_count if completed_count > 0 else 0
+        pct_all = 100 * n_all / total if total > 0 else 0
+        print(
+            f"{col_label:<15} {n_comp:>6}/{completed_count:<5} ({pct_comp:>5.1f}%)"
+            f" {n_all:>6}/{total:<5} ({pct_all:>5.1f}%)"
+        )
+
+    print()
 
 
 def print_metrics_summary(workflow: ArchitectorWorkflow):
@@ -210,7 +246,8 @@ def _extract_metrics_from_dir(
 ) -> dict:
     """Extract metrics from a job directory (pure I/O, no DB writes).
 
-    This function is safe to call from worker threads.
+    This function is safe to call from worker threads. Uses the single-pass
+    parser to read each ORCA output file only once (instead of 6 separate reads).
 
     Args:
         job_dir: Path to job directory containing ORCA output.
@@ -223,46 +260,31 @@ def _extract_metrics_from_dir(
     """
     import time
 
-    from ..utils.analysis import find_timings_and_cores, parse_job_metrics
-    from ..utils.status import pull_log_file
+    from ..utils.analysis import parse_job_metrics
 
     t0 = time.perf_counter()
 
     try:
-        # Phase 1: Parse ORCA output (metrics extraction)
+        # Single call now extracts everything: metrics + timing + nprocs
+        # (uses single-pass file reader internally)
         t_parse = time.perf_counter()
         metrics = parse_job_metrics(job_dir, unzip=unzip)
         t_parse = time.perf_counter() - t_parse
-
-        # Phase 2: Extract timing/core info
-        t_timing = time.perf_counter()
-        wall_time = None
-        n_cores = None
-        timing_warning = None
-        try:
-            log_file = pull_log_file(str(job_dir))
-            n_cores_val, time_dict = find_timings_and_cores(log_file)
-            if time_dict and "Total" in time_dict:
-                wall_time = time_dict["Total"]
-            n_cores = n_cores_val
-        except Exception as e:
-            timing_warning = f"Timing extraction failed: {e}"
-        t_timing = time.perf_counter() - t_timing
 
         result = {
             "max_forces": metrics.get("max_forces"),
             "scf_steps": metrics.get("scf_steps"),
             "final_energy": metrics.get("final_energy"),
-            "wall_time": wall_time,
-            "n_cores": n_cores,
+            "wall_time": metrics.get("wall_time"),
+            "n_cores": metrics.get("nprocs"),
             "error": None,
-            "timing_warning": timing_warning,
+            "timing_warning": None,
         }
 
         if profile:
             result["_profile"] = {
                 "parse_sec": t_parse,
-                "timing_sec": t_timing,
+                "timing_sec": 0.0,  # timing now included in parse phase
                 "total_sec": time.perf_counter() - t0,
             }
 
