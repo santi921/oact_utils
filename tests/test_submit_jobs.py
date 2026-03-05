@@ -397,6 +397,22 @@ class TestWriteSlurmJobFile:
         assert config["orca_cmd"] == "/fake/path/to/orca"
         assert config["charge"] == 0
         assert config["mult"] == 1
+        assert config["save_all_steps"] is False
+
+    def test_sella_save_all_steps_in_config(self, mock_job_record, tmp_path):
+        """save_all_steps=True is serialized into sella_config.json."""
+        import json
+
+        orca_config: OrcaConfig = {
+            "optimizer": "sella",
+            "orca_path": "/fake/path/to/orca",
+            "save_all_steps": True,
+        }
+        job_dir = prepare_job_directory(
+            mock_job_record, tmp_path, orca_config=orca_config
+        )
+        config = json.loads((job_dir / "sella_config.json").read_text())
+        assert config["save_all_steps"] is True
 
     def test_optimizer_none_no_opt(self, mock_job_record, tmp_path):
         """No Opt keyword when optimizer is None (single-point)."""
@@ -472,6 +488,57 @@ class TestSlurmSellaJobFile:
         assert orca_path in content
         assert "orca.inp" in content
         assert "python run_sella.py" not in content
+
+
+class TestSaveStepOutputs:
+    """Tests for _save_step_outputs callback."""
+
+    def test_copies_orca_files_to_step_dir(self, tmp_path):
+        """Callback copies all orca.* files into numbered step directories."""
+        from oact_utilities.core.orca.sella_runner import _save_step_outputs
+
+        # Create fake ORCA output files
+        (tmp_path / "orca.out").write_text("ORCA output")
+        (tmp_path / "orca.engrad").write_text("gradient data")
+        (tmp_path / "orca.gbw").write_bytes(b"\x00\x01\x02")
+        (tmp_path / "orca.property.txt").write_text("properties")
+        # Non-orca file should NOT be copied
+        (tmp_path / "sella.log").write_text("sella log")
+
+        step_counter: list[int] = [0]
+
+        # First call -> step_000
+        _save_step_outputs(job_path=tmp_path, step_counter=step_counter)
+        assert step_counter[0] == 1
+        step_000 = tmp_path / "step_000"
+        assert step_000.is_dir()
+        assert (step_000 / "orca.out").read_text() == "ORCA output"
+        assert (step_000 / "orca.engrad").read_text() == "gradient data"
+        assert (step_000 / "orca.gbw").read_bytes() == b"\x00\x01\x02"
+        assert (step_000 / "orca.property.txt").exists()
+        assert not (step_000 / "sella.log").exists()
+
+        # Modify orca.out and call again -> step_001
+        (tmp_path / "orca.out").write_text("ORCA output step 2")
+        _save_step_outputs(job_path=tmp_path, step_counter=step_counter)
+        assert step_counter[0] == 2
+        step_001 = tmp_path / "step_001"
+        assert step_001.is_dir()
+        assert (step_001 / "orca.out").read_text() == "ORCA output step 2"
+
+    def test_skips_directories_matching_orca_glob(self, tmp_path):
+        """Directories named orca.* are not copied."""
+        from oact_utilities.core.orca.sella_runner import _save_step_outputs
+
+        (tmp_path / "orca.out").write_text("output")
+        (tmp_path / "orca.tmpdir").mkdir()
+
+        step_counter: list[int] = [0]
+        _save_step_outputs(job_path=tmp_path, step_counter=step_counter)
+
+        step_000 = tmp_path / "step_000"
+        assert (step_000 / "orca.out").exists()
+        assert not (step_000 / "orca.tmpdir").exists()
 
 
 class TestDefaultOrcaPaths:

@@ -86,6 +86,23 @@ def read_geom_from_inp_file(
     return atoms
 
 
+def atoms_to_xyz_string(atoms: Atoms, comment: str = "") -> str:
+    """Convert ASE Atoms to standard XYZ format string.
+
+    Args:
+        atoms: ASE Atoms object.
+        comment: Comment line for XYZ format.
+
+    Returns:
+        XYZ format string with header (atom count + comment line).
+    """
+    n = len(atoms)
+    lines = [str(n), comment]
+    for symbol, pos in zip(atoms.get_chemical_symbols(), atoms.get_positions()):
+        lines.append(f"{symbol}  {pos[0]:.10f}  {pos[1]:.10f}  {pos[2]:.10f}")
+    return "\n".join(lines)
+
+
 def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], str]:
     with open(xyz_file) as f:
         lines = f.readlines()

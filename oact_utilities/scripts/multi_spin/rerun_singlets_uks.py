@@ -37,6 +37,7 @@ from ase.data import chemical_symbols
 from oact_utilities.scripts.multi_spin.multi_spin_from_converged_calcs import (
     wrapper_write_job_folder,
 )
+from oact_utilities.utils.analysis import parse_charge_mult_from_inp
 
 # LOT-specific configuration matching the original setup
 # from multi_spin_from_converged_calcs.py:main()
@@ -68,20 +69,10 @@ def extract_charge_from_orca_inp(job_dir: str) -> int | None:
         Parsed charge as int, or None if not found.
     """
     inp_file = os.path.join(job_dir, "orca.inp")
-    if not os.path.exists(inp_file):
+    result = parse_charge_mult_from_inp(inp_file)
+    if result is None:
         return None
-    with open(inp_file, errors="replace") as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped.startswith("* xyz") or stripped.startswith("*xyz"):
-                parts = stripped.split()
-                # Format: * xyz <charge> <mult>
-                if len(parts) >= 4:
-                    try:
-                        return int(parts[2])
-                    except ValueError:
-                        return None
-    return None
+    return result[0]
 
 
 def atoms_from_db_row(

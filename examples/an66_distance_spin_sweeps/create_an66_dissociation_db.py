@@ -18,10 +18,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from ase import Atoms
 
 from oact_utilities.utils.architector import _init_db, _insert_row, parse_xyz_elements
-from oact_utilities.utils.create import fetch_actinides, read_geom_from_inp_file
+from oact_utilities.utils.create import (
+    atoms_to_xyz_string,
+    fetch_actinides,
+    read_geom_from_inp_file,
+)
 
 # ---------------------------------------------------------------------------
 # Lookup tables for unpaired electrons (atomic ground states)
@@ -63,15 +66,6 @@ LIGAND_UNPAIRED: dict[str, int] = {
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
-
-
-def atoms_to_xyz_string(atoms: Atoms, comment: str = "generated") -> str:
-    """Convert ASE Atoms to standard XYZ format string."""
-    n = len(atoms)
-    lines = [str(n), comment]
-    for symbol, pos in zip(atoms.get_chemical_symbols(), atoms.get_positions()):
-        lines.append(f"{symbol}  {pos[0]:.10f}  {pos[1]:.10f}  {pos[2]:.10f}")
-    return "\n".join(lines)
 
 
 def compute_rmsd(pos1: np.ndarray, pos2: np.ndarray) -> float:

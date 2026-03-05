@@ -376,9 +376,14 @@ def _insert_row(
         fail_count,
     ]
 
-    # Add extra columns if provided
+    # Add extra columns if provided (validate keys to prevent SQL injection)
     if extra_values:
         for col_name, col_value in extra_values.items():
+            if not col_name.replace("_", "").isalnum():
+                raise ValueError(
+                    f"Invalid extra_values column name: {col_name!r}. "
+                    "Must contain only alphanumeric characters and underscores."
+                )
             columns.append(col_name)
             values.append(col_value)
 
