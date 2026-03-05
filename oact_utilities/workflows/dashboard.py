@@ -397,20 +397,30 @@ def _parallel_extract_metrics(
     t_extract = time.perf_counter() - t_extract_start
 
     # Phase 2: batch-write all successful metrics in one transaction
+    if success_metrics:
+        print(
+            f"Writing metrics to database ({len(success_metrics)} jobs)...",
+            flush=True,
+        )
     t_write_start = time.perf_counter()
     if success_metrics:
         workflow.update_job_metrics_bulk(success_metrics)
     t_write = time.perf_counter() - t_write_start
+    if success_metrics:
+        print(f"Database write completed in {t_write:.1f}s")
 
-    # Phase 3: mark failed jobs
-    if mark_failed_on_error:
+    # Phase 3: batch-mark failed jobs in a single transaction
+    if mark_failed_on_error and failed_jobs:
+        print(f"Marking {len(failed_jobs)} failed jobs...", flush=True)
+        cur = workflow.conn.cursor()
         for job_id, error_msg in failed_jobs:
-            workflow.update_status(
-                job_id,
-                JobStatus.FAILED,
-                error_message=f"Metrics parse error: {error_msg}",
-                increment_fail_count=True,
+            cur.execute(
+                "UPDATE structures SET status = ?, error_message = ?, "
+                "fail_count = COALESCE(fail_count, 0) + 1, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (JobStatus.FAILED.value, f"Metrics parse error: {error_msg}", job_id),
             )
+        workflow._commit_with_retry()
 
     # Phase 4: display profiling results if requested
     if profile and profile_data:
