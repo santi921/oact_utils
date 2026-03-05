@@ -110,6 +110,10 @@ oact_utilities/
     └── solutions/              # Documented bug fixes and patterns
 ```
 
+## Local Development Environment
+
+- **ORCA 6.1.0 (macOS ARM64)**: `/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca`
+
 ## Key Dependencies
 
 - **ORCA 6.0+**: Quantum chemistry engine (rigid requirement)

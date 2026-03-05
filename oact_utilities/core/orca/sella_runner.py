@@ -13,8 +13,10 @@ import textwrap
 from pathlib import Path
 
 from ase.calculators.orca import ORCA, OrcaProfile
-from ase.io import read, write
+from ase.io import write
 from sella import Sella
+
+from oact_utilities.utils.create import read_geom_from_inp_file
 
 
 def run_sella_optimization(
@@ -60,8 +62,9 @@ def run_sella_optimization(
     os.chdir(job_path)
 
     try:
-        # Read initial geometry from orca.inp
-        atoms = read(str(job_path / "orca.inp"), format="orca-input")
+        # Read initial geometry from orca.inp using our parser
+        # (ASE orca-input format not available in all versions)
+        atoms = read_geom_from_inp_file(str(job_path / "orca.inp"), ase_format_tf=True)
 
         # Set up ORCA calculator for energy+gradient evaluations
         calc = ORCA(
