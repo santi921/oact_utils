@@ -319,7 +319,14 @@ def pull_log_file(root_dir: str) -> str:
 
     # If none, try .out files (skip ORCA atomic SCF guess files)
     if len(log_file) == 0:
-        log_file = [f for f in files if f.endswith(".out") and not _is_orca_atom_scf(f)]
+        # Prefer orca.out explicitly -- Sella jobs produce both orca.out and
+        # sella_run.out, and we want the ORCA output for metric extraction.
+        if "orca.out" in files:
+            log_file = ["orca.out"]
+        else:
+            log_file = [
+                f for f in files if f.endswith(".out") and not _is_orca_atom_scf(f)
+            ]
 
     # If none, try .out.gz files (e.g., from quacc)
     if len(log_file) == 0:

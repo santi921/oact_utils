@@ -1530,6 +1530,31 @@ def parse_job_metrics(
                 except Exception:
                     pass
 
+        # Check for Sella optimization results and merge metrics
+        sella_status_file = job_dir / "sella_status.txt"
+        sella_log_file = job_dir / "sella.log"
+
+        if sella_status_file.exists():
+            sella_status = _parse_sella_status(sella_status_file)
+            sella_converged = sella_status.get("status") == "CONVERGED"
+
+            # Override success/termination based on Sella convergence
+            result["success"] = sella_converged
+            result["termination_status"] = 1 if sella_converged else -1
+
+            # Use Sella's final fmax as the optimization-level max_forces
+            if sella_status.get("final_fmax") is not None:
+                result["max_forces"] = sella_status["final_fmax"]
+
+            # Pull total steps from Sella log
+            if sella_log_file.exists():
+                sella_data = parse_sella_log(str(sella_log_file))
+                if sella_data and "steps" in sella_data:
+                    result["sella_steps"] = sella_data["steps"][-1]
+
+            # Note: scf_steps and wall_time from orca.out reflect only the
+            # last Sella ORCA call, not the full optimization.
+
         # Return subset matching the original parse_job_metrics contract
         return {
             "max_forces": result["max_forces"],
@@ -1543,6 +1568,7 @@ def parse_job_metrics(
             "nprocs": result.get("nprocs"),
             "wall_time": result.get("wall_time"),
             "time_dict": result.get("time_dict"),
+            "sella_steps": result.get("sella_steps"),
         }
 
     except Exception as e:
@@ -1551,7 +1577,36 @@ def parse_job_metrics(
         return result
 
 
-def parse_sella_log(sella_log_file, filter: bool = False) -> dict:
+def _parse_sella_status(status_file: Path) -> dict[str, str | float | int]:
+    """Parse sella_status.txt written by run_sella_optimization.
+
+    Args:
+        status_file: Path to sella_status.txt.
+
+    Returns:
+        Dictionary with keys: status (str), steps (int), final_fmax (float).
+    """
+    result: dict[str, str | float | int] = {}
+    with open(status_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+            if key == "status":
+                result["status"] = value
+            elif key == "steps":
+                result["steps"] = int(value)
+            elif key == "final_fmax":
+                result["final_fmax"] = float(value)
+            elif key == "message":
+                result["message"] = value
+    return result
+
+
+def parse_sella_log(sella_log_file: str, filter: bool = False) -> dict:
     """
     Check if a Sella optimization has completed successfully by examining the log file.
 
