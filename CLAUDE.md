@@ -305,23 +305,29 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --show-metrics               # Force, SCF, energy, timing statistics
 --show-failed                # Failed jobs with error messages
 --show-timeout               # Timeout jobs
+--show-ready                 # Jobs ready to run
+--show-running               # Currently running jobs
 --show-chronic-failures N    # Jobs failed N+ times
 
 # Status updates
 --update <job_dir>           # Scan directory for completions
---recompute-metrics          # Re-extract metrics from all outputs
+--extract-metrics            # Extract metrics for completed jobs during --update
+--recompute-metrics          # Re-extract metrics for ALL completed jobs
 --recheck-completed          # Re-verify completed jobs
---parse-charges              # Parse Mulliken/Loewdin populations
+--unzip                      # Handle gzipped outputs (quacc)
 
 # Status management
---reset-failed               # Reset failed → TO_RUN (increments fail_count)
---reset-timeout              # Reset timeout → TO_RUN
+--reset-failed               # Reset failed -> TO_RUN (increments fail_count)
+--reset-timeout              # Reset timeout -> TO_RUN (increments fail_count)
+--reset-missing <job_dir>    # Reset jobs with missing directories -> TO_RUN
 --include-timeout-in-reset   # Reset both failed and timeout
 --max-retries N              # Only reset jobs with fail_count < N
 
 # Performance
 --debug N                    # Limit to N jobs for testing
---workers N                  # Parallel workers for status updates
+--workers N                  # Parallel workers for metrics extraction
+--profile                    # Profile metrics extraction bottlenecks
+--hours-cutoff H             # Hours before job is considered timed out (default: 24)
 ```
 
 ### 4. Analysis & Parsing

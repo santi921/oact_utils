@@ -319,7 +319,14 @@ def pull_log_file(root_dir: str) -> str:
 
     # If none, try .out files (skip ORCA atomic SCF guess files)
     if len(log_file) == 0:
-        log_file = [f for f in files if f.endswith(".out") and not _is_orca_atom_scf(f)]
+        # Prefer orca.out explicitly -- Sella jobs produce both orca.out and
+        # sella_run.out, and we want the ORCA output for metric extraction.
+        if "orca.out" in files:
+            log_file = ["orca.out"]
+        else:
+            log_file = [
+                f for f in files if f.endswith(".out") and not _is_orca_atom_scf(f)
+            ]
 
     # If none, try .out.gz files (e.g., from quacc)
     if len(log_file) == 0:
@@ -345,39 +352,50 @@ def pull_log_file(root_dir: str) -> str:
     return os.path.join(root_dir, log_file[0])
 
 
-def check_sella_complete(root_dir: str, fmax=0.05) -> bool:
-    """
-    Check if a Sella optimization has completed successfully by examining the log file.
+def check_sella_complete(root_dir: str, fmax: float = 0.05) -> int:
+    """Check if a Sella optimization completed successfully.
+
+    Prefers sella_status.txt (written by sella_runner.py) when available,
+    falling back to parsing sella.log for legacy jobs.
 
     Args:
-        root_dir (str): The directory containing the Sella log file.
-    Returns:
-        bool: True if the optimization completed successfully, False otherwise.
+        root_dir: The directory containing Sella output files.
+        fmax: Force convergence threshold (used only for sella.log fallback).
 
+    Returns:
+        1 if converged, 0 otherwise.
     """
-    # check if sella.log exists in root_dir
+    # Prefer sella_status.txt (new jobs from sella_runner.py)
+    status_file = os.path.join(root_dir, "sella_status.txt")
+    if os.path.exists(status_file):
+        try:
+            with open(status_file, errors="replace") as f:
+                content = f.read()
+            if "CONVERGED" in content and "NOT_CONVERGED" not in content:
+                return 1
+            return 0
+        except OSError:
+            pass
+
+    # Fallback: parse sella.log for legacy jobs without sella_status.txt
     sella_log = os.path.join(root_dir, "sella.log")
     if not os.path.exists(sella_log):
         return 0
 
     try:
-        # read sella.log and check for final forces
         with open(sella_log, errors="replace") as f:
             lines = f.readlines()
         forces = []
         for line in lines:
-            # check if it's a float
-            if line.split()[4].replace(".", "", 1).replace("-", "", 1).isdigit():
-                forces.append(float(line.split()[4]))
+            parts = line.split()
+            if len(parts) >= 5:
+                val = parts[4].replace(".", "", 1).replace("-", "", 1)
+                if val.isdigit():
+                    forces.append(float(parts[4]))
 
         if len(forces) == 0:
             return 0
-        force_check = forces[-1]
-
-        if force_check < fmax:
-            return 1
-        else:
-            return 0
+        return 1 if forces[-1] < fmax else 0
     except (OSError, ValueError, IndexError):
         return 0
 

@@ -56,19 +56,19 @@ def print_summary(workflow: ArchitectorWorkflow):
     print("-" * 40)
 
     completed_count = counts.get(JobStatus.COMPLETED, 0)
-    for col_label, condition in metric_cols:
-        # Count across all rows
-        cur_all = workflow._execute_with_retry(
-            f"SELECT COUNT(*) FROM structures WHERE {condition}"
-        )
-        n_all = cur_all.fetchone()[0]
 
-        # Count for completed rows only
-        cur_comp = workflow._execute_with_retry(
-            f"SELECT COUNT(*) FROM structures WHERE status = 'completed' AND {condition}"
-        )
-        n_comp = cur_comp.fetchone()[0]
+    # Single query to get all metric counts (avoids 12 round-trips on Lustre)
+    cols_sql = ", ".join(
+        f"SUM(CASE WHEN {cond} THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN status = 'completed' AND {cond} THEN 1 ELSE 0 END)"
+        for _, cond in metric_cols
+    )
+    cur = workflow._execute_with_retry(f"SELECT {cols_sql} FROM structures")
+    row = cur.fetchone()
 
+    for i, (col_label, _condition) in enumerate(metric_cols):
+        n_all = row[i * 2] or 0
+        n_comp = row[i * 2 + 1] or 0
         pct_comp = 100 * n_comp / completed_count if completed_count > 0 else 0
         pct_all = 100 * n_all / total if total > 0 else 0
         print(
@@ -397,20 +397,30 @@ def _parallel_extract_metrics(
     t_extract = time.perf_counter() - t_extract_start
 
     # Phase 2: batch-write all successful metrics in one transaction
+    if success_metrics:
+        print(
+            f"Writing metrics to database ({len(success_metrics)} jobs)...",
+            flush=True,
+        )
     t_write_start = time.perf_counter()
     if success_metrics:
         workflow.update_job_metrics_bulk(success_metrics)
     t_write = time.perf_counter() - t_write_start
+    if success_metrics:
+        print(f"Database write completed in {t_write:.1f}s")
 
-    # Phase 3: mark failed jobs
-    if mark_failed_on_error:
+    # Phase 3: batch-mark failed jobs in a single transaction
+    if mark_failed_on_error and failed_jobs:
+        print(f"Marking {len(failed_jobs)} failed jobs...", flush=True)
+        cur = workflow.conn.cursor()
         for job_id, error_msg in failed_jobs:
-            workflow.update_status(
-                job_id,
-                JobStatus.FAILED,
-                error_message=f"Metrics parse error: {error_msg}",
-                increment_fail_count=True,
+            cur.execute(
+                "UPDATE structures SET status = ?, error_message = ?, "
+                "fail_count = COALESCE(fail_count, 0) + 1, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (JobStatus.FAILED.value, f"Metrics parse error: {error_msg}", job_id),
             )
+        workflow._commit_with_retry()
 
     # Phase 4: display profiling results if requested
     if profile and profile_data:

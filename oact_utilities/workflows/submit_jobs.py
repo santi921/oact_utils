@@ -46,6 +46,7 @@ class OrcaConfig(TypedDict, total=False):
         opt_level: ORCA optimization convergence level (only with optimizer="orca").
         fmax: Sella force convergence threshold in Eh/Bohr (only with optimizer="sella").
         max_opt_steps: Maximum Sella optimization steps (only with optimizer="sella", default: 100).
+        save_all_steps: Save all ORCA output files per Sella step (only with optimizer="sella").
         orca_path: Path to ORCA executable (default: scheduler-specific).
         ks_method: KS wavefunction type: "rks", "uks", or "roks" (default: None, ORCA auto-detects).
     """
@@ -62,6 +63,7 @@ class OrcaConfig(TypedDict, total=False):
     opt_level: Literal["loose", "normal", "tight", "verytight"]
     fmax: float
     max_opt_steps: int | None
+    save_all_steps: bool
     orca_path: str
     diis_option: str | None
     ks_method: str | None
@@ -80,6 +82,7 @@ DEFAULT_ORCA_CONFIG: OrcaConfig = {
     "opt_level": "normal",
     "fmax": 0.05,
     "max_opt_steps": None,
+    "save_all_steps": False,
     "diis_option": None,
     "ks_method": None,
 }
@@ -192,6 +195,7 @@ def prepare_job_directory(
                 fmax=config.get("fmax", 0.05),
                 max_steps=max_steps,
                 orca_cmd=config.get("orca_path", "orca"),
+                save_all_steps=config.get("save_all_steps", False),
             )
 
     # Call custom setup function if provided
@@ -1406,6 +1410,11 @@ def main():
         help="Maximum Sella optimization steps (only with --optimizer sella). Default: 100.",
     )
     orca_group.add_argument(
+        "--save-all-steps",
+        action="store_true",
+        help="Save all ORCA output files per Sella step into step_NNN/ directories (only with --optimizer sella).",
+    )
+    orca_group.add_argument(
         "--ks-method",
         type=str,
         choices=["rks", "uks", "roks"],
@@ -1425,6 +1434,8 @@ def main():
         parser.error("--max-opt-steps is only valid with --optimizer sella")
     if args.optimizer == "orca" and args.fmax != 0.05:
         parser.error("--fmax is only valid with --optimizer sella")
+    if args.save_all_steps and args.optimizer != "sella":
+        parser.error("--save-all-steps is only valid with --optimizer sella")
     if args.optimizer == "sella" and args.opt_level != "normal":
         parser.error("--opt-level is only valid with --optimizer orca")
     if args.optimizer is None and args.opt_level != "normal":
@@ -1446,6 +1457,7 @@ def main():
         "opt_level": args.opt_level,
         "fmax": args.fmax,
         "max_opt_steps": args.max_opt_steps,
+        "save_all_steps": args.save_all_steps,
         "diis_option": "KDIIS" if args.kdiis else None,
         "ks_method": args.ks_method,
     }

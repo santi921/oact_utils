@@ -394,7 +394,7 @@ def get_orca_blocks(
     error_handle: bool = False,
     error_code: int = 0,
     ks_method: str | None = None,
-):
+) -> tuple[str, list[str]]:
 
     if opt:
         if opt_level not in _OPT_LEVEL_KEYWORDS:

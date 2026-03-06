@@ -16,13 +16,9 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from oact_utilities.utils.architector import _init_db, _insert_row
-
-if TYPE_CHECKING:
-    from ase import Atoms
-from oact_utilities.utils.create import read_geom_from_inp_file
+from oact_utilities.utils.create import atoms_to_xyz_string, read_geom_from_inp_file
 
 
 def discover_an66_molecules(an66_dir: Path) -> list[Path]:
@@ -40,23 +36,6 @@ def discover_an66_molecules(an66_dir: Path) -> list[Path]:
             f"No orca.inp files found in subdirectories of {an66_dir}"
         )
     return inp_files
-
-
-def atoms_to_xyz_string(atoms: Atoms, comment: str = "an66") -> str:
-    """Convert ASE Atoms to standard XYZ format string.
-
-    Args:
-        atoms: ASE Atoms object.
-        comment: Comment line for XYZ format.
-
-    Returns:
-        XYZ format string.
-    """
-    n = len(atoms)
-    lines = [str(n), comment]
-    for symbol, pos in zip(atoms.get_chemical_symbols(), atoms.get_positions()):
-        lines.append(f"{symbol}  {pos[0]:.10f}  {pos[1]:.10f}  {pos[2]:.10f}")
-    return "\n".join(lines)
 
 
 def create_an66_geopt_db(
