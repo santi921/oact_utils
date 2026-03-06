@@ -21,99 +21,66 @@ db_path = create_workflow_db(
 )
 ```
 
-**Output:**
-
-- `workflow.db` - SQLite database tracking ~31M structures with status, metrics columns
-
 ### 2. Submit jobs on HPC
-
-**Two submission modes:**
 
 #### A. Traditional Mode (Individual Flux/SLURM Jobs)
 
 ```bash
 # Basic submission (uses default ORCA settings)
-python -m oact_utilities.workflows.submit_jobs \\
-    workflow.db \\
-    jobs/ \\
-    --batch-size 100 \\
-    --scheduler flux \\
-    --n-cores 4 \\
+python -m oact_utilities.workflows.submit_jobs \
+    workflow.db \
+    jobs/ \
+    --batch-size 100 \
+    --scheduler flux \
+    --n-cores 4 \
     --n-hours 2
 
 # With ORCA configuration options
-python -m oact_utilities.workflows.submit_jobs \\
-    workflow.db \\
-    jobs/ \\
-    --batch-size 100 \\
-    --functional wB97M-V \\
-    --simple-input omol \\
+python -m oact_utilities.workflows.submit_jobs \
+    workflow.db \
+    jobs/ \
+    --batch-size 100 \
+    --functional wB97M-V \
+    --simple-input omol \
     --opt  # Enable geometry optimization
 ```
 
 This creates `jobs/job_0/`, `job_1/`, etc. with:
 
-- `orca.inp` - Complete ORCA input file (geometry + level of theory)
-- `flux_job.flux` - Submission script (runs ORCA directly)
+- `orca.inp` -- Complete ORCA input file (geometry + level of theory)
+- `flux_job.flux` -- Submission script (runs ORCA directly)
 - Auto-submits and marks as "running"
 
 **ORCA options:** `--functional`, `--simple-input {omol,omol_base,x2c,dk3}`, `--actinide-basis`, `--nbo`, `--mbis`, `--kdiis`, `--opt`, etc.
 
 #### B. Parsl Mode (Concurrent Execution on Exclusive Node)
 
-Use Parsl to run multiple ORCA jobs concurrently on a single allocated node. More efficient for high-throughput on exclusive nodes:
+Use Parsl to run multiple ORCA jobs concurrently on a single allocated node:
 
 ```bash
 # Request exclusive node via Flux, then run Parsl inside
 flux alloc -N 1 -n 64 -q pbatch -t 8h
 
 # Inside allocation: Run jobs concurrently with Parsl
-python -m oact_utilities.workflows.submit_jobs \\
-    workflow.db \\
-    jobs/ \\
-    --use-parsl \\
-    --batch-size 100 \\
-    --max-workers 4 \\
-    --cores-per-worker 16 \\
-    --n-cores 16 \\
+python -m oact_utilities.workflows.submit_jobs \
+    workflow.db \
+    jobs/ \
+    --use-parsl \
+    --batch-size 100 \
+    --max-workers 4 \
+    --cores-per-worker 16 \
+    --n-cores 16 \
     --job-timeout 72000
-
-# Example with custom ORCA settings
-python -m oact_utilities.workflows.submit_jobs \\
-    workflow.db \\
-    jobs/ \\
-    --use-parsl \\
-    --batch-size 200 \\
-    --max-workers 4 \\
-    --cores-per-worker 16 \\
-    --functional wB97M-V \\
-    --opt
 ```
-
-**Parsl Mode Benefits:**
-
-- ✅ **Concurrent execution**: Run 4+ jobs simultaneously on one node
-- ✅ **Real-time status updates**: Database updated as each job completes
-- ✅ **Efficient resource use**: Better throughput on exclusive nodes
-- ✅ **Automatic retries**: Parsl handles worker failures gracefully
-- ✅ **Live monitoring**: See jobs complete in real-time
-
-**Parsl Options:**
-
-- `--use-parsl`: Enable Parsl mode
-- `--max-workers`: Number of concurrent workers (default: 4)
-- `--cores-per-worker`: CPU cores per worker (default: 16)
-- `--job-timeout`: Per-job timeout in seconds (default: 72000 = 20 hours)
-- `--conda-base`: Conda installation path (default: /usr/WS1/vargas58/miniconda3)
-
-**SLURM multi-node Parsl** (`--use-parsl --scheduler slurm`): Auto-provisions additional nodes via SLURM. Extra options: `--max-blocks`, `--init-blocks`, `--min-blocks`, `--walltime-hours`, `--qos`, `--account`. See README for full details.
 
 **When to use Parsl mode:**
 
 - You have an exclusive node allocation
 - Running many short-medium jobs (< 2 hours each)
 - Want to maximize node utilization
-- Need re al-time progress monitoring
+- Need real-time progress monitoring
+
+See README.md for full Parsl architecture details and SLURM multi-node options.
 
 ### 3. Monitor with dashboard
 
@@ -121,10 +88,13 @@ python -m oact_utilities.workflows.submit_jobs \\
 # Check status
 python -m oact_utilities.workflows.dashboard workflow.db
 
-# Update by scanning job directories
+# Update statuses by scanning job directories (does NOT extract metrics)
 python -m oact_utilities.workflows.dashboard workflow.db --update jobs/
 
-# Show metrics (forces, SCF steps)
+# Update statuses AND extract metrics in one pass
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extract-metrics
+
+# Show metrics summary (forces, SCF steps, energy, timing)
 python -m oact_utilities.workflows.dashboard workflow.db --show-metrics
 ```
 
@@ -139,30 +109,74 @@ completed         25       2.5%
 failed             3       0.3%
 timeout            2       0.2%
 
-Completion: [██░░░░░░...] 2.5% (25/1000)
+Completion: [##..........] 2.5% (25/1000)
 
 Computational Metrics
 Max Forces: mean=0.00123, median=0.00098
 SCF Steps:  mean=12.3, median=11
 ```
 
-## Database Columns
+## Extracting and Managing Metrics
 
-The SQLite DB automatically tracks:
+The dashboard can extract computational metrics from ORCA output files and store them in the database. This is a separate step from status updates because parsing output files is slower than checking job completion.
 
-- **Status tracking**: `status` (to_run/ready/running/completed/failed/timeout)
-  - `to_run`: Job ready to be submitted (default for new jobs)
-  - `ready`: Legacy status, use `to_run` instead
-  - `running`: Job currently executing
-  - `completed`: Job finished successfully
-  - `failed`: Job failed (abort, error, etc.)
-  - `timeout`: Job timed out (no file updates for `--hours-cutoff` hours, default 24)
-- **Metrics**: `max_forces`, `scf_steps`, `final_energy` (auto-extracted from ORCA outputs)
-- **Performance**: `wall_time` (seconds), `n_cores` (CPU cores used) - for tracking compute usage
-- **Failure tracking**: `fail_count` (incremented each time a job is reset from failed/timeout to ready)
-- **Metadata**: `job_dir`, `error_message`, `charge`, `spin`, `created_at`, `updated_at`
-- **Structure info**: `elements`, `natoms`, `geometry` (XYZ string)
-- **CSV reference**: `orig_index` (original CSV row number)
+### What gets extracted
+
+- **max_forces** -- Maximum gradient (Eh/Bohr), from `.engrad` or text output
+- **scf_steps** -- Total SCF iterations (pattern: `SCF CONVERGED AFTER X CYCLES`)
+- **final_energy** -- Final energy in Hartree
+- **wall_time** -- Wall time in seconds
+- **n_cores** -- Number of CPU cores used
+
+### Extract metrics for newly completed jobs
+
+```bash
+# During a status update: extract metrics for jobs that just completed
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extract-metrics
+```
+
+This does two things:
+1. Scans job directories to update statuses (running -> completed/failed/timeout)
+2. For newly completed jobs AND any previously completed jobs missing metrics, extracts and stores metrics
+
+### Backfill or recompute metrics
+
+```bash
+# Recompute metrics for ALL completed jobs (even those that already have them)
+# Useful after parser improvements or if you suspect stale data
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --recompute-metrics
+```
+
+### Gzipped outputs (quacc)
+
+If your jobs produce gzipped output files (`.out.gz`, `.engrad.gz`), add `--unzip`:
+
+```bash
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extract-metrics --unzip
+```
+
+### Performance tuning
+
+```bash
+# Use more workers for parallel metric extraction (default: 4)
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extract-metrics --workers 8
+
+# Test on a small subset before running on everything
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extract-metrics --debug 50
+
+# Profile to identify bottlenecks (I/O, parsing, DB writes)
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extract-metrics --profile
+```
+
+The `--profile` flag prints a breakdown showing parse time per job, slowest jobs, and throughput (jobs/sec).
+
+### Re-verify completed jobs
+
+```bash
+# Re-check that completed jobs actually terminated normally
+# Catches tampered outputs or status checker changes
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --recheck-completed
+```
 
 ## Common Commands
 
@@ -175,6 +189,9 @@ python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 50
 
 # Update statuses
 python -m oact_utilities.workflows.dashboard workflow.db --update jobs/
+
+# Update statuses + extract metrics
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extract-metrics
 
 # Show failed jobs (includes fail count)
 python -m oact_utilities.workflows.dashboard workflow.db --show-failed
@@ -201,86 +218,6 @@ python -m oact_utilities.workflows.dashboard workflow.db --show-chronic-failures
 python -m oact_utilities.workflows.dashboard workflow.db --show-metrics
 ```
 
-## Python API
-
-```python
-from oact_utilities.workflows import ArchitectorWorkflow, JobStatus, update_job_status
-from oact_utilities.workflows.submit_jobs import submit_batch, submit_batch_parsl, OrcaConfig
-
-# Programmatic job submission with custom ORCA config
-orca_config: OrcaConfig = {
-    "functional": "wB97M-V",
-    "simple_input": "x2c",  # X2C relativistic
-    "opt": True,
-}
-
-with ArchitectorWorkflow("workflow.db") as wf:
-    # Traditional mode: Submit batch with ORCA config
-    submitted = submit_batch(
-        workflow=wf,
-        root_dir="jobs/",
-        batch_size=100,
-        orca_config=orca_config,
-        n_cores=8,
-    )
-
-    # OR use Parsl mode for concurrent execution (NEW!)
-    submitted = submit_batch_parsl(
-        workflow=wf,
-        root_dir="jobs/",
-        num_jobs=100,
-        max_workers=4,
-        cores_per_worker=16,
-        orca_config=orca_config,
-        n_cores=16,
-    )
-
-    # Get jobs
-    ready = wf.get_jobs_by_status(JobStatus.TO_RUN)
-
-    # Update status manually
-    wf.update_status(job_id=42, new_status=JobStatus.COMPLETED)
-
-    # Update metrics manually
-    wf.update_job_metrics(
-        job_id=42,
-        job_dir="/path/to/job_42",
-        max_forces=0.00123,
-        scf_steps=15,
-        final_energy=-1234.56
-    )
-
-    # Or automatically extract metrics from ORCA output
-    new_status = update_job_status(
-        workflow=wf,
-        job_dir="jobs/job_42/",
-        job_id=42,
-        extract_metrics=True,  # Auto-parse ORCA output
-        unzip=False,  # Set True for quacc gzipped outputs
-    )
-
-    # Count jobs
-    counts = wf.count_by_status()
-    # {'to_run': 850, 'running': 120, 'completed': 25, 'failed': 3, 'timeout': 2}
-
-    # Reset failed jobs (increments fail_count)
-    wf.reset_failed_jobs()
-
-    # Reset timeout jobs (increments fail_count)
-    wf.reset_timeout_jobs()
-
-    # Reset both failed and timeout jobs together
-    wf.reset_failed_jobs(include_timeout=True)
-
-    # Reset only jobs that haven't failed too many times
-    wf.reset_failed_jobs(max_fail_count=3)
-
-    # Find chronically failing jobs
-    chronic = wf.get_jobs_by_fail_count(min_fail_count=3)
-    for job in chronic:
-        print(f"Job {job.id} has failed {job.fail_count} times: {job.error_message}")
-```
-
 ## HPC Workflow Loop
 
 ```bash
@@ -289,60 +226,18 @@ python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 50
 
 # 2. Wait for jobs to run...
 
-# 3. Update statuses
-python -m oact_utilities.workflows.dashboard workflow.db --update jobs/
+# 3. Update statuses and extract metrics
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extract-metrics
 
-# 4. Repeat steps 1-3 until done
+# 4. Handle failures
+python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-retries 3
+
+# 5. Repeat steps 1-4 until done
 ```
-
-## Files Created
-
-```
-project/
-├── workflow.db              # SQLite database (main tracking)
-└── jobs/
-    ├── job_0/              # Job directory (using orig_index by default)
-    │   ├── orca.inp        # Complete ORCA input file
-    │   ├── flux_job.flux   # Submission script (runs ORCA directly)
-    │   ├── orca.out        # ORCA output (after running)
-    │   ├── orca.engrad     # Energy and gradient
-    │   └── ...
-    ├── job_1/
-    └── ...
-```
-
-**Note:** Job directories are named using `orig_index` (original CSV row) by default. Use `--job-dir-pattern "job_{id}"` to use the database ID instead.
 
 ## Full Documentation
 
-- **Detailed guide**: `oact_utilities/workflows/README.md`
+- **Detailed guide with Python API**: `oact_utilities/workflows/README.md`
+- **Parsl architecture**: `docs/parsl_integration.md`
 - **Usage examples**: `examples/architector_workflow_example.py`
 - **Tests**: `tests/test_workflow.py`
-
-## Key Features
-
-✅ **Direct CSV to DB**: No chunking required, reads CSV in batches
-✅ **Robust Parsing**: Handles regular and gzipped (quacc) ORCA outputs
-✅ **Concurrent Access**: WAL mode + retry logic for database locks
-✅ **Automatic Metrics**: Extracts max_forces, scf_steps, final_energy from outputs
-✅ **Multiple Sources**: Tries `.engrad` file if text parsing fails
-✅ **Error Handling**: Gracefully handles missing files and parse failures
-✅ **Flux & SLURM**: Compatible with existing HPC job generation utilities
-✅ **Parsl Mode**: NEW! Concurrent execution on exclusive nodes with real-time updates
-✅ **Real-time Dashboard**: Monitor progress with metrics display
-✅ **Easy Retry**: Reset failed jobs with one command
-✅ **Failure Tracking**: `fail_count` tracks retries; skip chronic failures automatically
-✅ **Performance Tracking**: `wall_time` and `n_cores` for compute usage analysis (core-hours)
-✅ **Timeout Detection**: Automatically detects jobs stuck for 6+ hours
-✅ **Rich Status System**: Separate tracking for failed vs. timeout vs. running jobs
-
-## Supported ORCA Output Formats
-
-- **Direct ORCA**: Standard text output (`.out`, `logs`)
-- **Quacc**: Gzipped files (`.out.gz`, `.engrad.gz`)
-- **ORCA engrad**: Binary `.engrad` files for reliable force extraction
-- **Sella logs**: Optimization trajectories
-
-All formats tested with real examples in `tests/files/`.
-
-That's it! You're ready to run high-throughput architector workflows.
