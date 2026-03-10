@@ -243,6 +243,7 @@ def _extract_metrics_from_dir(
     job_dir: Path,
     unzip: bool = False,
     profile: bool = False,
+    recompute: bool = False,
 ) -> dict:
     """Extract metrics from a job directory (pure I/O, no DB writes).
 
@@ -253,6 +254,7 @@ def _extract_metrics_from_dir(
         job_dir: Path to job directory containing ORCA output.
         unzip: If True, handle gzipped output files (quacc).
         profile: If True, collect timing data for bottleneck analysis.
+        recompute: If True, skip cache and regenerate orca_metrics.json.
 
     Returns:
         Dictionary with extracted metrics and an 'error' key (None on success).
@@ -268,8 +270,10 @@ def _extract_metrics_from_dir(
         # Single call now extracts everything: metrics + timing + nprocs
         # (uses single-pass file reader internally)
         t_parse = time.perf_counter()
-        metrics = parse_job_metrics(job_dir, unzip=unzip)
+        metrics = parse_job_metrics(job_dir, unzip=unzip, recompute=recompute)
         t_parse = time.perf_counter() - t_parse
+
+        cache_hit = metrics.pop("_cache_hit", False)
 
         result = {
             "max_forces": metrics.get("max_forces"),
@@ -279,6 +283,7 @@ def _extract_metrics_from_dir(
             "n_cores": metrics.get("nprocs"),
             "error": None,
             "timing_warning": None,
+            "_cache_hit": cache_hit,
         }
 
         if profile:
@@ -286,6 +291,7 @@ def _extract_metrics_from_dir(
                 "parse_sec": t_parse,
                 "timing_sec": 0.0,  # timing now included in parse phase
                 "total_sec": time.perf_counter() - t0,
+                "cache_hit": cache_hit,
             }
 
         return result
@@ -302,6 +308,7 @@ def _parallel_extract_metrics(
     workers: int = 4,
     mark_failed_on_error: bool = True,
     profile: bool = False,
+    recompute: bool = False,
 ) -> tuple[int, int]:
     """Extract metrics in parallel, then batch-write results to DB.
 
@@ -316,6 +323,7 @@ def _parallel_extract_metrics(
         workers: Number of parallel worker threads.
         mark_failed_on_error: If True, mark jobs as FAILED when parsing fails.
         profile: If True, collect and display performance profiling data.
+        recompute: If True, skip cache and regenerate orca_metrics.json.
 
     Returns:
         Tuple of (extracted_count, failed_count).
@@ -337,12 +345,15 @@ def _parallel_extract_metrics(
     success_metrics: list[dict] = []
     failed_jobs: list[tuple[int, str]] = []
     profile_data: list[tuple[int, dict]] = []  # (job_id, timing_dict)
+    cache_hits = 0
 
     t_extract_start = time.perf_counter()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_job = {
-            executor.submit(_extract_metrics_from_dir, job_dir, unzip, profile): (
+            executor.submit(
+                _extract_metrics_from_dir, job_dir, unzip, profile, recompute
+            ): (
                 job_id,
                 job_dir,
             )
@@ -365,6 +376,8 @@ def _parallel_extract_metrics(
             result = future.result()
 
             if result.get("error") is None:
+                if result.get("_cache_hit"):
+                    cache_hits += 1
                 success_metrics.append(
                     {
                         "job_id": job_id,
@@ -395,6 +408,15 @@ def _parallel_extract_metrics(
                     )
 
     t_extract = time.perf_counter() - t_extract_start
+
+    # Print cache stats if any cache hits occurred
+    if cache_hits > 0:
+        total = len(success_metrics) + len(failed_jobs)
+        pct = (cache_hits / total * 100) if total > 0 else 0
+        print(
+            f"Cache: {cache_hits} hits, {total - cache_hits} misses "
+            f"({pct:.0f}% hit rate)"
+        )
 
     # Phase 2: batch-write all successful metrics in one transaction
     if success_metrics:
@@ -739,6 +761,7 @@ def backfill_metrics(
         verbose=verbose,
         workers=workers,
         profile=profile,
+        recompute=recompute,
     )
 
     print(
