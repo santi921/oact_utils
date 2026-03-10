@@ -1,3 +1,5 @@
+import contextlib
+import json
 import os
 import re
 import time as time_mod
@@ -1394,8 +1396,56 @@ def _build_population_result(
     return result
 
 
+def write_orca_cache(cache_path: Path, metrics: dict, source_mtime: float) -> None:
+    """Write metrics dict as JSON cache file with atomic rename.
+
+    Silent on failure -- a failed cache write never blocks metrics extraction.
+
+    Args:
+        cache_path: Path to write the cache file.
+        metrics: Metrics dictionary from parse_job_metrics.
+        source_mtime: mtime of the source ORCA output file for staleness detection.
+    """
+    data = {**metrics, "_source_mtime": source_mtime}
+    tmp = cache_path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(data))
+        os.replace(str(tmp), str(cache_path))
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def read_orca_cache(cache_path: Path, source_mtime: float) -> dict | None:
+    """Read cached metrics from JSON file.
+
+    Returns None if the cache is missing, stale, or corrupt, triggering
+    fallback to a full ORCA output parse.
+
+    Args:
+        cache_path: Path to the cache file.
+        source_mtime: mtime of the source ORCA output file.
+
+    Returns:
+        Metrics dict if cache is valid, None otherwise.
+    """
+    try:
+        if not cache_path.exists():
+            return None
+        data = json.loads(cache_path.read_text())
+        if data.get("_source_mtime", 0) < source_mtime:
+            return None
+        data.pop("_source_mtime", None)
+        return data
+    except (json.JSONDecodeError, OSError, KeyError):
+        return None
+
+
 def parse_job_metrics(
-    job_dir: str | Path, unzip: bool = False, hours_cutoff: float = 6.0
+    job_dir: str | Path,
+    unzip: bool = False,
+    hours_cutoff: float = 6.0,
+    recompute: bool = False,
 ) -> dict[str, float | int | None]:
     """Extract multiple metrics from ORCA output files in a job directory.
 
@@ -1406,10 +1456,15 @@ def parse_job_metrics(
     Uses check_file_termination() to robustly detect job completion status,
     including timeouts, errors, and aborted runs.
 
+    When a cache file (orca_metrics.json) exists and is fresh, returns cached
+    metrics without re-reading the ORCA output. After a full parse, writes a
+    cache file for subsequent calls.
+
     Args:
         job_dir: Path to job directory containing ORCA output.
         unzip: If True, look for gzipped files (e.g., quacc output).
         hours_cutoff: Timeout threshold in hours for stale output files (default: 6.0).
+        recompute: If True, skip cache read and regenerate the cache file.
 
     Returns:
         Dictionary with keys:
@@ -1423,6 +1478,7 @@ def parse_job_metrics(
             - mulliken_population: Dict with charges/spins if available (dict or None)
     """
     job_dir = Path(job_dir)
+    cache_path = job_dir / "orca_metrics.json"
 
     _empty_result: dict = {
         "max_forces": None,
@@ -1433,6 +1489,26 @@ def parse_job_metrics(
         "termination_status": 0,
         "mulliken_population": None,
     }
+
+    # Try cache before doing any I/O on the full ORCA output
+    if not recompute:
+        try:
+            # Find source file for mtime comparison
+            if unzip:
+                gz_files = list(job_dir.glob("*.out.gz"))
+                source_file = gz_files[0] if gz_files else None
+            else:
+                source_file_str = pull_log_file(str(job_dir))
+                source_file = Path(source_file_str) if source_file_str else None
+
+            if source_file is not None and source_file.exists():
+                source_mtime = os.path.getmtime(str(source_file))
+                cached = read_orca_cache(cache_path, source_mtime)
+                if cached is not None:
+                    cached["_cache_hit"] = True
+                    return cached
+        except OSError:
+            pass  # Fall through to full parse
 
     try:
         # Parse charge/multiplicity from .inp file for population validation
@@ -1554,8 +1630,8 @@ def parse_job_metrics(
             # Note: scf_steps and wall_time from orca.out reflect only the
             # last Sella ORCA call, not the full optimization.
 
-        # Return subset matching the original parse_job_metrics contract
-        return {
+        # Build final metrics dict
+        final_result = {
             "max_forces": result["max_forces"],
             "scf_steps": result["scf_steps"],
             "final_energy": result["final_energy"],
@@ -1569,6 +1645,22 @@ def parse_job_metrics(
             "time_dict": result.get("time_dict"),
             "sella_steps": result.get("sella_steps"),
         }
+
+        # Write cache for subsequent calls (silent on failure)
+        try:
+            if unzip:
+                gz_files = list(job_dir.glob("*.out.gz"))
+                src = gz_files[0] if gz_files else None
+            else:
+                src_str = pull_log_file(str(job_dir))
+                src = Path(src_str) if src_str else None
+
+            if src is not None and src.exists():
+                write_orca_cache(cache_path, final_result, os.path.getmtime(str(src)))
+        except OSError:
+            pass
+
+        return final_result
 
     except Exception as e:
         result = dict(_empty_result)
