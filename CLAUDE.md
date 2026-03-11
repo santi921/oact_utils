@@ -87,6 +87,7 @@ oact_utilities/
 │   └── table_summary.py        # Data table utilities
 ├── workflows/                  # High-throughput workflow management
 │   ├── architector_workflow.py # Workflow manager with SQLite tracking (WAL mode)
+│   ├── clean.py                # Job directory cleanup utility (scratch, basis, purge failed)
 │   ├── dashboard.py            # CLI dashboard for monitoring + parallel status updates
 │   ├── submit_jobs.py          # Batch job submission (Traditional + Parsl modes)
 │   ├── README.md               # Detailed workflow documentation
@@ -330,6 +331,33 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --hours-cutoff H             # Hours before job is considered timed out (default: 24)
 ```
 
+### 3b. Job Directory Cleanup
+
+Removing scratch files from completed job directories:
+
+- `oact_utilities/workflows/clean.py` - Cleanup utility (standalone CLI)
+
+**Cleanup CLI reference:**
+
+```bash
+python -m oact_utilities.workflows.clean <db> <root_dir> [options]
+
+# Action flags (at least one required)
+--clean-tmp             # Remove .tmp, .core, orca_tmp_*/ from completed jobs
+--clean-bas             # Remove .bas, .bas[N] from completed jobs
+--clean-all             # Both --clean-tmp and --clean-bas
+--purge-failed          # Purge failed jobs (write .do_not_rerun.json marker, delete contents)
+
+# Execution
+--execute               # Actually delete (default: dry-run preview)
+
+# Performance / output
+--workers N             # Parallel workers (default: 4)
+--debug N               # Limit to N jobs
+--verbose / -v          # Per-file listings
+--hours-cutoff H        # Timeout threshold for revalidation (default: 24)
+```
+
 ### 4. Analysis & Parsing
 
 Parsing ORCA outputs, extracting energies, gradients, timings, populations:
@@ -404,6 +432,7 @@ Tests live in `tests/` with test data in `tests/files/`. When adding new functio
 - `test_hpc.py` - Job file generation
 - `test_io.py` - I/O utilities
 - `test_status.py` - Status checking and timeout detection
+- `test_clean.py` - Job directory cleanup (patterns, purge, submit guard)
 - `test_workflow.py` - Workflow DB operations
 - `test_workflow_parsers.py` - Parsers with real ORCA data
 - `test_submit_jobs.py` - Job submission
