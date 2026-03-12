@@ -81,7 +81,7 @@ oact_utilities/
 │   ├── create.py               # ORCA input file generation (write_orca_inputs)
 │   ├── hpc.py                  # HPC job file writers (Flux, SLURM)
 │   ├── jobs.py                 # Job launching utilities
-│   ├── status.py               # Job termination/completion checking
+│   ├── status.py               # Job termination/completion checking, failure reason parsing
 │   ├── an66.py                 # Actinide-66 compound utilities
 │   ├── baselines.py            # Baseline calculation helpers
 │   └── table_summary.py        # Data table utilities
@@ -295,6 +295,9 @@ Status checking and visualization of running jobs:
 
 - `oact_utilities/workflows/dashboard.py` - Workflow dashboard with parallel status updates
 - `oact_utilities/utils/status.py` - Job termination/completion checks
+  - `check_file_termination()` - Content-based status detection (1=completed, 0=running, -1=failed, -2=timeout)
+  - `parse_failure_reason()` - Extract failure reason from last lines of ORCA output (shared by clean.py and dashboard)
+  - `_read_last_lines()` - Efficient tail-read helper using `deque(f, maxlen=N)`
 - `oact_utilities/utils/analysis.py` - Results parsing (forces, SCF, energies, timings, populations)
 
 **Dashboard CLI reference:**
@@ -389,6 +392,7 @@ Check these locations for common issues:
 - HPC scheduler output for resource issues
 - Workflow database `error_message` column for tracked failures
 - `fail_count` column to identify chronic failures
+- `parse_failure_reason()` in `status.py` extracts failure reasons from ORCA output last lines (used by `clean.py` for marker files)
 
 **Workflow debugging:**
 

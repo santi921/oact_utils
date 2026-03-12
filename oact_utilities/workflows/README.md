@@ -709,7 +709,7 @@ python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --purge-f
 
 ### Purging Failed Jobs (`--purge-failed`)
 
-Removes all contents from failed job directories except a `.do_not_rerun.json` marker file containing job metadata (SCF steps, failure reason, charge, spin, etc.). This marker file:
+Removes all contents from failed job directories except a `.do_not_rerun.json` marker file containing job metadata (SCF steps, failure reason, charge, spin, etc.). Failure reasons are extracted using `parse_failure_reason()` from `oact_utilities/utils/status.py`, which reads the last lines of the ORCA output file. This marker file:
 - Prevents the job from being resubmitted (submit guard in `submit_jobs.py`)
 - Preserves diagnostic information for post-hoc analysis
 - Reclaims disk space from jobs that will not be retried
