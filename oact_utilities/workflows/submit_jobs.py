@@ -893,6 +893,9 @@ def submit_batch_parsl(
                 n_cores=n_cores,
                 setup_func=setup_func,
             )
+            # Persist job_dir at prep time so it is never NULL
+            if not dry_run:
+                workflow.update_job_metrics(job.id, job_dir=str(job_dir))
             print(f"  [{i}/{len(jobs_to_submit)}] Prepared {job_dir}")
         except Exception as e:
             print(f"  [{i}/{len(jobs_to_submit)}] FAILED to prepare job {job.id}: {e}")
@@ -1200,6 +1203,10 @@ def submit_batch(
                 n_cores=n_cores,
                 setup_func=setup_func,
             )
+
+            # Persist job_dir at prep time so it is never NULL
+            if not dry_run:
+                workflow.update_job_metrics(job.id, job_dir=str(job_dir))
 
             # Write job submission script
             orca_path = config.get("orca_path", DEFAULT_ORCA_PATHS["flux"])

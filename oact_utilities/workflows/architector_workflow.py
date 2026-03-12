@@ -92,12 +92,14 @@ class ArchitectorWorkflow:
         conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError as e:
-            if "locking protocol" in str(e):
-                # Network filesystem (NFS/Lustre) doesn't support WAL
+        except sqlite3.OperationalError:
+            # Network filesystems (NFS/Lustre) can fail WAL with various
+            # errors: "locking protocol", "database is locked", etc.
+            # Fall back to DELETE journal mode unconditionally.
+            try:
                 conn.execute("PRAGMA journal_mode=DELETE")
-            else:
-                raise
+            except sqlite3.OperationalError:
+                pass  # Proceed with whatever journal mode is active
         return conn
 
     def _ensure_schema(self) -> None:
@@ -113,6 +115,12 @@ class ArchitectorWorkflow:
         """
         cur = self.conn.execute("PRAGMA table_info(structures)")
         existing_cols = {row[1] for row in cur.fetchall()}
+        if not existing_cols:
+            raise RuntimeError(
+                f"Database at {self.db_path} has no 'structures' table. "
+                "It may be empty or corrupted. Recreate it with "
+                "create_workflow_db()."
+            )
         if "optimizer" not in existing_cols:
             try:
                 self.conn.execute(
