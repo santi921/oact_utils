@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 import pandas as pd
 from ase import Atoms
 
@@ -11,7 +15,7 @@ def process_geometry_file(file: str, ase_format_tf: bool = False) -> dict:
     with open(file) as f:
         lines = f.readlines()
 
-    dict_geoms = {}
+    dict_geoms: dict[str, Any] = {}
     for ind, line in enumerate(lines[:-1]):
         # logic for new geometry
         if line.startswith("Geometry for"):

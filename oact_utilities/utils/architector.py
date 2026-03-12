@@ -11,6 +11,7 @@ import math
 import pickle
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from ase import Atoms
@@ -323,7 +324,7 @@ def _insert_row(
     final_energy: float | None = None,
     error_message: str | None = None,
     fail_count: int = 0,
-    extra_values: dict[str, any] | None = None,
+    extra_values: dict[str, Any] | None = None,
 ):
     """Insert a structure row into the database.
 
@@ -586,7 +587,7 @@ def create_workflow_db(
                             continue  # Skip this row
 
                 # Extract extra column values
-                extra_values = None
+                extra_values: dict[str, Any] | None = None
                 if extra_columns:
                     extra_values = {}
                     for col_name in extra_columns.keys():
