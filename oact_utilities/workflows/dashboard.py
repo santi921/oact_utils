@@ -825,6 +825,40 @@ _DISK_STATUS_MAP: dict[int, JobStatus] = {
 }
 
 
+def _probe_unlinked_job(
+    job_dir: Path,
+    hours_cutoff: float,
+) -> tuple[bool, int, str | None]:
+    """Check if a job directory exists and revalidate status from disk.
+
+    Pure I/O -- no DB access. Safe to call from a thread pool.
+
+    Args:
+        job_dir: Expected job directory path.
+        hours_cutoff: Hours before considering a job timed out.
+
+    Returns:
+        (dir_exists, disk_status_code, error_msg)
+    """
+    if not job_dir.is_dir():
+        return False, 0, None
+
+    disk_status_code = check_job_termination(str(job_dir), hours_cutoff=hours_cutoff)
+
+    error_msg = None
+    if disk_status_code == -1:
+        # Find the .out file for parse_failure_reason
+        out_files = [
+            f
+            for f in job_dir.iterdir()
+            if f.suffix == ".out" or f.name.endswith(".out.gz")
+        ]
+        if out_files:
+            error_msg = parse_failure_reason(str(out_files[0]))
+
+    return True, disk_status_code, error_msg
+
+
 def fix_unlinked_jobs(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
@@ -833,6 +867,7 @@ def fix_unlinked_jobs(
     verbose: bool = False,
     max_jobs: int | None = None,
     max_retries: int | None = None,
+    workers: int = 4,
 ) -> dict[str, int]:
     """Repair NULL job_dir entries by auto-linking or resetting.
 
@@ -842,6 +877,8 @@ def fix_unlinked_jobs(
     3. If not found: reset to TO_RUN
 
     Disk is the source of truth -- DB status is always updated to match.
+    Directory probing runs in parallel with ThreadPoolExecutor for
+    performance on network filesystems (Lustre/GPFS).
 
     Args:
         workflow: ArchitectorWorkflow instance.
@@ -851,10 +888,20 @@ def fix_unlinked_jobs(
         verbose: Print per-job details.
         max_jobs: Limit to N jobs (for --debug).
         max_retries: Only reset jobs with fail_count < this value.
+        workers: Number of parallel threads for directory probing.
 
     Returns:
         Summary dict with counts: linked, reset, skipped.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    try:
+        from tqdm import tqdm
+
+        use_tqdm = True
+    except ImportError:
+        use_tqdm = False
+
     root = Path(root_dir)
     counts = {"linked": 0, "reset": 0, "skipped": 0}
 
@@ -877,58 +924,77 @@ def fix_unlinked_jobs(
 
     print(f"Found {len(unlinked)} jobs with NULL job_dir")
 
-    # Batch updates: accumulate (job_id, job_dir, new_status, error_msg,
-    # increment_fail) tuples, commit once at the end.
-    updates: list[tuple[int, str | None, JobStatus, str | None, bool]] = []
-
+    # Phase 1: Probe directories in parallel (pure I/O, no DB)
+    # Build job_id -> (job, job_dir) mapping for the probe
+    probe_items: list[tuple[int, Path, int, int | None]] = []
     for job in unlinked:
         job_dir_name = job_dir_pattern.format(
             orig_index=job.orig_index,
             id=job.id,
         )
-        job_dir = root / job_dir_name
+        probe_items.append(
+            (job.id, root / job_dir_name, job.orig_index, job.fail_count)
+        )
 
-        if job_dir.is_dir():
-            # Directory exists -- link and revalidate from disk
-            disk_status_code = check_job_termination(
-                str(job_dir), hours_cutoff=hours_cutoff
+    # Run probes in parallel
+    probe_results: dict[int, tuple[bool, int, str | None, Path]] = {}
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_job = {
+            executor.submit(_probe_unlinked_job, job_dir, hours_cutoff): (
+                job_id,
+                job_dir,
+                orig_index,
+                fail_count,
             )
+            for job_id, job_dir, orig_index, fail_count in probe_items
+        }
+
+        futures = as_completed(future_to_job)
+        if use_tqdm:
+            futures = tqdm(
+                futures,
+                total=len(probe_items),
+                desc="Probing directories",
+                unit="job",
+                disable=verbose,
+            )
+
+        for future in futures:
+            job_id, job_dir, orig_index, fail_count = future_to_job[future]
+            dir_exists, disk_status_code, error_msg = future.result()
+            probe_results[job_id] = (dir_exists, disk_status_code, error_msg, job_dir)
+
+    # Phase 2: Build updates from probe results (single-threaded)
+    updates: list[tuple[int, str | None, JobStatus, str | None, bool]] = []
+
+    for job_id, job_dir, orig_index, fail_count in probe_items:
+        dir_exists, disk_status_code, error_msg, _ = probe_results[job_id]
+
+        if dir_exists:
             new_status = _DISK_STATUS_MAP.get(disk_status_code, JobStatus.TO_RUN)
-
-            error_msg = None
-            if new_status == JobStatus.FAILED:
-                # Find the .out file for parse_failure_reason
-                out_files = [
-                    f
-                    for f in job_dir.iterdir()
-                    if f.suffix == ".out" or f.name.endswith(".out.gz")
-                ]
-                if out_files:
-                    error_msg = parse_failure_reason(str(out_files[0]))
-
-            updates.append((job.id, str(job_dir), new_status, error_msg, False))
+            updates.append((job_id, str(job_dir), new_status, error_msg, False))
             counts["linked"] += 1
 
             if verbose:
-                status_label = new_status.value
                 print(
-                    f"  Link job {job.id} (orig_index={job.orig_index}) "
-                    f"-> {job_dir_name} [{status_label}]"
+                    f"  Link job {job_id} (orig_index={orig_index}) "
+                    f"-> {job_dir.name} [{new_status.value}]"
                 )
         else:
             # No directory found -- check max_retries before resetting
-            if max_retries is not None and (job.fail_count or 0) >= max_retries:
+            if max_retries is not None and (fail_count or 0) >= max_retries:
                 counts["skipped"] += 1
                 if verbose:
                     print(
-                        f"  Skip job {job.id} (orig_index={job.orig_index}) "
-                        f"-- fail_count {job.fail_count} >= max_retries {max_retries}"
+                        f"  Skip job {job_id} (orig_index={orig_index}) "
+                        f"-- fail_count {fail_count} >= max_retries {max_retries}"
                     )
                 continue
 
             updates.append(
                 (
-                    job.id,
+                    job_id,
                     None,
                     JobStatus.TO_RUN,
                     "No directory found -- reset by --fix-unlinked",
@@ -939,14 +1005,13 @@ def fix_unlinked_jobs(
 
             if verbose:
                 print(
-                    f"  Reset job {job.id} (orig_index={job.orig_index}) "
+                    f"  Reset job {job_id} (orig_index={orig_index}) "
                     f"-> to_run (no directory)"
                 )
 
-    # Batch commit all updates
+    # Phase 3: Batch commit all updates (single commit for Lustre)
     conn = workflow.conn
     for job_id, job_dir_str, new_status, error_msg, inc_fail in updates:
-        # Update job_dir if we found a directory
         if job_dir_str is not None:
             set_clauses = ["job_dir = ?"]
             values: list[str | int] = [job_dir_str]
@@ -959,7 +1024,6 @@ def fix_unlinked_jobs(
             values.append(job_id)
             conn.execute(query, tuple(values))
         else:
-            # Reset to to_run
             set_clauses = ["status = ?", "error_message = ?"]
             values = [new_status.value, error_msg or ""]
             if inc_fail:
@@ -1416,6 +1480,7 @@ def main():
             verbose=getattr(args, "verbose", False),
             max_jobs=args.debug if hasattr(args, "debug") else None,
             max_retries=args.max_retries,
+            workers=args.workers,
         )
         print(
             f"\nFix-unlinked: {result['linked']} linked, "
