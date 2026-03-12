@@ -218,6 +218,23 @@ python -m oact_utilities.workflows.dashboard workflow.db --show-chronic-failures
 python -m oact_utilities.workflows.dashboard workflow.db --show-metrics
 ```
 
+## Clean Up Job Directories
+
+After campaigns complete, reclaim disk space by removing scratch files:
+
+```bash
+# Preview what would be deleted (dry-run)
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all
+
+# Actually delete scratch and basis set files from completed jobs
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --execute
+
+# Purge failed jobs (writes .do_not_rerun.json marker, deletes contents)
+python -m oact_utilities.workflows.clean workflow.db jobs/ --purge-failed --execute
+```
+
+The utility defaults to dry-run mode -- add `--execute` to actually delete files. See README.md for full CLI reference.
+
 ## HPC Workflow Loop
 
 ```bash
@@ -232,7 +249,10 @@ python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extrac
 # 4. Handle failures
 python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-retries 3
 
-# 5. Repeat steps 1-4 until done
+# 5. Clean up scratch files from completed jobs
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --execute
+
+# 6. Repeat steps 1-5 until done
 ```
 
 ## Full Documentation

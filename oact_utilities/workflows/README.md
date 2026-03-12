@@ -669,6 +669,89 @@ python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 50
 python -m oact_utilities.workflows.dashboard workflow.db --show-chronic-failures 3
 ```
 
+## Job Directory Cleanup
+
+After large campaigns, job directories accumulate scratch files that waste disk quota and inodes. The cleanup utility removes these files safely.
+
+### Basic Usage
+
+```bash
+# Preview what would be deleted (dry-run, default)
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-tmp
+
+# Actually delete scratch files from completed jobs
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-tmp --execute
+
+# Clean basis set files
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-bas --execute
+
+# Clean everything (scratch + basis)
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --execute
+
+# Purge failed job directories (extracts metadata, writes marker, deletes contents)
+python -m oact_utilities.workflows.clean workflow.db jobs/ --purge-failed --execute
+
+# Combine: clean completed jobs AND purge failed ones
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --purge-failed --execute
+```
+
+### What Gets Cleaned
+
+**`--clean-tmp` (Scratch/Temp):**
+- `*.tmp`, `*.tmp.[N]` -- ORCA intermediate scratch files
+- `orca_tmp_*/` directories -- Parsl temp directories
+- `core`, `core.[N]`, `*.core` -- crash dump files
+
+**`--clean-bas` (Basis Set):**
+- `*.bas`, `*.bas[N]` -- basis set scratch files
+
+**`--clean-all`:** Fixed alias for `--clean-tmp --clean-bas`.
+
+### Purging Failed Jobs (`--purge-failed`)
+
+Removes all contents from failed job directories except a `.do_not_rerun.json` marker file containing job metadata (SCF steps, failure reason, charge, spin, etc.). Failure reasons are extracted using `parse_failure_reason()` from `oact_utilities/utils/status.py`, which reads the last lines of the ORCA output file. This marker file:
+- Prevents the job from being resubmitted (submit guard in `submit_jobs.py`)
+- Preserves diagnostic information for post-hoc analysis
+- Reclaims disk space from jobs that will not be retried
+
+### Safety Features
+
+- **Dry-run by default**: No `--execute` flag means preview only
+- **Revalidation**: Each completed job is re-checked on disk before cleanup
+- **Exclusion list**: Critical files (orca.out, orca.inp, orca.engrad, orca.gbw, etc.) are never deleted
+- **Path safety**: Job directories must resolve within root_dir (prevents traversal attacks)
+- **TOCTOU protection**: `--purge-failed` re-checks DB status before deletion
+- **Read-only DB**: The cleanup utility never modifies the workflow database
+
+### CLI Reference
+
+```
+python -m oact_utilities.workflows.clean <db_path> <root_dir> [options]
+
+Action flags (at least one required):
+  --clean-tmp             Remove scratch/temp files from completed jobs
+  --clean-bas             Remove basis set files from completed jobs
+  --clean-all             Remove all scratch categories (--clean-tmp + --clean-bas)
+  --purge-failed          Purge failed job directories
+
+Execution control:
+  --execute               Actually delete files (default: dry-run)
+
+Performance:
+  --workers N             Parallel workers (default: 4)
+  --debug N               Limit to first N jobs for testing
+
+Output:
+  --verbose / -v          Show per-file listings
+
+Revalidation:
+  --hours-cutoff H        Hours before timeout detection (default: 24)
+```
+
+### Submit Guard
+
+When `--purge-failed` creates a `.do_not_rerun.json` marker, the submit utility (`submit_jobs.py`) automatically detects it and skips the job. If the DB was reset (`--reset-failed`) but the marker file remains, the submit guard prevents resubmission and updates the job status to FAILED in the database.
+
 ## Concurrency & Database Handling
 
 The workflow system uses SQLite with **WAL (Write-Ahead Logging)** mode for better concurrent access:

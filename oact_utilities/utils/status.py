@@ -15,6 +15,56 @@ def _is_orca_atom_scf(filename: str) -> bool:
     return _ORCA_ATOM_RE.match(os.path.basename(filename)) is not None
 
 
+def _read_last_lines(file_path: str, maxlen: int = 10) -> list[str]:
+    """Read the last N lines of a file, handling gzip and encoding errors.
+
+    Args:
+        file_path: Path to the file (.out or .out.gz).
+        maxlen: Number of trailing lines to return.
+
+    Returns:
+        List of the last N lines. Empty list on read failure.
+    """
+    try:
+        if file_path.endswith(".gz"):
+            with gzip.open(file_path, "rt", errors="replace") as f:
+                return list(deque(f, maxlen=maxlen))
+        else:
+            with open(file_path, errors="replace") as f:
+                return list(deque(f, maxlen=maxlen))
+    except (OSError, UnicodeDecodeError, EOFError):
+        return []
+
+
+def parse_failure_reason(file_path: str) -> str | None:
+    """Extract the failure reason from an ORCA output file.
+
+    Scans the last 10 lines for known failure patterns
+    ("aborting the run", "Error"). Returns the first matching line
+    (stripped), or None if no failure pattern is found.
+
+    Args:
+        file_path: Path to the ORCA output file (.out or .out.gz).
+
+    Returns:
+        The failure line text, or None if no failure detected.
+    """
+    last_lines = _read_last_lines(file_path)
+    if not last_lines:
+        return None
+
+    # If the job succeeded, there is no failure reason
+    if any("ORCA TERMINATED NORMALLY" in line for line in last_lines):
+        return None
+
+    for line in last_lines:
+        if "aborting the run" in line:
+            return line.strip()
+        if "Error" in line:
+            return line.strip()
+    return None
+
+
 def check_file_termination(
     file_path: str, is_gzipped: bool = False, hours_cutoff=6
 ) -> int:
@@ -31,37 +81,29 @@ def check_file_termination(
     if is_gzipped is None:
         is_gzipped = file_path.endswith(".gz")
 
-    try:
-        # Use deque to efficiently read only last 10 lines without loading entire file
-        # Use errors='replace' to handle corrupted files with encoding issues
-        if is_gzipped or file_path.endswith(".gz"):
-            with gzip.open(file_path, "rt", errors="replace") as f:
-                last_lines = deque(f, maxlen=10)
-        else:
-            with open(file_path, errors="replace") as f:
-                last_lines = deque(f, maxlen=10)
-
-        # Check last 10 lines for definitive termination status.
-        # Content-based checks take priority over file age so that completed
-        # or failed jobs keep their correct status regardless of how old they are.
-        #
-        # IMPORTANT: scan ALL lines for success first, then for failure.
-        # ORCA can print benign lines containing "Error" (e.g.,
-        # "Some of the Onep Onebody Integrals have an Error larger than 1.0e-05")
-        # before the final "ORCA TERMINATED NORMALLY" line. A single-pass loop
-        # would short-circuit on the "Error" line and miss the success signal.
-        if any("ORCA TERMINATED NORMALLY" in line for line in last_lines):
-            return 1
-        for line in last_lines:
-            if "aborting the run" in line:
-                return -1
-            if "Error" in line:
-                return -1
-    except (OSError, UnicodeDecodeError, EOFError):
-        # Corrupted, incomplete, or inaccessible file — treat as still running
+    last_lines = _read_last_lines(file_path)
+    if not last_lines:
+        # Read failure (corrupted, inaccessible) -- treat as still running
         return 0
 
-    # No definitive signal found — check file age to detect stale/timed-out jobs
+    # Check last 10 lines for definitive termination status.
+    # Content-based checks take priority over file age so that completed
+    # or failed jobs keep their correct status regardless of how old they are.
+    #
+    # IMPORTANT: scan ALL lines for success first, then for failure.
+    # ORCA can print benign lines containing "Error" (e.g.,
+    # "Some of the Onep Onebody Integrals have an Error larger than 1.0e-05")
+    # before the final "ORCA TERMINATED NORMALLY" line. A single-pass loop
+    # would short-circuit on the "Error" line and miss the success signal.
+    if any("ORCA TERMINATED NORMALLY" in line for line in last_lines):
+        return 1
+    for line in last_lines:
+        if "aborting the run" in line:
+            return -1
+        if "Error" in line:
+            return -1
+
+    # No definitive signal found -- check file age to detect stale/timed-out jobs
     if os.path.getmtime(file_path) < (time.time() - hours_cutoff * 3600):
         return -2
 

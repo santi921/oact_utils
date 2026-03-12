@@ -53,6 +53,7 @@ class JobRecord:
     fail_count: int = 0
     wall_time: float | None = None
     n_cores: int | None = None
+    optimizer: str | None = None
 
 
 class ArchitectorWorkflow:
@@ -192,7 +193,7 @@ class ArchitectorWorkflow:
     _LIGHT_COLS = (
         "id, orig_index, elements, natoms, status, charge, spin, "
         "job_dir, max_forces, scf_steps, final_energy, error_message, "
-        "fail_count, wall_time, n_cores"
+        "fail_count, wall_time, n_cores, optimizer"
     )
 
     @staticmethod
@@ -222,6 +223,7 @@ class ArchitectorWorkflow:
                 fail_count=r[13] if len(r) > 13 and r[13] is not None else 0,
                 wall_time=r[14] if len(r) > 14 else None,
                 n_cores=r[15] if len(r) > 15 else None,
+                optimizer=r[16] if len(r) > 16 else None,
             )
         return JobRecord(
             id=r[0],
@@ -239,6 +241,7 @@ class ArchitectorWorkflow:
             fail_count=r[12] if len(r) > 12 and r[12] is not None else 0,
             wall_time=r[13] if len(r) > 13 else None,
             n_cores=r[14] if len(r) > 14 else None,
+            optimizer=r[15] if len(r) > 15 else None,
         )
 
     def get_jobs_by_status(
@@ -404,19 +407,33 @@ class ArchitectorWorkflow:
         self,
         job_ids: list[int],
         new_status: JobStatus,
+        increment_fail_count: bool = False,
+        error_message: str | None = None,
     ):
         """Update status for multiple jobs at once.
 
         Args:
             job_ids: List of database IDs.
             new_status: New status to set for all jobs.
+            increment_fail_count: If True, atomically increment fail_count by 1.
+            error_message: If provided, set error_message for all jobs.
         """
         if not job_ids:
             return
 
+        set_clauses = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+        params: list = [new_status.value]
+
+        if increment_fail_count:
+            set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+
+        if error_message is not None:
+            set_clauses.append("error_message = ?")
+            params.append(error_message)
+
         placeholders = ",".join("?" * len(job_ids))
-        query = f"UPDATE structures SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"
-        self._execute_with_retry(query, tuple([new_status.value] + job_ids))
+        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id IN ({placeholders})"
+        self._execute_with_retry(query, tuple(params + job_ids))
         self._commit_with_retry()
 
     def update_status_bulk_multi(

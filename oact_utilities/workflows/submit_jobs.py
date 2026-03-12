@@ -343,6 +343,61 @@ def write_slurm_job_file(
     return slurm_script
 
 
+def _filter_marker_jobs(
+    jobs: list,
+    root_dir: Path,
+    job_dir_pattern: str,
+    workflow: ArchitectorWorkflow,
+) -> list:
+    """Filter out jobs that have a .do_not_rerun.json marker file.
+
+    Checks the job directory (from DB or pattern-based path) for the marker.
+    Jobs with markers are batch-updated to FAILED status.
+
+    Args:
+        jobs: List of JobRecord objects to filter.
+        root_dir: Root directory for job directories.
+        job_dir_pattern: Pattern for job directory names.
+        workflow: ArchitectorWorkflow instance for DB updates.
+
+    Returns:
+        Filtered list of jobs (without marker-blocked ones).
+    """
+    skip_ids: list[int] = []
+    clean_jobs = []
+
+    for job in jobs:
+        # Try DB job_dir first, then pattern-based path
+        marker_found = False
+        if job.job_dir:
+            marker_path = Path(job.job_dir) / ".do_not_rerun.json"
+            if marker_path.exists():
+                marker_found = True
+        if not marker_found:
+            pattern = job_dir_pattern.replace(
+                "{orig_index}", str(job.orig_index)
+            ).replace("{id}", str(job.id))
+            candidate = root_dir / pattern / ".do_not_rerun.json"
+            if candidate.exists():
+                marker_found = True
+
+        if marker_found:
+            skip_ids.append(job.id)
+        else:
+            clean_jobs.append(job)
+
+    if skip_ids:
+        workflow.update_status_bulk(
+            skip_ids,
+            JobStatus.FAILED,
+            increment_fail_count=True,
+            error_message="Blocked by .do_not_rerun.json marker",
+        )
+        print(f"Skipped {len(skip_ids)} jobs due to .do_not_rerun.json marker")
+
+    return clean_jobs
+
+
 def filter_jobs_for_submission(
     workflow: ArchitectorWorkflow,
     num_jobs: int,
@@ -807,6 +862,15 @@ def submit_batch_parsl(
         print("No jobs available for submission after filtering")
         return []
 
+    # Filter out jobs with .do_not_rerun.json marker files
+    jobs_to_submit = _filter_marker_jobs(
+        jobs_to_submit, root_dir, job_dir_pattern, workflow
+    )
+
+    if not jobs_to_submit:
+        print("No jobs available after marker filtering")
+        return []
+
     # Claim jobs atomically BEFORE slow directory preparation to prevent
     # concurrent submitters from grabbing the same jobs (TOCTOU fix).
     submitted_ids = [j.id for j in jobs_to_submit]
@@ -1106,6 +1170,15 @@ def submit_batch(
     else:
         jobs_to_submit = ready_jobs[:batch_size]
     print(f"Preparing {len(jobs_to_submit)} jobs for submission...")
+
+    # Filter out jobs with .do_not_rerun.json marker files
+    jobs_to_submit = _filter_marker_jobs(
+        jobs_to_submit, root_dir, job_dir_pattern, workflow
+    )
+
+    if not jobs_to_submit:
+        print("No jobs available after marker filtering")
+        return []
 
     # Claim jobs atomically BEFORE slow directory preparation to prevent
     # concurrent submitters from grabbing the same jobs (TOCTOU fix).

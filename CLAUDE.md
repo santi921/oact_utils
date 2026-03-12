@@ -81,12 +81,13 @@ oact_utilities/
 │   ├── create.py               # ORCA input file generation (write_orca_inputs)
 │   ├── hpc.py                  # HPC job file writers (Flux, SLURM)
 │   ├── jobs.py                 # Job launching utilities
-│   ├── status.py               # Job termination/completion checking
+│   ├── status.py               # Job termination/completion checking, failure reason parsing
 │   ├── an66.py                 # Actinide-66 compound utilities
 │   ├── baselines.py            # Baseline calculation helpers
 │   └── table_summary.py        # Data table utilities
 ├── workflows/                  # High-throughput workflow management
 │   ├── architector_workflow.py # Workflow manager with SQLite tracking (WAL mode)
+│   ├── clean.py                # Job directory cleanup utility (scratch, basis, purge failed)
 │   ├── dashboard.py            # CLI dashboard for monitoring + parallel status updates
 │   ├── submit_jobs.py          # Batch job submission (Traditional + Parsl modes)
 │   ├── README.md               # Detailed workflow documentation
@@ -294,6 +295,9 @@ Status checking and visualization of running jobs:
 
 - `oact_utilities/workflows/dashboard.py` - Workflow dashboard with parallel status updates
 - `oact_utilities/utils/status.py` - Job termination/completion checks
+  - `check_file_termination()` - Content-based status detection (1=completed, 0=running, -1=failed, -2=timeout)
+  - `parse_failure_reason()` - Extract failure reason from last lines of ORCA output (shared by clean.py and dashboard)
+  - `_read_last_lines()` - Efficient tail-read helper using `deque(f, maxlen=N)`
 - `oact_utilities/utils/analysis.py` - Results parsing (forces, SCF, energies, timings, populations)
 
 **Dashboard CLI reference:**
@@ -330,6 +334,33 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --hours-cutoff H             # Hours before job is considered timed out (default: 24)
 ```
 
+### 3b. Job Directory Cleanup
+
+Removing scratch files from completed job directories:
+
+- `oact_utilities/workflows/clean.py` - Cleanup utility (standalone CLI)
+
+**Cleanup CLI reference:**
+
+```bash
+python -m oact_utilities.workflows.clean <db> <root_dir> [options]
+
+# Action flags (at least one required)
+--clean-tmp             # Remove .tmp, .core, orca_tmp_*/ from completed jobs
+--clean-bas             # Remove .bas, .bas[N] from completed jobs
+--clean-all             # Both --clean-tmp and --clean-bas
+--purge-failed          # Purge failed jobs (write .do_not_rerun.json marker, delete contents)
+
+# Execution
+--execute               # Actually delete (default: dry-run preview)
+
+# Performance / output
+--workers N             # Parallel workers (default: 4)
+--debug N               # Limit to N jobs
+--verbose / -v          # Per-file listings
+--hours-cutoff H        # Timeout threshold for revalidation (default: 24)
+```
+
 ### 4. Analysis & Parsing
 
 Parsing ORCA outputs, extracting energies, gradients, timings, populations:
@@ -361,6 +392,7 @@ Check these locations for common issues:
 - HPC scheduler output for resource issues
 - Workflow database `error_message` column for tracked failures
 - `fail_count` column to identify chronic failures
+- `parse_failure_reason()` in `status.py` extracts failure reasons from ORCA output last lines (used by `clean.py` for marker files)
 
 **Workflow debugging:**
 
@@ -404,6 +436,7 @@ Tests live in `tests/` with test data in `tests/files/`. When adding new functio
 - `test_hpc.py` - Job file generation
 - `test_io.py` - I/O utilities
 - `test_status.py` - Status checking and timeout detection
+- `test_clean.py` - Job directory cleanup (patterns, purge, submit guard)
 - `test_workflow.py` - Workflow DB operations
 - `test_workflow_parsers.py` - Parsers with real ORCA data
 - `test_submit_jobs.py` - Job submission

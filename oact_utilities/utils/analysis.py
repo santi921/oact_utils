@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import json
 import os
@@ -6,7 +8,7 @@ import time as time_mod
 import warnings
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from ase.io.trajectory import TrajectoryReader
@@ -228,7 +230,7 @@ def validate_spin_multiplicity(
     return spin
 
 
-def get_rmsd_start_final(root_dir: str) -> tuple:
+def get_rmsd_start_final(root_dir: str) -> dict:
     """
     Calculate RMSD between initial and final geometries from a trajectory file.
     Also extract energies from the trajectory or log file.
@@ -291,7 +293,7 @@ def get_rmsd_start_final(root_dir: str) -> tuple:
 
     atoms, _ = read_xyz_single_file(xyz_output)
     elements, coords = dict_to_numpy(atoms)
-    elements_ref, coords_ref = dict_to_numpy(initial_geom)
+    elements_ref, coords_ref = dict_to_numpy(initial_geom)  # type: ignore[arg-type]
 
     atomic_numbers = elements_to_atomic_numbers(elements)
     atomic_numbers_ref = elements_to_atomic_numbers(elements_ref)
@@ -393,7 +395,7 @@ def get_geo_forces(log_file: str) -> list:
     return list_info
 
 
-def parse_max_forces(output_file: str) -> float | None:
+def parse_max_forces(output_file: str | Path) -> float | None:
     """Extract the maximum force from an ORCA output file.
 
     Args:
@@ -508,7 +510,7 @@ def get_engrad(engrad_file: str) -> dict:
         coords_bohr, max_force_Eh_per_bohr
     """
 
-    dict_info = {}
+    dict_info: dict[str, Any] = {}
     # Stream line-by-line with iterator for lookahead (Issue #007)
     with open(engrad_file) as f:
         f_iter = iter(f)
@@ -545,10 +547,10 @@ def get_engrad(engrad_file: str) -> dict:
                 dict_info["coords_bohr"] = coords
 
     # Compute max force from gradient
-    gradient = dict_info.get("gradient_Eh_per_bohr")
-    if gradient and len(gradient) > 0:
+    grad_values = dict_info.get("gradient_Eh_per_bohr")
+    if grad_values and len(grad_values) > 0:
         try:
-            gradient_arr = np.array(gradient)
+            gradient_arr = np.array(grad_values)
             natoms = len(gradient_arr) // 3
 
             if len(gradient_arr) % 3 == 0 and natoms > 0:
@@ -561,7 +563,7 @@ def get_engrad(engrad_file: str) -> dict:
     return dict_info
 
 
-def find_timings_and_cores(log_file: str) -> list:
+def find_timings_and_cores(log_file: str) -> tuple[int | None, dict[str, float] | None]:
     """
     Extract number of processors and timing information from log file.
     Args:
@@ -581,6 +583,7 @@ def find_timings_and_cores(log_file: str) -> list:
 
     # iterate through files_out until you hit line with "nprocs" line
     # Use deque to keep only last N lines without loading full file (Issue #007)
+    nprocs: int | None = None
     with open(log_file) as f:
         # don't read whole file into memory
         for line in f:
@@ -619,7 +622,7 @@ def find_timings_and_cores(log_file: str) -> list:
 
 def get_full_info_all_jobs(
     root_dir: str, flux_tf: bool, check_many: bool = False, verbose: bool = False
-) -> list:
+) -> dict[str, dict[str, Any]]:
     """
     Get full performance and geometry info for all jobs in a root directory.
     Args:
@@ -628,7 +631,7 @@ def get_full_info_all_jobs(
     Returns:
         Dict[str, Any]: Dictionary with performance and geometry info for each job.
     """
-    perf_info = {}
+    perf_info: dict[str, dict[str, Any]] = {}
     # iterate through every subfolder in root_dir
     for folder in os.listdir(root_dir):
 
@@ -822,7 +825,7 @@ def actinide_neighbor_mean_distances(*args, **kwargs):
     return actinide_first_neighbor_distances(*args, **kwargs)
 
 
-def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> list:
+def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> dict[str, dict[str, Any]]:
     """
     Get full performance and geometry info for all jobs in a root directory.
     Args:
@@ -831,7 +834,7 @@ def get_sp_info_all_jobs(root_dir: str, flux_tf: bool) -> list:
     Returns:
         Dict[str, Any]: Dictionary with performance and geometry info for each job.
     """
-    perf_info = {}
+    perf_info: dict[str, dict[str, Any]] = {}
     # iterate through every subfolder in root_dir
     for folder in os.listdir(root_dir):
 
@@ -921,7 +924,7 @@ def get_energy_from_log_file(log_file):
     return energy_arr
 
 
-def parse_final_energy(output_file: str) -> float | None:
+def parse_final_energy(output_file: str | Path) -> float | None:
     """Extract the final energy from an ORCA output file.
 
     Args:
@@ -1000,7 +1003,7 @@ def parse_mulliken_population(
     output_file: str | Path,
     expected_charge: int | None = None,
     expected_multiplicity: int | None = None,
-) -> dict[str, list] | None:
+) -> dict[str, Any] | None:
     """Extract Mulliken population analysis from an ORCA output file.
 
     Parses both Mulliken and Loewdin atomic charges and spin populations.
@@ -1033,7 +1036,7 @@ def parse_mulliken_population(
         return None  # Invalid path format
 
     try:
-        result: dict[str, list] = {
+        result: dict[str, Any] = {
             "mulliken_charges": [],
             "mulliken_spins": [],
             "loewdin_charges": [],
@@ -1356,7 +1359,7 @@ def _build_population_result(
     loewdin_data: dict[str, list],
     expected_charge: int | None,
     expected_multiplicity: int | None,
-) -> dict[str, list] | None:
+) -> dict[str, Any] | None:
     """Build population analysis result dict from parsed data.
 
     Args:
@@ -1368,7 +1371,7 @@ def _build_population_result(
     Returns:
         Population analysis dict or None if no data found.
     """
-    result: dict[str, list] = {
+    result: dict[str, Any] = {
         "mulliken_charges": mulliken_data["charges"],
         "mulliken_spins": mulliken_data["spins"],
         "loewdin_charges": loewdin_data["charges"],
@@ -1416,7 +1419,7 @@ def write_orca_cache(cache_path: Path, metrics: dict, source_mtime: float) -> No
             tmp.unlink()
 
 
-def read_orca_cache(cache_path: Path, source_mtime: float) -> dict | None:
+def read_orca_cache(cache_path: Path, source_mtime: float) -> dict[str, Any] | None:
     """Read cached metrics from JSON file.
 
     Returns None if the cache is missing, stale, or corrupt, triggering
@@ -1432,7 +1435,7 @@ def read_orca_cache(cache_path: Path, source_mtime: float) -> dict | None:
     try:
         if not cache_path.exists():
             return None
-        data = json.loads(cache_path.read_text())
+        data: dict[str, Any] = json.loads(cache_path.read_text())
         if data.get("_source_mtime", 0) < source_mtime:
             return None
         data.pop("_source_mtime", None)
@@ -1699,19 +1702,20 @@ def _parse_sella_status(status_file: Path) -> dict[str, str | float | int]:
 
 def parse_sella_log(sella_log_file: str, filter: bool = False) -> dict:
     """
-    Check if a Sella optimization has completed successfully by examining the log file.
+    Parse a Sella optimization log file for steps, forces, and energies.
 
     Args:
         sella_log_file (str): Path to the Sella log file.
     Returns:
-        bool: True if the optimization completed successfully, False otherwise.
+        dict: Parsed data with keys 'steps', 'forces', 'energy_frames',
+              or empty dict if file doesn't exist or has no data.
 
     """
 
     # check if sella.log exists in root_dir
 
     if not os.path.exists(sella_log_file):
-        return False
+        return {}
 
     # Stream line-by-line instead of loading full file (Issue #007)
     forces = []
@@ -1735,7 +1739,7 @@ def parse_sella_log(sella_log_file: str, filter: bool = False) -> dict:
 
 def get_full_info_all_jobs_sella(
     root_dir: str, verbose: bool = False, fmax: float = 0.05
-) -> list:
+) -> dict[str, dict[str, Any]]:
     """
     Get full performance and geometry info for all jobs in a root directory.
     Args:
@@ -1745,7 +1749,7 @@ def get_full_info_all_jobs_sella(
         Dict[str, Any]: Dictionary with performance and geometry info for each job.
     """
 
-    perf_info = {}
+    perf_info: dict[str, dict[str, Any]] = {}
     # iterate through every subfolder in root_dir
     for folder in os.listdir(root_dir):
 
@@ -1838,7 +1842,7 @@ def get_full_info_all_jobs_sella(
 
 
 def plot_element_vs_lot(
-    df: "pd.DataFrame",
+    df: pd.DataFrame,
     element_col: str = "element",
     lot_col: str = "lot",
     value_col: str = "distance",
@@ -1846,8 +1850,8 @@ def plot_element_vs_lot(
     lot_styles: dict[str, dict] | None = None,
     ylabel: str | None = None,
     title: str | None = None,
-    ax: "plt.Axes | None" = None,
-) -> "plt.Axes":
+    ax: plt.Axes | None = None,
+) -> plt.Axes:
     """
     Plot a value (e.g., bond distance) vs element, comparing levels of theory.
 

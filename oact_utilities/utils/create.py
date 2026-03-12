@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 
 from ase import Atoms
@@ -38,12 +40,12 @@ def atomic_numbers_to_elements(atomic_numbers: list[int]) -> list[str]:
 
 def read_geom_from_inp_file(
     inp_file: str, ase_format_tf: bool = False
-) -> list[dict[str, float | str]]:
+) -> list[dict[str, float | str]] | Atoms:
     with open(inp_file) as f:
         lines = f.readlines()
 
     geom_start = False
-    atoms = []
+    atoms: list[dict[str, float | str]] | Atoms = []
 
     if ase_format_tf:
         syms_list = []
@@ -80,8 +82,8 @@ def read_geom_from_inp_file(
         # print(syms_list)
         # print(coords_list)
         atoms = Atoms(symbols=syms_list, positions=coords_list)
-        atoms.charge = int(charge)
-        atoms.spin = int(spin)
+        atoms.charge = int(charge)  # type: ignore[attr-defined]
+        atoms.spin = int(spin)  # type: ignore[attr-defined]
 
     return atoms
 
@@ -109,7 +111,7 @@ def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], s
 
     num_atoms = int(lines[0].strip())
     comment = lines[1].strip()
-    atoms = []
+    atoms: list[dict[str, float | str]] = []
     for line in lines[2 : 2 + num_atoms]:
         parts = line.split()
         element = parts[0]
@@ -120,7 +122,7 @@ def read_xyz_single_file(xyz_file: str) -> tuple[list[dict[str, float | str]], s
     return atoms, comment
 
 
-def read_xyz_from_orca(xyz_file: str) -> Atoms:
+def read_xyz_from_orca(xyz_file: str) -> tuple[Atoms, str]:
     with open(xyz_file) as f:
         lines = f.readlines()
     # find first non-empty line
