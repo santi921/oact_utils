@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from ..utils.status import check_job_termination
+from ..utils.status import check_job_termination, parse_failure_reason
 from .architector_workflow import ArchitectorWorkflow, JobStatus
 
 
@@ -816,6 +816,163 @@ def reset_missing_jobs(
     return reset_count
 
 
+# Status code -> JobStatus mapping for check_job_termination results
+_DISK_STATUS_MAP: dict[int, JobStatus] = {
+    1: JobStatus.COMPLETED,
+    -1: JobStatus.FAILED,
+    -2: JobStatus.TIMEOUT,
+    0: JobStatus.TO_RUN,  # Ambiguous -> safe default to keep things moving
+}
+
+
+def fix_unlinked_jobs(
+    workflow: ArchitectorWorkflow,
+    root_dir: str | Path,
+    job_dir_pattern: str = "job_{orig_index}",
+    hours_cutoff: float = 24.0,
+    verbose: bool = False,
+    max_jobs: int | None = None,
+    max_retries: int | None = None,
+) -> dict[str, int]:
+    """Repair NULL job_dir entries by auto-linking or resetting.
+
+    For each job where job_dir is NULL (excluding running jobs):
+    1. Try to find a matching directory using job_dir_pattern
+    2. If found: link it and revalidate status from disk
+    3. If not found: reset to TO_RUN
+
+    Disk is the source of truth -- DB status is always updated to match.
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        root_dir: Root directory containing job subdirectories.
+        job_dir_pattern: Pattern for job directory names.
+        hours_cutoff: Hours before considering a job timed out.
+        verbose: Print per-job details.
+        max_jobs: Limit to N jobs (for --debug).
+        max_retries: Only reset jobs with fail_count < this value.
+
+    Returns:
+        Summary dict with counts: linked, reset, skipped.
+    """
+    root = Path(root_dir)
+    counts = {"linked": 0, "reset": 0, "skipped": 0}
+
+    # Query all non-running jobs with NULL job_dir
+    all_statuses = [
+        JobStatus.TO_RUN,
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+        JobStatus.TIMEOUT,
+    ]
+    jobs = workflow.get_jobs_by_status(all_statuses, include_geometry=False)
+    unlinked = [j for j in jobs if j.job_dir is None]
+
+    if max_jobs is not None:
+        unlinked = unlinked[:max_jobs]
+
+    if not unlinked:
+        print("No unlinked jobs found (all jobs have job_dir set).")
+        return counts
+
+    print(f"Found {len(unlinked)} jobs with NULL job_dir")
+
+    # Batch updates: accumulate (job_id, job_dir, new_status, error_msg,
+    # increment_fail) tuples, commit once at the end.
+    updates: list[tuple[int, str | None, JobStatus, str | None, bool]] = []
+
+    for job in unlinked:
+        job_dir_name = job_dir_pattern.format(
+            orig_index=job.orig_index,
+            id=job.id,
+        )
+        job_dir = root / job_dir_name
+
+        if job_dir.is_dir():
+            # Directory exists -- link and revalidate from disk
+            disk_status_code = check_job_termination(
+                str(job_dir), hours_cutoff=hours_cutoff
+            )
+            new_status = _DISK_STATUS_MAP.get(disk_status_code, JobStatus.TO_RUN)
+
+            error_msg = None
+            if new_status == JobStatus.FAILED:
+                # Find the .out file for parse_failure_reason
+                out_files = [
+                    f
+                    for f in job_dir.iterdir()
+                    if f.suffix == ".out" or f.name.endswith(".out.gz")
+                ]
+                if out_files:
+                    error_msg = parse_failure_reason(str(out_files[0]))
+
+            updates.append((job.id, str(job_dir), new_status, error_msg, False))
+            counts["linked"] += 1
+
+            if verbose:
+                status_label = new_status.value
+                print(
+                    f"  Link job {job.id} (orig_index={job.orig_index}) "
+                    f"-> {job_dir_name} [{status_label}]"
+                )
+        else:
+            # No directory found -- check max_retries before resetting
+            if max_retries is not None and (job.fail_count or 0) >= max_retries:
+                counts["skipped"] += 1
+                if verbose:
+                    print(
+                        f"  Skip job {job.id} (orig_index={job.orig_index}) "
+                        f"-- fail_count {job.fail_count} >= max_retries {max_retries}"
+                    )
+                continue
+
+            updates.append(
+                (
+                    job.id,
+                    None,
+                    JobStatus.TO_RUN,
+                    "No directory found -- reset by --fix-unlinked",
+                    True,  # increment_fail_count
+                )
+            )
+            counts["reset"] += 1
+
+            if verbose:
+                print(
+                    f"  Reset job {job.id} (orig_index={job.orig_index}) "
+                    f"-> to_run (no directory)"
+                )
+
+    # Batch commit all updates
+    conn = workflow.conn
+    for job_id, job_dir_str, new_status, error_msg, inc_fail in updates:
+        # Update job_dir if we found a directory
+        if job_dir_str is not None:
+            set_clauses = ["job_dir = ?"]
+            values: list[str | int] = [job_dir_str]
+            set_clauses.append("status = ?")
+            values.append(new_status.value)
+            if error_msg is not None:
+                set_clauses.append("error_message = ?")
+                values.append(error_msg)
+            query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
+            values.append(job_id)
+            conn.execute(query, tuple(values))
+        else:
+            # Reset to to_run
+            set_clauses = ["status = ?", "error_message = ?"]
+            values = [new_status.value, error_msg or ""]
+            if inc_fail:
+                set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+            query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
+            values.append(job_id)
+            conn.execute(query, tuple(values))
+
+    conn.commit()
+
+    return counts
+
+
 def update_all_statuses(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
@@ -1082,6 +1239,12 @@ def main():
         help="Reset jobs whose directories no longer exist back to TO_RUN. Requires root directory path.",
     )
     parser.add_argument(
+        "--fix-unlinked",
+        metavar="ROOT_DIR",
+        default=None,
+        help="Repair jobs with NULL job_dir: auto-link to directories or reset to TO_RUN. Requires root directory path.",
+    )
+    parser.add_argument(
         "--include-timeout-in-reset",
         action="store_true",
         help="When using --reset-failed, also reset timeout jobs",
@@ -1242,6 +1405,23 @@ def main():
             job_dir_pattern=args.job_dir_pattern,
         )
         print(f"\nReset {count} jobs with missing directories to TO_RUN")
+
+    # Fix unlinked jobs (NULL job_dir) if requested
+    if args.fix_unlinked:
+        result = fix_unlinked_jobs(
+            workflow,
+            args.fix_unlinked,
+            job_dir_pattern=args.job_dir_pattern,
+            hours_cutoff=args.hours_cutoff,
+            verbose=getattr(args, "verbose", False),
+            max_jobs=args.debug if hasattr(args, "debug") else None,
+            max_retries=args.max_retries,
+        )
+        print(
+            f"\nFix-unlinked: {result['linked']} linked, "
+            f"{result['reset']} reset to TO_RUN, "
+            f"{result['skipped']} skipped"
+        )
 
     # Always show summary
     print_summary(workflow)
