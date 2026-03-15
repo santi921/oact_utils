@@ -174,7 +174,7 @@ class ArchitectorWorkflow:
                 cur.execute(query, params)
                 return cur
             except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() and attempt < max_retries - 1:
+                if "lock" in str(e).lower() and attempt < max_retries - 1:
                     # Roll back any half-started transaction before retrying
                     try:
                         self.conn.rollback()
@@ -201,7 +201,7 @@ class ArchitectorWorkflow:
                 self.conn.commit()
                 return
             except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() and attempt < max_retries - 1:
+                if "lock" in str(e).lower() and attempt < max_retries - 1:
                     delay = min(0.1 * (2**attempt), 5.0)
                     jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
