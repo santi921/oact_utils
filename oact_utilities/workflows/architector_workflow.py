@@ -88,20 +88,33 @@ class ArchitectorWorkflow:
         """Get a database connection with WAL mode enabled if possible.
 
         Falls back to DELETE journal mode on network filesystems (NFS, Lustre)
-        that don't support WAL locking protocols.
+        that don't support WAL locking protocols. Retries on transient lock
+        errors that occur when another process is mid-write during connect.
         """
-        conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError:
-            # Network filesystems (NFS/Lustre) can fail WAL with various
-            # errors: "locking protocol", "database is locked", etc.
-            # Fall back to DELETE journal mode unconditionally.
+        max_retries = 10
+        for attempt in range(max_retries):
             try:
-                conn.execute("PRAGMA journal_mode=DELETE")
-            except sqlite3.OperationalError:
-                pass  # Proceed with whatever journal mode is active
-        return conn
+                conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.OperationalError:
+                    # Network filesystems (NFS/Lustre) can fail WAL with various
+                    # errors: "locking protocol", "database is locked", etc.
+                    # Fall back to DELETE journal mode unconditionally.
+                    try:
+                        conn.execute("PRAGMA journal_mode=DELETE")
+                    except sqlite3.OperationalError:
+                        pass  # Proceed with whatever journal mode is active
+                return conn
+            except sqlite3.OperationalError as e:
+                if attempt < max_retries - 1 and (
+                    "locked" in str(e).lower() or "locking protocol" in str(e).lower()
+                ):
+                    delay = min(0.5 * (2**attempt), 5.0)
+                    jitter = random.uniform(0, delay * 0.2)
+                    time.sleep(delay + jitter)
+                    continue
+                raise
 
     def _ensure_schema(self) -> None:
         """Auto-migrate schema by adding missing columns.
@@ -114,7 +127,7 @@ class ArchitectorWorkflow:
         that arises when another process adds the column between our
         PRAGMA check and the ALTER TABLE statement.
         """
-        cur = self.conn.execute("PRAGMA table_info(structures)")
+        cur = self._execute_with_retry("PRAGMA table_info(structures)")
         existing_cols = {row[1] for row in cur.fetchall()}
         if not existing_cols:
             raise RuntimeError(
@@ -124,7 +137,7 @@ class ArchitectorWorkflow:
             )
         if "optimizer" not in existing_cols:
             try:
-                self.conn.execute(
+                self._execute_with_retry(
                     "ALTER TABLE structures ADD COLUMN optimizer TEXT DEFAULT NULL"
                 )
                 self._commit_with_retry()
