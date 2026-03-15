@@ -107,9 +107,7 @@ class ArchitectorWorkflow:
                         pass  # Proceed with whatever journal mode is active
                 return conn
             except sqlite3.OperationalError as e:
-                if attempt < max_retries - 1 and (
-                    "locked" in str(e).lower() or "locking protocol" in str(e).lower()
-                ):
+                if attempt < max_retries - 1 and ("lock" in str(e).lower()):
                     delay = min(0.5 * (2**attempt), 5.0)
                     jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
