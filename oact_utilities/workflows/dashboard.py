@@ -1009,8 +1009,8 @@ def fix_unlinked_jobs(
                     f"-> to_run (no directory)"
                 )
 
-    # Phase 3: Batch commit all updates (single commit for Lustre)
-    conn = workflow.conn
+    # Phase 3: Batch commit all updates (single commit for Lustre).
+    # Uses _execute_with_retry for lock safety on network filesystems.
     for job_id, job_dir_str, new_status, error_msg, inc_fail in updates:
         if job_dir_str is not None:
             set_clauses = ["job_dir = ?"]
@@ -1022,7 +1022,7 @@ def fix_unlinked_jobs(
                 values.append(error_msg)
             query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
             values.append(job_id)
-            conn.execute(query, tuple(values))
+            workflow._execute_with_retry(query, tuple(values))
         else:
             set_clauses = ["status = ?", "error_message = ?"]
             values = [new_status.value, error_msg or ""]
@@ -1030,9 +1030,9 @@ def fix_unlinked_jobs(
                 set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
             query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
             values.append(job_id)
-            conn.execute(query, tuple(values))
+            workflow._execute_with_retry(query, tuple(values))
 
-    conn.commit()
+    workflow._commit_with_retry()
 
     return counts
 

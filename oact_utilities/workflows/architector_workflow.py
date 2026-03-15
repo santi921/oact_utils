@@ -85,29 +85,48 @@ class ArchitectorWorkflow:
         self._ensure_schema()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection with WAL mode enabled if possible.
+        """Get a database connection using DELETE journal mode.
 
-        Falls back to DELETE journal mode on network filesystems (NFS, Lustre)
-        that don't support WAL locking protocols. Retries on transient lock
-        errors that occur when another process is mid-write during connect.
+        WAL mode is intentionally avoided: parallel/network filesystems
+        (Lustre, VAST, GPFS) do not reliably support the shared-memory
+        locking that WAL requires. A single crashed WAL process leaves
+        stale -wal/-shm files that poison every subsequent connection.
+
+        DELETE journal mode works everywhere and is safe for the
+        single-writer-at-a-time pattern enforced by BEGIN IMMEDIATE.
+
+        Retries with exponential backoff on transient lock errors that
+        occur when another process holds the write lock.
         """
         max_retries = 10
         for attempt in range(max_retries):
             try:
                 conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
-                try:
-                    conn.execute("PRAGMA journal_mode=WAL")
-                except sqlite3.OperationalError:
-                    # Network filesystems (NFS/Lustre) can fail WAL with various
-                    # errors: "locking protocol", "database is locked", etc.
-                    # Fall back to DELETE journal mode unconditionally.
-                    try:
-                        conn.execute("PRAGMA journal_mode=DELETE")
-                    except sqlite3.OperationalError:
-                        pass  # Proceed with whatever journal mode is active
+                # Short busy timeout so SQLite returns SQLITE_BUSY quickly,
+                # letting the Python retry loop handle backoff. Avoids
+                # double-waiting (SQLite busy_timeout + Python backoff).
+                conn.execute("PRAGMA busy_timeout=5000")
+                # Always use DELETE journal mode for network filesystem safety.
+                # If the DB was previously in WAL mode, this converts it back
+                # (requires no other connections to be open).
+                result = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+                if result and result[0].lower() != "delete":
+                    # Switch failed (another connection holds the DB open).
+                    # This is common on first access after WAL was set.
+                    # Close and retry so the stale -wal/-shm can be cleared.
+                    conn.close()
+                    if attempt < max_retries - 1:
+                        delay = min(0.5 * (2**attempt), 5.0)
+                        jitter = random.uniform(0, delay * 0.2)
+                        time.sleep(delay + jitter)
+                        continue
+                    # Last attempt: proceed with whatever mode is active
+                    # rather than crashing entirely.
+                    conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
+                    conn.execute("PRAGMA busy_timeout=5000")
                 return conn
             except sqlite3.OperationalError as e:
-                if attempt < max_retries - 1 and ("lock" in str(e).lower()):
+                if self._is_retryable(e) and attempt < max_retries - 1:
                     delay = min(0.5 * (2**attempt), 5.0)
                     jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
@@ -145,6 +164,15 @@ class ArchitectorWorkflow:
                 else:
                     raise
 
+    @staticmethod
+    def _is_retryable(e: sqlite3.OperationalError) -> bool:
+        """Check if an OperationalError is a transient lock/busy error."""
+        msg = str(e).lower()
+        return any(
+            token in msg
+            for token in ("lock", "busy", "locking protocol", "database is locked")
+        )
+
     def _execute_with_retry(
         self, query: str, params: tuple = (), max_retries: int = 20
     ):
@@ -172,7 +200,7 @@ class ArchitectorWorkflow:
                 cur.execute(query, params)
                 return cur
             except sqlite3.OperationalError as e:
-                if "lock" in str(e).lower() and attempt < max_retries - 1:
+                if self._is_retryable(e) and attempt < max_retries - 1:
                     # Roll back any half-started transaction before retrying
                     try:
                         self.conn.rollback()
@@ -199,7 +227,7 @@ class ArchitectorWorkflow:
                 self.conn.commit()
                 return
             except sqlite3.OperationalError as e:
-                if "lock" in str(e).lower() and attempt < max_retries - 1:
+                if self._is_retryable(e) and attempt < max_retries - 1:
                     delay = min(0.1 * (2**attempt), 5.0)
                     jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
@@ -406,7 +434,6 @@ class ArchitectorWorkflow:
         if not metrics_list:
             return
 
-        cur = self.conn.cursor()
         for metrics in metrics_list:
             updates = []
             values = []
@@ -429,7 +456,7 @@ class ArchitectorWorkflow:
                 updates.append("updated_at = CURRENT_TIMESTAMP")
                 query = f"UPDATE structures SET {', '.join(updates)} WHERE id = ?"
                 values.append(job_id)
-                cur.execute(query, tuple(values))
+                self._execute_with_retry(query, tuple(values))
 
         self._commit_with_retry()
 
