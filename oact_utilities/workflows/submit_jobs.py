@@ -7,9 +7,11 @@ to HPC systems (Flux or SLURM). Jobs generate ORCA input files directly.
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Literal, TypedDict
 
@@ -678,7 +680,11 @@ def build_parsl_config_flux(
         provider=provider,
     )
 
-    return Config(executors=[executor])
+    # Use a unique run_dir per process to avoid collisions when multiple
+    # Parsl instances launch concurrently on the same filesystem.
+    run_dir = f"runinfo/run_{os.getpid()}_{int(time.time())}"
+
+    return Config(executors=[executor], run_dir=run_dir)
 
 
 def build_parsl_config_slurm(
@@ -761,7 +767,11 @@ def build_parsl_config_slurm(
         provider=provider,
     )
 
-    return Config(executors=[executor])
+    # Use a unique run_dir per process to avoid collisions when multiple
+    # Parsl instances launch concurrently on the same filesystem.
+    run_dir = f"runinfo/run_{os.getpid()}_{int(time.time())}"
+
+    return Config(executors=[executor], run_dir=run_dir)
 
 
 def submit_batch_parsl(
