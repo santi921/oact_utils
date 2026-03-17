@@ -7,9 +7,11 @@ to HPC systems (Flux or SLURM). Jobs generate ORCA input files directly.
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Literal, TypedDict
 
@@ -526,6 +528,20 @@ if PARSL_AVAILABLE:
         # uses /dev/shm files whose names can collide.
         env["OMPI_MCA_btl"] = "self,tcp"
 
+        # Restrict ORCA's mpirun to the local node only.  In multi-node
+        # SLURM blocks, mpirun would otherwise read the SLURM hostfile and
+        # place processes on neighboring nodes where different ORCA instances
+        # are running -- silently corrupting results.  These env vars are
+        # set unconditionally: harmless on single-node / Flux, protective
+        # on multi-node SLURM.
+        # DO NOT REMOVE -- see docs/plans/2026-03-16-feat-multi-node-slurm-parsl-support-plan.md
+        import socket
+
+        local_hostname = os.environ.get("SLURMD_NODENAME", socket.gethostname())
+        env["OMPI_MCA_orte_default_hostfile"] = "/dev/null"
+        env["SLURM_NODELIST"] = local_hostname
+        env["SLURM_NNODES"] = "1"
+
         start_time = time.time()
 
         proc = None
@@ -678,12 +694,17 @@ def build_parsl_config_flux(
         provider=provider,
     )
 
-    return Config(executors=[executor])
+    # Use a unique run_dir per process to avoid collisions when multiple
+    # Parsl instances launch concurrently on the same filesystem.
+    run_dir = f"runinfo/run_{os.getpid()}_{int(time.time())}"
+
+    return Config(executors=[executor], run_dir=run_dir)
 
 
 def build_parsl_config_slurm(
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    nodes_per_block: int = 1,
     max_blocks: int = 10,
     init_blocks: int = 2,
     min_blocks: int = 1,
@@ -697,15 +718,24 @@ def build_parsl_config_slurm(
     """Build Parsl Config for SLURM multi-node execution.
 
     Uses SlurmProvider to auto-provision worker nodes via SLURM.
-    Each node runs multiple ORCA workers concurrently.
+    Each block is a SLURM job with ``nodes_per_block`` nodes, and each
+    node runs ``max_workers`` ORCA workers concurrently.
+
+    When ``nodes_per_block > 1``, SrunLauncher is used so that Parsl
+    distributes worker managers across all nodes in the block.  When
+    ``nodes_per_block == 1`` (default), SimpleLauncher is used for
+    backwards compatibility.
 
     Args:
         max_workers: Maximum concurrent workers per node.
         cores_per_worker: CPU cores per worker (must match ORCA nprocs).
-        max_blocks: Maximum number of SLURM nodes to provision.
-        init_blocks: Number of nodes to request at startup.
-        min_blocks: Minimum number of nodes to keep alive.
-        walltime_hours: Walltime per node allocation in hours.
+        nodes_per_block: Nodes per SLURM block. >1 enables multi-node
+            blocks with SrunLauncher.  Total capacity is
+            ``max_blocks * nodes_per_block * max_workers``.
+        max_blocks: Maximum number of SLURM blocks to provision.
+        init_blocks: Number of blocks to request at startup.
+        min_blocks: Minimum number of blocks to keep alive.
+        walltime_hours: Walltime per block allocation in hours.
         qos: SLURM QOS.
         account: SLURM account/allocation.
         conda_env: Conda environment name.
@@ -713,7 +743,7 @@ def build_parsl_config_slurm(
         ld_library_path: Override LD_LIBRARY_PATH.
 
     Returns:
-        Parsl Config object
+        Parsl Config object.
     """
     if not PARSL_AVAILABLE:
         raise ImportError(
@@ -722,7 +752,6 @@ def build_parsl_config_slurm(
 
     from parsl.config import Config
     from parsl.executors import HighThroughputExecutor
-    from parsl.launchers import SimpleLauncher
     from parsl.providers import SlurmProvider
 
     ld_lib = ld_library_path or f"{conda_base}/envs/{conda_env}/lib"
@@ -734,15 +763,30 @@ def build_parsl_config_slurm(
         f"export OMP_NUM_THREADS=1\n"
     )
 
-    ntasks = cores_per_worker * max_workers
-    scheduler_options = (
-        f"#SBATCH --ntasks-per-node={ntasks}\n" f"#SBATCH --cpus-per-task=1\n"
-    )
+    # Launcher and scheduler_options differ for single-node vs multi-node.
+    if nodes_per_block > 1:
+        from parsl.launchers import SrunLauncher
+
+        # SrunLauncher: srun starts 1 Parsl worker manager per node.
+        # The worker manager forks max_workers processes internally.
+        launcher = SrunLauncher()
+        # No extra scheduler_options needed -- exclusive=True on the
+        # provider already adds --exclusive to the SBATCH script.
+        scheduler_options = ""
+    else:
+        from parsl.launchers import SimpleLauncher
+
+        # SimpleLauncher: no srun, specify total tasks per node directly.
+        launcher = SimpleLauncher()
+        ntasks = cores_per_worker * max_workers
+        scheduler_options = (
+            f"#SBATCH --ntasks-per-node={ntasks}\n" f"#SBATCH --cpus-per-task=1\n"
+        )
 
     provider = SlurmProvider(
         qos=qos,
         account=account,
-        nodes_per_block=1,
+        nodes_per_block=nodes_per_block,
         init_blocks=init_blocks,
         min_blocks=min_blocks,
         max_blocks=max_blocks,
@@ -750,7 +794,7 @@ def build_parsl_config_slurm(
         worker_init=worker_init,
         scheduler_options=scheduler_options,
         exclusive=True,
-        launcher=SimpleLauncher(),  # Not SrunLauncher — ORCA uses internal mpirun
+        launcher=launcher,
         parallelism=1.0,
     )
 
@@ -758,10 +802,15 @@ def build_parsl_config_slurm(
         label="slurm_htex",
         cores_per_worker=cores_per_worker,
         max_workers_per_node=max_workers,
+        cpu_affinity="block",
         provider=provider,
     )
 
-    return Config(executors=[executor])
+    # Use a unique run_dir per process to avoid collisions when multiple
+    # Parsl instances launch concurrently on the same filesystem.
+    run_dir = f"runinfo/run_{os.getpid()}_{int(time.time())}"
+
+    return Config(executors=[executor], run_dir=run_dir)
 
 
 def submit_batch_parsl(
@@ -782,6 +831,7 @@ def submit_batch_parsl(
     max_fail_count: int | None = None,
     timeout_seconds: int = 72000,
     randomize: bool = True,
+    nodes_per_block: int = 1,
     max_blocks: int = 10,
     init_blocks: int = 2,
     min_blocks: int = 1,
@@ -810,10 +860,12 @@ def submit_batch_parsl(
         max_fail_count: Skip jobs with fail_count >= this value
         timeout_seconds: Job timeout in seconds (default: 72000 = 20 hours)
         randomize: Randomize job selection order (default: True)
-        max_blocks: (SLURM) Maximum SLURM nodes to provision.
-        init_blocks: (SLURM) Nodes to request at startup.
-        min_blocks: (SLURM) Minimum nodes to keep alive.
-        walltime_hours: (SLURM) Walltime per node allocation in hours.
+        nodes_per_block: (SLURM) Nodes per SLURM block. >1 enables
+            multi-node blocks with SrunLauncher.
+        max_blocks: (SLURM) Maximum SLURM blocks to provision.
+        init_blocks: (SLURM) Blocks to request at startup.
+        min_blocks: (SLURM) Minimum blocks to keep alive.
+        walltime_hours: (SLURM) Walltime per block allocation in hours.
         qos: (SLURM) SLURM QOS.
         account: (SLURM) SLURM account/allocation.
 
@@ -917,12 +969,21 @@ def submit_batch_parsl(
 
     # Build Parsl configuration
     if scheduler.lower() == "slurm":
+        total_nodes = max_blocks * nodes_per_block
+        total_workers = total_nodes * max_workers
         print(
-            f"\nBuilding Parsl config (SLURM multi-node, up to {max_blocks} nodes)..."
+            f"\nParsl SLURM config: {max_blocks} blocks x {nodes_per_block} "
+            f"nodes/block x {max_workers} workers/node "
+            f"= {total_workers} max concurrent jobs"
+        )
+        print(
+            f"Each worker: {cores_per_worker} cores, "
+            f"job timeout: {timeout_seconds}s"
         )
         parsl_config = build_parsl_config_slurm(
             max_workers=max_workers,
             cores_per_worker=cores_per_worker,
+            nodes_per_block=nodes_per_block,
             max_blocks=max_blocks,
             init_blocks=init_blocks,
             min_blocks=min_blocks,
@@ -1368,10 +1429,17 @@ def main():
         "SLURM Parsl Options (--use-parsl --scheduler slurm)"
     )
     slurm_parsl_group.add_argument(
+        "--nodes-per-block",
+        type=int,
+        default=1,
+        help="Nodes per SLURM block. >1 enables multi-node blocks with SrunLauncher. "
+        "Total capacity = max_blocks * nodes_per_block * max_workers. (default: 1)",
+    )
+    slurm_parsl_group.add_argument(
         "--max-blocks",
         type=int,
         default=10,
-        help="Maximum SLURM nodes to provision (default: 10)",
+        help="Maximum SLURM blocks to provision (default: 10)",
     )
     slurm_parsl_group.add_argument(
         "--init-blocks",
@@ -1502,6 +1570,15 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate multi-node Parsl args
+    if args.nodes_per_block < 1:
+        parser.error("--nodes-per-block must be >= 1")
+    if args.scheduler == "flux" and args.nodes_per_block > 1:
+        parser.error(
+            "--nodes-per-block > 1 is only supported with --scheduler slurm. "
+            "Flux uses LocalProvider which does not support multi-node blocks."
+        )
+
     # Validate optimizer-specific args
     if args.optimizer == "orca" and args.max_opt_steps is not None:
         parser.error("--max-opt-steps is only valid with --optimizer sella")
@@ -1563,6 +1640,7 @@ def main():
             max_fail_count=args.max_fail_count,
             timeout_seconds=args.job_timeout,
             randomize=True,
+            nodes_per_block=args.nodes_per_block,
             max_blocks=args.max_blocks,
             init_blocks=args.init_blocks,
             min_blocks=args.min_blocks,

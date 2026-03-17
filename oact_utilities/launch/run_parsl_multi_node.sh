@@ -31,10 +31,11 @@ JOB_TIMEOUT=432000          # 5 days per job
 MAX_FAIL_COUNT=3
 
 # SLURM scale-out settings
-MAX_BLOCKS=10              # max SLURM nodes Parsl can provision
-INIT_BLOCKS=2              # nodes requested at startup
-MIN_BLOCKS=1               # minimum nodes to keep alive
-WALLTIME_HOURS=120          # walltime per worker node allocation (update)
+NODES_PER_BLOCK=1          # nodes per SLURM block (>1 enables multi-node with SrunLauncher)
+MAX_BLOCKS=10              # max SLURM blocks Parsl can provision
+INIT_BLOCKS=2              # blocks requested at startup
+MIN_BLOCKS=1               # minimum blocks to keep alive
+WALLTIME_HOURS=120          # walltime per block allocation (update)
 QOS="frontier"
 ACCOUNT="ODEFN5169CYFZ"
 
@@ -64,6 +65,7 @@ python -m oact_utilities.workflows.submit_jobs \
     --conda-base "${CONDA_BASE}" \
     --job-timeout "${JOB_TIMEOUT}" \
     --max-fail-count "${MAX_FAIL_COUNT}" \
+    --nodes-per-block "${NODES_PER_BLOCK}" \
     --max-blocks "${MAX_BLOCKS}" \
     --init-blocks "${INIT_BLOCKS}" \
     --min-blocks "${MIN_BLOCKS}" \

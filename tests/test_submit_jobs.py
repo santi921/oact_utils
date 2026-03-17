@@ -552,3 +552,120 @@ class TestDefaultOrcaPaths:
     def test_slurm_default_path(self):
         """Test that slurm has a default ORCA path."""
         assert "slurm" in DEFAULT_ORCA_PATHS
+
+
+class TestBuildParslConfigSlurm:
+    """Tests for build_parsl_config_slurm function."""
+
+    def test_single_node_uses_simple_launcher(self):
+        """nodes_per_block=1 uses SimpleLauncher for backwards compatibility."""
+        from parsl.launchers import SimpleLauncher
+
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(nodes_per_block=1)
+        provider = config.executors[0].provider
+        assert isinstance(provider.launcher, SimpleLauncher)
+
+    def test_multi_node_uses_srun_launcher(self):
+        """nodes_per_block > 1 switches to SrunLauncher."""
+        from parsl.launchers import SrunLauncher
+
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(nodes_per_block=4)
+        provider = config.executors[0].provider
+        assert isinstance(provider.launcher, SrunLauncher)
+
+    def test_nodes_per_block_passed_to_provider(self):
+        """nodes_per_block value is forwarded to SlurmProvider."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(nodes_per_block=50)
+        provider = config.executors[0].provider
+        assert provider.nodes_per_block == 50
+
+    def test_single_node_scheduler_options_has_ntasks(self):
+        """Single-node mode sets ntasks-per-node = cores * workers."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(
+            max_workers=4, cores_per_worker=16, nodes_per_block=1
+        )
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node=64" in provider.scheduler_options
+        assert "--cpus-per-task=1" in provider.scheduler_options
+
+    def test_multi_node_scheduler_options_empty(self):
+        """Multi-node mode has no extra scheduler_options (exclusive=True handles it)."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(nodes_per_block=10)
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node" not in provider.scheduler_options
+        assert provider.exclusive is True
+
+    def test_cpu_affinity_block(self):
+        """HighThroughputExecutor has cpu_affinity='block'."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm()
+        executor = config.executors[0]
+        assert executor.cpu_affinity == "block"
+
+    def test_unique_run_dir(self):
+        """Config uses a unique run_dir to avoid collisions."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm()
+        assert config.run_dir.startswith("runinfo/run_")
+
+
+class TestMultiNodeCLIValidation:
+    """Tests for --nodes-per-block CLI validation."""
+
+    def test_flux_rejects_multi_node(self):
+        """--nodes-per-block > 1 with --scheduler flux should error."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--scheduler",
+                "flux",
+                "--nodes-per-block",
+                "4",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "only supported with --scheduler slurm" in result.stderr
+
+    def test_nodes_per_block_less_than_one_errors(self):
+        """--nodes-per-block 0 should error."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--scheduler",
+                "slurm",
+                "--nodes-per-block",
+                "0",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "must be >= 1" in result.stderr
