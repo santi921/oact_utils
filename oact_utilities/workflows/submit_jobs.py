@@ -714,6 +714,7 @@ def build_parsl_config_slurm(
     conda_env: str = "py10mpi",
     conda_base: str = "/usr/WS1/vargas58/miniconda3",
     ld_library_path: str | None = None,
+    orca_path: str | None = None,
 ):
     """Build Parsl Config for SLURM multi-node execution.
 
@@ -741,6 +742,11 @@ def build_parsl_config_slurm(
         conda_env: Conda environment name.
         conda_base: Conda base path.
         ld_library_path: Override LD_LIBRARY_PATH.
+        orca_path: Absolute path to ORCA executable. When provided and
+            absolute, its parent directory is prepended to PATH on worker
+            nodes so that ORCA's bundled MPI helpers are found before any
+            conda-provided mpirun (prevents intermittent MPI bootstrap
+            failures on SLURM systems).
 
     Returns:
         Parsl Config object.
@@ -755,9 +761,16 @@ def build_parsl_config_slurm(
     from parsl.providers import SlurmProvider
 
     ld_lib = ld_library_path or f"{conda_base}/envs/{conda_env}/lib"
+    # Prepend ORCA's own directory so its bundled mpirun is found before
+    # conda's, preventing intermittent MPI bootstrap failures on SLURM.
+    orca_bin_dir = (
+        os.path.dirname(orca_path) if orca_path and os.path.isabs(orca_path) else None
+    )
+    path_line = f"export PATH={orca_bin_dir}:$PATH\n" if orca_bin_dir else ""
     worker_init = (
         f"source ~/.bashrc\n"
         f"conda activate {conda_env}\n"
+        f"{path_line}"
         f"export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH\n"
         f"export JAX_PLATFORMS=cpu\n"
         f"export OMP_NUM_THREADS=1\n"
@@ -993,6 +1006,7 @@ def submit_batch_parsl(
             conda_env=conda_env,
             conda_base=conda_base,
             ld_library_path=ld_library_path,
+            orca_path=orca_config.get("orca_path") if orca_config else None,
         )
     else:
         print("\nBuilding Parsl config (Flux single-node)...")

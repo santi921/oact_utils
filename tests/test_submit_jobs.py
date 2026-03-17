@@ -620,6 +620,23 @@ class TestBuildParslConfigSlurm:
         config = build_parsl_config_slurm()
         assert config.run_dir.startswith("runinfo/run_")
 
+    def test_worker_init_prepends_orca_bin_dir_for_absolute_path(self):
+        """Absolute orca_path causes its parent dir to be prepended to PATH in worker_init."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(orca_path="/opt/orca/bin/orca")
+        provider = config.executors[0].provider
+        assert "export PATH=/opt/orca/bin:" in provider.worker_init
+
+    def test_worker_init_no_path_export_for_non_absolute_orca_path(self):
+        """No PATH export when orca_path is None or a bare executable name."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        for val in [None, "orca"]:
+            config = build_parsl_config_slurm(orca_path=val)
+            provider = config.executors[0].provider
+            assert "export PATH=" not in provider.worker_init
+
 
 class TestMultiNodeCLIValidation:
     """Tests for --nodes-per-block CLI validation."""

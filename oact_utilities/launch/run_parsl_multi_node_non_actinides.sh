@@ -21,6 +21,7 @@
 # ---- Configuration (edit these) ----
 DB_PATH="/path/to/workflow.db"  #(update USE NON-ACTINIDES DB)
 ROOT_DIR="/path/to/job_output_dir" #(update)
+ORCA_PATH="/path/to/orca"          #(update -- must be absolute path to ORCA binary)
 
 BATCH_SIZE=500          # number of jobs to dispatch at once (update)
 MAX_WORKERS=4              # workers per node (update)
@@ -78,5 +79,6 @@ python -m oact_utilities.workflows.submit_jobs \
     --actinide-ecp "${ACTINIDE_ECP}" \
     --non-actinide-basis "${NON_ACTINIDE_BASIS}" \
     --scf-maxiter "${SCF_MAXITER}" \
-    --ks-method uks
+    --ks-method uks \
+    --orca-path "${ORCA_PATH}"
     #--dry-run # Uncomment to do a dry run (Parsl will spin up and prepare directories but not actually submit jobs)
