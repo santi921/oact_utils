@@ -28,6 +28,7 @@ MAX_WORKERS=4              # workers per node (update)
 CORES_PER_WORKER=20        # cores per worker (update)
 CONDA_ENV="py10mpi" # (update)
 CONDA_BASE="/usr/WS1/vargas58/miniconda3"
+LD_LIBRARY_PATH_OVERRIDE=""  # (optional) set to override LD_LIBRARY_PATH in job scripts
 JOB_TIMEOUT=432000          # 5 days per job
 MAX_FAIL_COUNT=3
 
@@ -64,6 +65,7 @@ python -m oact_utilities.workflows.submit_jobs \
     --cores-per-worker "${CORES_PER_WORKER}" \
     --conda-env "${CONDA_ENV}" \
     --conda-base "${CONDA_BASE}" \
+    ${LD_LIBRARY_PATH_OVERRIDE:+--ld-library-path "${LD_LIBRARY_PATH_OVERRIDE}"} \
     --job-timeout "${JOB_TIMEOUT}" \
     --max-fail-count "${MAX_FAIL_COUNT}" \
     --nodes-per-block "${NODES_PER_BLOCK}" \

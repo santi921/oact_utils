@@ -328,10 +328,12 @@ def write_slurm_job_file(
         "\n",
         "source ~/.bashrc\n",
         f"conda activate {conda_env}\n",
-        (
-            f"export LD_LIBRARY_PATH={ld_library_path}:$LD_LIBRARY_PATH\n"
-            if ld_library_path
-            else f"export LD_LIBRARY_PATH={DEFAULT_LD_LIBRARY_PATHS['slurm']}:$LD_LIBRARY_PATH\n"
+        *(
+            [
+                f"export LD_LIBRARY_PATH={ld_library_path or DEFAULT_LD_LIBRARY_PATHS['slurm']}:$LD_LIBRARY_PATH\n"
+            ]
+            if (ld_library_path or DEFAULT_LD_LIBRARY_PATHS["slurm"])
+            else []
         ),
         run_cmd,
     ]
@@ -1185,6 +1187,7 @@ def submit_batch(
     queue: str = "pbatch",
     allocation: str = "dnn-sim",
     conda_env: str = "py10mpi",
+    ld_library_path: str | None = None,
     dry_run: bool = False,
     max_fail_count: int | None = None,
     randomize: bool = True,
@@ -1204,6 +1207,7 @@ def submit_batch(
         queue: Queue/partition/QOS name.
         allocation: Allocation/account name.
         conda_env: Conda environment to activate.
+        ld_library_path: Override LD_LIBRARY_PATH in generated job scripts.
         dry_run: If True, prepare directories but don't submit.
         max_fail_count: If specified, skip jobs with fail_count >= this value.
         randomize: Randomize job selection order (default: True).
@@ -1289,6 +1293,7 @@ def submit_batch(
                     orca_path=orca_path,
                     conda_env=conda_env,
                     optimizer=optimizer,
+                    ld_library_path=ld_library_path,
                 )
                 submit_cmd = ["flux", "batch", job_script.name]
 
@@ -1302,6 +1307,7 @@ def submit_batch(
                     orca_path=orca_path,
                     conda_env=conda_env,
                     optimizer=optimizer,
+                    ld_library_path=ld_library_path,
                 )
                 submit_cmd = ["sbatch", job_script.name]
             else:
@@ -1405,6 +1411,11 @@ def main():
         "--conda-env",
         default="py10mpi",
         help="Conda environment to activate (default: py10mpi)",
+    )
+    parser.add_argument(
+        "--ld-library-path",
+        default=None,
+        help="Override LD_LIBRARY_PATH in generated job scripts",
     )
     parser.add_argument(
         "--dry-run",
@@ -1650,6 +1661,7 @@ def main():
             n_cores=args.n_cores,
             conda_env=args.conda_env,
             conda_base=args.conda_base,
+            ld_library_path=args.ld_library_path,
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             timeout_seconds=args.job_timeout,
@@ -1676,6 +1688,7 @@ def main():
             queue=args.queue,
             allocation=args.allocation,
             conda_env=args.conda_env,
+            ld_library_path=args.ld_library_path,
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             randomize=True,

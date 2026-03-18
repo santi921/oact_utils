@@ -312,6 +312,27 @@ class TestWriteFluxJobFile:
         content = flux_script.read_text()
         assert "conda activate myenv" in content
 
+    def test_flux_script_ld_library_path(self, tmp_path):
+        """Test that LD_LIBRARY_PATH override is written when provided."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        flux_script = write_flux_job_file(job_dir, ld_library_path="/custom/lib")
+
+        content = flux_script.read_text()
+        assert "export LD_LIBRARY_PATH=/custom/lib" in content
+
+    def test_flux_script_default_ld_library_path(self, tmp_path):
+        """Test that the default LD_LIBRARY_PATH is used when none is provided."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        flux_script = write_flux_job_file(job_dir)
+
+        content = flux_script.read_text()
+        assert "export LD_LIBRARY_PATH=" in content
+        assert "/custom/lib" not in content
+
 
 class TestWriteSlurmJobFile:
     """Tests for write_slurm_job_file function."""
@@ -428,6 +449,27 @@ class TestWriteSlurmJobFile:
         simple_line = [ln for ln in content.splitlines() if ln.startswith("!")][0]
         assert "Opt" not in simple_line
         assert not (job_dir / "run_sella.py").exists()
+
+    def test_slurm_script_ld_library_path(self, tmp_path):
+        """Test that LD_LIBRARY_PATH override is written when provided."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        slurm_script = write_slurm_job_file(job_dir, ld_library_path="/custom/lib")
+
+        content = slurm_script.read_text()
+        assert "export LD_LIBRARY_PATH=/custom/lib" in content
+
+    def test_slurm_script_no_ld_library_path_by_default(self, tmp_path):
+        """Test that LD_LIBRARY_PATH export is omitted when default is empty."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        slurm_script = write_slurm_job_file(job_dir)
+
+        content = slurm_script.read_text()
+        # Default slurm LD_LIBRARY_PATH is empty, so no export line should appear
+        assert "export LD_LIBRARY_PATH=:" not in content
 
 
 class TestFluxSellaJobFile:
