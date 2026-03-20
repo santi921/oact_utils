@@ -328,10 +328,12 @@ def write_slurm_job_file(
         "\n",
         "source ~/.bashrc\n",
         f"conda activate {conda_env}\n",
-        (
-            f"export LD_LIBRARY_PATH={ld_library_path}:$LD_LIBRARY_PATH\n"
-            if ld_library_path
-            else f"export LD_LIBRARY_PATH={DEFAULT_LD_LIBRARY_PATHS['slurm']}:$LD_LIBRARY_PATH\n"
+        *(
+            [
+                f"export LD_LIBRARY_PATH={ld_library_path or DEFAULT_LD_LIBRARY_PATHS['slurm']}:$LD_LIBRARY_PATH\n"
+            ]
+            if (ld_library_path or DEFAULT_LD_LIBRARY_PATHS["slurm"])
+            else []
         ),
         run_cmd,
     ]
@@ -528,6 +530,20 @@ if PARSL_AVAILABLE:
         # uses /dev/shm files whose names can collide.
         env["OMPI_MCA_btl"] = "self,tcp"
 
+        # Restrict ORCA's mpirun to the local node only.  In multi-node
+        # SLURM blocks, mpirun would otherwise read the SLURM hostfile and
+        # place processes on neighboring nodes where different ORCA instances
+        # are running -- silently corrupting results.  These env vars are
+        # set unconditionally: harmless on single-node / Flux, protective
+        # on multi-node SLURM.
+        # DO NOT REMOVE -- see docs/plans/2026-03-16-feat-multi-node-slurm-parsl-support-plan.md
+        import socket
+
+        local_hostname = os.environ.get("SLURMD_NODENAME", socket.gethostname())
+        env["OMPI_MCA_orte_default_hostfile"] = "/dev/null"
+        env["SLURM_NODELIST"] = local_hostname
+        env["SLURM_NNODES"] = "1"
+
         start_time = time.time()
 
         proc = None
@@ -690,6 +706,7 @@ def build_parsl_config_flux(
 def build_parsl_config_slurm(
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    nodes_per_block: int = 1,
     max_blocks: int = 10,
     init_blocks: int = 2,
     min_blocks: int = 1,
@@ -699,27 +716,42 @@ def build_parsl_config_slurm(
     conda_env: str = "py10mpi",
     conda_base: str = "/usr/WS1/vargas58/miniconda3",
     ld_library_path: str | None = None,
+    orca_path: str | None = None,
 ):
     """Build Parsl Config for SLURM multi-node execution.
 
     Uses SlurmProvider to auto-provision worker nodes via SLURM.
-    Each node runs multiple ORCA workers concurrently.
+    Each block is a SLURM job with ``nodes_per_block`` nodes, and each
+    node runs ``max_workers`` ORCA workers concurrently.
+
+    When ``nodes_per_block > 1``, SrunLauncher is used so that Parsl
+    distributes worker managers across all nodes in the block.  When
+    ``nodes_per_block == 1`` (default), SimpleLauncher is used for
+    backwards compatibility.
 
     Args:
         max_workers: Maximum concurrent workers per node.
         cores_per_worker: CPU cores per worker (must match ORCA nprocs).
-        max_blocks: Maximum number of SLURM nodes to provision.
-        init_blocks: Number of nodes to request at startup.
-        min_blocks: Minimum number of nodes to keep alive.
-        walltime_hours: Walltime per node allocation in hours.
+        nodes_per_block: Nodes per SLURM block. >1 enables multi-node
+            blocks with SrunLauncher.  Total capacity is
+            ``max_blocks * nodes_per_block * max_workers``.
+        max_blocks: Maximum number of SLURM blocks to provision.
+        init_blocks: Number of blocks to request at startup.
+        min_blocks: Minimum number of blocks to keep alive.
+        walltime_hours: Walltime per block allocation in hours.
         qos: SLURM QOS.
         account: SLURM account/allocation.
         conda_env: Conda environment name.
         conda_base: Conda base path.
         ld_library_path: Override LD_LIBRARY_PATH.
+        orca_path: Absolute path to ORCA executable. When provided and
+            absolute, its parent directory is prepended to PATH on worker
+            nodes so that ORCA's bundled MPI helpers are found before any
+            conda-provided mpirun (prevents intermittent MPI bootstrap
+            failures on SLURM systems).
 
     Returns:
-        Parsl Config object
+        Parsl Config object.
     """
     if not PARSL_AVAILABLE:
         raise ImportError(
@@ -728,27 +760,48 @@ def build_parsl_config_slurm(
 
     from parsl.config import Config
     from parsl.executors import HighThroughputExecutor
-    from parsl.launchers import SimpleLauncher
     from parsl.providers import SlurmProvider
 
     ld_lib = ld_library_path or f"{conda_base}/envs/{conda_env}/lib"
+    # Prepend ORCA's own directory so its bundled mpirun is found before
+    # conda's, preventing intermittent MPI bootstrap failures on SLURM.
+    orca_bin_dir = (
+        os.path.dirname(orca_path) if orca_path and os.path.isabs(orca_path) else None
+    )
+    path_line = f"export PATH={orca_bin_dir}:$PATH\n" if orca_bin_dir else ""
     worker_init = (
         f"source ~/.bashrc\n"
         f"conda activate {conda_env}\n"
+        f"{path_line}"
         f"export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH\n"
         f"export JAX_PLATFORMS=cpu\n"
         f"export OMP_NUM_THREADS=1\n"
     )
 
-    ntasks = cores_per_worker * max_workers
-    scheduler_options = (
-        f"#SBATCH --ntasks-per-node={ntasks}\n" f"#SBATCH --cpus-per-task=1\n"
-    )
+    # Launcher and scheduler_options differ for single-node vs multi-node.
+    if nodes_per_block > 1:
+        from parsl.launchers import SrunLauncher
+
+        # SrunLauncher: srun starts 1 Parsl worker manager per node.
+        # The worker manager forks max_workers processes internally.
+        launcher = SrunLauncher()
+        # No extra scheduler_options needed -- exclusive=True on the
+        # provider already adds --exclusive to the SBATCH script.
+        scheduler_options = ""
+    else:
+        from parsl.launchers import SimpleLauncher
+
+        # SimpleLauncher: no srun, specify total tasks per node directly.
+        launcher = SimpleLauncher()
+        ntasks = cores_per_worker * max_workers
+        scheduler_options = (
+            f"#SBATCH --ntasks-per-node={ntasks}\n" f"#SBATCH --cpus-per-task=1\n"
+        )
 
     provider = SlurmProvider(
         qos=qos,
         account=account,
-        nodes_per_block=1,
+        nodes_per_block=nodes_per_block,
         init_blocks=init_blocks,
         min_blocks=min_blocks,
         max_blocks=max_blocks,
@@ -756,7 +809,7 @@ def build_parsl_config_slurm(
         worker_init=worker_init,
         scheduler_options=scheduler_options,
         exclusive=True,
-        launcher=SimpleLauncher(),  # Not SrunLauncher — ORCA uses internal mpirun
+        launcher=launcher,
         parallelism=1.0,
     )
 
@@ -764,6 +817,7 @@ def build_parsl_config_slurm(
         label="slurm_htex",
         cores_per_worker=cores_per_worker,
         max_workers_per_node=max_workers,
+        cpu_affinity="block",
         provider=provider,
     )
 
@@ -792,6 +846,7 @@ def submit_batch_parsl(
     max_fail_count: int | None = None,
     timeout_seconds: int = 72000,
     randomize: bool = True,
+    nodes_per_block: int = 1,
     max_blocks: int = 10,
     init_blocks: int = 2,
     min_blocks: int = 1,
@@ -820,10 +875,12 @@ def submit_batch_parsl(
         max_fail_count: Skip jobs with fail_count >= this value
         timeout_seconds: Job timeout in seconds (default: 72000 = 20 hours)
         randomize: Randomize job selection order (default: True)
-        max_blocks: (SLURM) Maximum SLURM nodes to provision.
-        init_blocks: (SLURM) Nodes to request at startup.
-        min_blocks: (SLURM) Minimum nodes to keep alive.
-        walltime_hours: (SLURM) Walltime per node allocation in hours.
+        nodes_per_block: (SLURM) Nodes per SLURM block. >1 enables
+            multi-node blocks with SrunLauncher.
+        max_blocks: (SLURM) Maximum SLURM blocks to provision.
+        init_blocks: (SLURM) Blocks to request at startup.
+        min_blocks: (SLURM) Minimum blocks to keep alive.
+        walltime_hours: (SLURM) Walltime per block allocation in hours.
         qos: (SLURM) SLURM QOS.
         account: (SLURM) SLURM account/allocation.
 
@@ -937,12 +994,21 @@ def submit_batch_parsl(
 
     # Build Parsl configuration
     if scheduler.lower() == "slurm":
+        total_nodes = max_blocks * nodes_per_block
+        total_workers = total_nodes * max_workers
         print(
-            f"\nBuilding Parsl config (SLURM multi-node, up to {max_blocks} nodes)..."
+            f"\nParsl SLURM config: {max_blocks} blocks x {nodes_per_block} "
+            f"nodes/block x {max_workers} workers/node "
+            f"= {total_workers} max concurrent jobs"
+        )
+        print(
+            f"Each worker: {cores_per_worker} cores, "
+            f"job timeout: {timeout_seconds}s"
         )
         parsl_config = build_parsl_config_slurm(
             max_workers=max_workers,
             cores_per_worker=cores_per_worker,
+            nodes_per_block=nodes_per_block,
             max_blocks=max_blocks,
             init_blocks=init_blocks,
             min_blocks=min_blocks,
@@ -952,6 +1018,7 @@ def submit_batch_parsl(
             conda_env=conda_env,
             conda_base=conda_base,
             ld_library_path=ld_library_path,
+            orca_path=orca_config.get("orca_path") if orca_config else None,
         )
     else:
         print("\nBuilding Parsl config (Flux single-node)...")
@@ -1130,6 +1197,7 @@ def submit_batch(
     queue: str = "pbatch",
     allocation: str = "dnn-sim",
     conda_env: str = "py10mpi",
+    ld_library_path: str | None = None,
     dry_run: bool = False,
     max_fail_count: int | None = None,
     randomize: bool = True,
@@ -1149,6 +1217,7 @@ def submit_batch(
         queue: Queue/partition/QOS name.
         allocation: Allocation/account name.
         conda_env: Conda environment to activate.
+        ld_library_path: Override LD_LIBRARY_PATH in generated job scripts.
         dry_run: If True, prepare directories but don't submit.
         max_fail_count: If specified, skip jobs with fail_count >= this value.
         randomize: Randomize job selection order (default: True).
@@ -1239,6 +1308,7 @@ def submit_batch(
                     orca_path=orca_path,
                     conda_env=conda_env,
                     optimizer=optimizer,
+                    ld_library_path=ld_library_path,
                 )
                 submit_cmd = ["flux", "batch", job_script.name]
 
@@ -1252,6 +1322,7 @@ def submit_batch(
                     orca_path=orca_path,
                     conda_env=conda_env,
                     optimizer=optimizer,
+                    ld_library_path=ld_library_path,
                 )
                 submit_cmd = ["sbatch", job_script.name]
             else:
@@ -1364,6 +1435,11 @@ def main():
         help="Conda environment to activate (default: py10mpi)",
     )
     parser.add_argument(
+        "--ld-library-path",
+        default=None,
+        help="Override LD_LIBRARY_PATH in generated job scripts",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Prepare jobs but don't submit",
@@ -1400,10 +1476,17 @@ def main():
         "SLURM Parsl Options (--use-parsl --scheduler slurm)"
     )
     slurm_parsl_group.add_argument(
+        "--nodes-per-block",
+        type=int,
+        default=1,
+        help="Nodes per SLURM block. >1 enables multi-node blocks with SrunLauncher. "
+        "Total capacity = max_blocks * nodes_per_block * max_workers. (default: 1)",
+    )
+    slurm_parsl_group.add_argument(
         "--max-blocks",
         type=int,
         default=10,
-        help="Maximum SLURM nodes to provision (default: 10)",
+        help="Maximum SLURM blocks to provision (default: 10)",
     )
     slurm_parsl_group.add_argument(
         "--init-blocks",
@@ -1534,6 +1617,15 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate multi-node Parsl args
+    if args.nodes_per_block < 1:
+        parser.error("--nodes-per-block must be >= 1")
+    if args.scheduler == "flux" and args.nodes_per_block > 1:
+        parser.error(
+            "--nodes-per-block > 1 is only supported with --scheduler slurm. "
+            "Flux uses LocalProvider which does not support multi-node blocks."
+        )
+
     # Validate optimizer-specific args
     if args.optimizer == "orca" and args.max_opt_steps is not None:
         parser.error("--max-opt-steps is only valid with --optimizer sella")
@@ -1591,10 +1683,12 @@ def main():
             n_cores=args.n_cores,
             conda_env=args.conda_env,
             conda_base=args.conda_base,
+            ld_library_path=args.ld_library_path,
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             timeout_seconds=args.job_timeout,
             randomize=True,
+            nodes_per_block=args.nodes_per_block,
             max_blocks=args.max_blocks,
             init_blocks=args.init_blocks,
             min_blocks=args.min_blocks,
@@ -1616,6 +1710,7 @@ def main():
             queue=args.queue,
             allocation=args.allocation,
             conda_env=args.conda_env,
+            ld_library_path=args.ld_library_path,
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             randomize=True,

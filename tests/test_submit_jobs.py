@@ -312,6 +312,27 @@ class TestWriteFluxJobFile:
         content = flux_script.read_text()
         assert "conda activate myenv" in content
 
+    def test_flux_script_ld_library_path(self, tmp_path):
+        """Test that LD_LIBRARY_PATH override is written when provided."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        flux_script = write_flux_job_file(job_dir, ld_library_path="/custom/lib")
+
+        content = flux_script.read_text()
+        assert "export LD_LIBRARY_PATH=/custom/lib" in content
+
+    def test_flux_script_default_ld_library_path(self, tmp_path):
+        """Test that the default LD_LIBRARY_PATH is used when none is provided."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        flux_script = write_flux_job_file(job_dir)
+
+        content = flux_script.read_text()
+        assert "export LD_LIBRARY_PATH=" in content
+        assert "/custom/lib" not in content
+
 
 class TestWriteSlurmJobFile:
     """Tests for write_slurm_job_file function."""
@@ -428,6 +449,27 @@ class TestWriteSlurmJobFile:
         simple_line = [ln for ln in content.splitlines() if ln.startswith("!")][0]
         assert "Opt" not in simple_line
         assert not (job_dir / "run_sella.py").exists()
+
+    def test_slurm_script_ld_library_path(self, tmp_path):
+        """Test that LD_LIBRARY_PATH override is written when provided."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        slurm_script = write_slurm_job_file(job_dir, ld_library_path="/custom/lib")
+
+        content = slurm_script.read_text()
+        assert "export LD_LIBRARY_PATH=/custom/lib" in content
+
+    def test_slurm_script_no_ld_library_path_by_default(self, tmp_path):
+        """Test that LD_LIBRARY_PATH export is omitted when default is empty."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        slurm_script = write_slurm_job_file(job_dir)
+
+        content = slurm_script.read_text()
+        # Default slurm LD_LIBRARY_PATH is empty, so no export line should appear
+        assert "export LD_LIBRARY_PATH=:" not in content
 
 
 class TestFluxSellaJobFile:
@@ -552,3 +594,137 @@ class TestDefaultOrcaPaths:
     def test_slurm_default_path(self):
         """Test that slurm has a default ORCA path."""
         assert "slurm" in DEFAULT_ORCA_PATHS
+
+
+class TestBuildParslConfigSlurm:
+    """Tests for build_parsl_config_slurm function."""
+
+    def test_single_node_uses_simple_launcher(self):
+        """nodes_per_block=1 uses SimpleLauncher for backwards compatibility."""
+        from parsl.launchers import SimpleLauncher
+
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(nodes_per_block=1)
+        provider = config.executors[0].provider
+        assert isinstance(provider.launcher, SimpleLauncher)
+
+    def test_multi_node_uses_srun_launcher(self):
+        """nodes_per_block > 1 switches to SrunLauncher."""
+        from parsl.launchers import SrunLauncher
+
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(nodes_per_block=4)
+        provider = config.executors[0].provider
+        assert isinstance(provider.launcher, SrunLauncher)
+
+    def test_nodes_per_block_passed_to_provider(self):
+        """nodes_per_block value is forwarded to SlurmProvider."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(nodes_per_block=50)
+        provider = config.executors[0].provider
+        assert provider.nodes_per_block == 50
+
+    def test_single_node_scheduler_options_has_ntasks(self):
+        """Single-node mode sets ntasks-per-node = cores * workers."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(
+            max_workers=4, cores_per_worker=16, nodes_per_block=1
+        )
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node=64" in provider.scheduler_options
+        assert "--cpus-per-task=1" in provider.scheduler_options
+
+    def test_multi_node_scheduler_options_empty(self):
+        """Multi-node mode has no extra scheduler_options (exclusive=True handles it)."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(nodes_per_block=10)
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node" not in provider.scheduler_options
+        assert provider.exclusive is True
+
+    def test_cpu_affinity_block(self):
+        """HighThroughputExecutor has cpu_affinity='block'."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm()
+        executor = config.executors[0]
+        assert executor.cpu_affinity == "block"
+
+    def test_unique_run_dir(self):
+        """Config uses a unique run_dir to avoid collisions."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm()
+        assert config.run_dir.startswith("runinfo/run_")
+
+    def test_worker_init_prepends_orca_bin_dir_for_absolute_path(self):
+        """Absolute orca_path causes its parent dir to be prepended to PATH in worker_init."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(orca_path="/opt/orca/bin/orca")
+        provider = config.executors[0].provider
+        assert "export PATH=/opt/orca/bin:" in provider.worker_init
+
+    def test_worker_init_no_path_export_for_non_absolute_orca_path(self):
+        """No PATH export when orca_path is None or a bare executable name."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        for val in [None, "orca"]:
+            config = build_parsl_config_slurm(orca_path=val)
+            provider = config.executors[0].provider
+            assert "export PATH=" not in provider.worker_init
+
+
+class TestMultiNodeCLIValidation:
+    """Tests for --nodes-per-block CLI validation."""
+
+    def test_flux_rejects_multi_node(self):
+        """--nodes-per-block > 1 with --scheduler flux should error."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--scheduler",
+                "flux",
+                "--nodes-per-block",
+                "4",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "only supported with --scheduler slurm" in result.stderr
+
+    def test_nodes_per_block_less_than_one_errors(self):
+        """--nodes-per-block 0 should error."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--scheduler",
+                "slurm",
+                "--nodes-per-block",
+                "0",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "must be >= 1" in result.stderr
