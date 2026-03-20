@@ -7,9 +7,11 @@ to HPC systems (Flux or SLURM). Jobs generate ORCA input files directly.
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Literal, TypedDict
 
@@ -678,7 +680,11 @@ def build_parsl_config_flux(
         provider=provider,
     )
 
-    return Config(executors=[executor])
+    # Use a unique run_dir per process to avoid collisions when multiple
+    # Parsl instances launch concurrently on the same filesystem.
+    run_dir = f"runinfo/run_{os.getpid()}_{int(time.time())}"
+
+    return Config(executors=[executor], run_dir=run_dir)
 
 
 def build_parsl_config_slurm(
@@ -761,7 +767,11 @@ def build_parsl_config_slurm(
         provider=provider,
     )
 
-    return Config(executors=[executor])
+    # Use a unique run_dir per process to avoid collisions when multiple
+    # Parsl instances launch concurrently on the same filesystem.
+    run_dir = f"runinfo/run_{os.getpid()}_{int(time.time())}"
+
+    return Config(executors=[executor], run_dir=run_dir)
 
 
 def submit_batch_parsl(
@@ -880,8 +890,10 @@ def submit_batch_parsl(
 
     print(f"\nPreparing {len(jobs_to_submit)} jobs for Parsl submission...")
 
-    # Prepare job directories, tracking any failures
+    # Prepare job directories, tracking any failures.
+    # Collect job_dir updates to batch-commit once (avoids per-job lock contention).
     failed_prep_ids: list[int] = []
+    job_dir_updates: list[dict] = []
     print("Setting up job directories...")
     for i, job in enumerate(jobs_to_submit, 1):
         try:
@@ -893,10 +905,18 @@ def submit_batch_parsl(
                 n_cores=n_cores,
                 setup_func=setup_func,
             )
+            # Collect for batch commit instead of per-job commit
+            if not dry_run:
+                job_dir_updates.append({"job_id": job.id, "job_dir": str(job_dir)})
             print(f"  [{i}/{len(jobs_to_submit)}] Prepared {job_dir}")
         except Exception as e:
             print(f"  [{i}/{len(jobs_to_submit)}] FAILED to prepare job {job.id}: {e}")
             failed_prep_ids.append(job.id)
+
+    # Batch-commit all job_dir updates in a single transaction
+    if job_dir_updates:
+        workflow.update_job_metrics_bulk(job_dir_updates)
+        print(f"Persisted {len(job_dir_updates)} job directories in one transaction")
 
     # Reset any jobs that failed during preparation back to READY
     if failed_prep_ids:
@@ -1188,6 +1208,7 @@ def submit_batch(
         print(f"Claimed {len(all_claimed_ids)} jobs as RUNNING in database")
 
     submitted_ids = []
+    job_dir_map: dict[int, Path] = {}  # job_id -> job_dir for batch commit
 
     for i, job in enumerate(jobs_to_submit):
         try:
@@ -1200,6 +1221,10 @@ def submit_batch(
                 n_cores=n_cores,
                 setup_func=setup_func,
             )
+
+            # Collect for batch commit (avoids per-job lock contention)
+            if not dry_run:
+                job_dir_map[job.id] = job_dir
 
             # Write job submission script
             orca_path = config.get("orca_path", DEFAULT_ORCA_PATHS["flux"])
@@ -1257,6 +1282,13 @@ def submit_batch(
                 except Exception:
                     pass
             continue
+
+    # Batch-commit all job_dir updates in one transaction
+    if not dry_run and job_dir_map:
+        bulk_updates = [
+            {"job_id": jid, "job_dir": str(jdir)} for jid, jdir in job_dir_map.items()
+        ]
+        workflow.update_job_metrics_bulk(bulk_updates)
 
     # Reset any claimed-but-not-submitted jobs back to READY
     if not dry_run:
