@@ -244,7 +244,12 @@ def xyz_string_to_atoms(xyz_str: str) -> Atoms:
 def _init_db(
     db_path: Path, timeout: float = 30.0, extra_columns: dict[str, str] | None = None
 ) -> sqlite3.Connection:
-    """Initialize SQLite database with WAL mode for better concurrency.
+    """Initialize SQLite database with DELETE journal mode.
+
+    DELETE mode is used instead of WAL because parallel/network filesystems
+    (Lustre, VAST, GPFS) do not reliably support the shared-memory locking
+    that WAL requires. A single crashed WAL process leaves stale -wal/-shm
+    files that poison every subsequent connection.
 
     Args:
         db_path: Path to database file.
@@ -264,9 +269,11 @@ def _init_db(
 
     conn = sqlite3.connect(str(db_path), timeout=timeout)
 
-    # Enable WAL mode for better concurrent access
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")  # Faster writes with WAL
+    # Use DELETE journal mode for network filesystem safety.
+    # WAL mode relies on POSIX shared-memory locking (-shm files) which
+    # breaks on Lustre, VAST, and GPFS, causing "locking protocol" errors.
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA synchronous=FULL")
 
     # Build the CREATE TABLE statement with extra columns
     base_columns = """

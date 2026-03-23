@@ -1,10 +1,14 @@
-"""Extract per-atom force statistics from completed ORCA jobs.
+"""Extract per-atom force statistics and energies from completed ORCA jobs.
 
 Reads completed jobs from a workflow database, parses .engrad files,
 and produces a new SQLite database with job metadata (no geometry) plus
 force baselines: max force, mean force, forces on actinide atoms, and
 forces on actinide-neighbor atoms (non-actinide atoms within a distance
 cutoff of any actinide center).
+
+Energy data is stored from two sources: the workflow DB ``final_energy``
+column and the engrad file ``total_energy_engrad``. The summary report
+includes statistics for both and flags any mismatches.
 
 All completed jobs are written to the output DB. Jobs where force
 extraction fails get a short ``parse_note`` explaining why
@@ -474,6 +478,41 @@ def print_summary(db_path: str | Path) -> None:
         ).fetchall()
         if note_rows:
             print("Parse notes: " + ", ".join(f"{n}={c}" for n, c in note_rows))
+
+    # Energy statistics (available even when force extraction fails)
+    energy_row = conn.execute(
+        "SELECT COUNT(*), MIN(final_energy), MAX(final_energy), AVG(final_energy) "
+        "FROM force_baselines WHERE final_energy IS NOT NULL"
+    ).fetchone()
+    engrad_energy_row = conn.execute(
+        "SELECT COUNT(*), MIN(total_energy_engrad), MAX(total_energy_engrad), "
+        "AVG(total_energy_engrad) "
+        "FROM force_baselines WHERE total_energy_engrad IS NOT NULL"
+    ).fetchone()
+
+    if energy_row[0] > 0:
+        print(f"\nFinal energy (DB) -- {energy_row[0]} jobs")
+        print(
+            f"  min: {energy_row[1]:.6f}  max: {energy_row[2]:.6f}  "
+            f"avg: {energy_row[3]:.6f} Eh"
+        )
+    if engrad_energy_row[0] > 0:
+        print(f"Engrad energy     -- {engrad_energy_row[0]} jobs")
+        print(
+            f"  min: {engrad_energy_row[1]:.6f}  max: {engrad_energy_row[2]:.6f}  "
+            f"avg: {engrad_energy_row[3]:.6f} Eh"
+        )
+
+    # Check for mismatches between DB and engrad energies
+    mismatch_row = conn.execute(
+        "SELECT COUNT(*) FROM force_baselines "
+        "WHERE final_energy IS NOT NULL AND total_energy_engrad IS NOT NULL "
+        "AND ABS(final_energy - total_energy_engrad) > 1e-6"
+    ).fetchone()
+    if mismatch_row[0] > 0:
+        print(
+            f"  WARNING: {mismatch_row[0]} jobs have DB/engrad energy mismatch (>1e-6 Eh)"
+        )
 
     if with_forces == 0:
         conn.close()
