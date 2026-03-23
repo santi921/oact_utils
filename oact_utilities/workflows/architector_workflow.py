@@ -83,32 +83,27 @@ class ArchitectorWorkflow:
         self.conn = self._get_connection()
         self._ensure_schema()
 
-    def _get_connection(self, max_retries: int = 5) -> sqlite3.Connection:
+    def _get_connection(self) -> sqlite3.Connection:
         """Get a database connection with WAL mode enabled if possible.
 
         Falls back to DELETE journal mode on network filesystems (NFS, Lustre)
-        that don't support WAL locking protocols. Retries on transient lock
-        errors that are common on parallel filesystems under contention.
+        that don't support WAL locking protocols. If both journal mode pragmas
+        fail (common on Lustre where POSIX locking is broken), skips the
+        pragma entirely -- SQLite defaults to DELETE mode anyway.
         """
-        for attempt in range(max_retries):
-            conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
+        conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            # Network filesystem (NFS/Lustre) can fail with various
+            # errors: "locking protocol", "database is locked", etc.
             try:
-                conn.execute("PRAGMA journal_mode=WAL")
-                return conn
+                conn.execute("PRAGMA journal_mode=DELETE")
             except sqlite3.OperationalError:
-                # Network filesystem (NFS/Lustre) can fail with various
-                # errors: "locking protocol", "database is locked", etc.
-                try:
-                    conn.execute("PRAGMA journal_mode=DELETE")
-                    return conn
-                except sqlite3.OperationalError:
-                    conn.close()
-                    if attempt < max_retries - 1:
-                        delay = min(0.5 * (2**attempt), 5.0)
-                        jitter = random.uniform(0, 0.3)
-                        time.sleep(delay + jitter)
-                        continue
-                    raise
+                # Lustre POSIX locking completely broken for this path.
+                # Skip the pragma -- SQLite defaults to DELETE mode.
+                pass
+        return conn
 
     def _ensure_schema(self) -> None:
         """Auto-migrate schema by adding missing columns.
