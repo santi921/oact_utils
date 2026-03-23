@@ -120,7 +120,7 @@ SCF Steps:  mean=12.3, median=11
 
 The dashboard can extract computational metrics from ORCA output files and store them in the database. This is a separate step from status updates because parsing output files is slower than checking job completion.
 
-### What gets extracted
+### What gets extracted?
 
 - **max_forces** -- Maximum gradient (Eh/Bohr), from `.engrad` or text output
 - **scf_steps** -- Total SCF iterations (pattern: `SCF CONVERGED AFTER X CYCLES`)
@@ -136,6 +136,7 @@ python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extrac
 ```
 
 This does two things:
+
 1. Scans job directories to update statuses (running -> completed/failed/timeout)
 2. For newly completed jobs AND any previously completed jobs missing metrics, extracts and stores metrics
 

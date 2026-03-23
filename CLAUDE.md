@@ -324,6 +324,7 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --reset-failed               # Reset failed -> TO_RUN (increments fail_count)
 --reset-timeout              # Reset timeout -> TO_RUN (increments fail_count)
 --reset-missing <job_dir>    # Reset jobs with missing directories -> TO_RUN
+--fix-unlinked <job_dir>     # Repair NULL job_dir: auto-link directories or reset to TO_RUN
 --include-timeout-in-reset   # Reset both failed and timeout
 --max-retries N              # Only reset jobs with fail_count < N
 
@@ -437,6 +438,7 @@ Tests live in `tests/` with test data in `tests/files/`. When adding new functio
 - `test_io.py` - I/O utilities
 - `test_status.py` - Status checking and timeout detection
 - `test_clean.py` - Job directory cleanup (patterns, purge, submit guard)
+- `test_fix_unlinked.py` - Fix unlinked jobs (auto-link, reset, status revalidation)
 - `test_workflow.py` - Workflow DB operations
 - `test_workflow_parsers.py` - Parsers with real ORCA data
 - `test_submit_jobs.py` - Job submission

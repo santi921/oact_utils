@@ -67,14 +67,15 @@ class ArchitectorWorkflow:
     - Generate dashboard reports
     """
 
-    def __init__(self, db_path: str | Path, timeout: float = 5.0):
+    def __init__(self, db_path: str | Path, timeout: float = 30.0):
         """Initialize workflow manager with existing database.
 
         Args:
             db_path: Path to the SQLite database file.
             timeout: SQLite busy-wait timeout in seconds per lock attempt.
-                Kept short so the Python-level retry loop can back off
-                and re-try quickly under concurrent access (e.g. Parsl).
+                Set high enough (30s) so that the built-in busy handler
+                can wait out concurrent writers on network filesystems
+                (Lustre/GPFS) before the Python retry loop kicks in.
         """
         self.db_path = Path(db_path)
         if not self.db_path.exists():
@@ -116,11 +117,17 @@ class ArchitectorWorkflow:
         that arises when another process adds the column between our
         PRAGMA check and the ALTER TABLE statement.
         """
-        cur = self.conn.execute("PRAGMA table_info(structures)")
+        cur = self._execute_with_retry("PRAGMA table_info(structures)")
         existing_cols = {row[1] for row in cur.fetchall()}
+        if not existing_cols:
+            raise RuntimeError(
+                f"Database at {self.db_path} has no 'structures' table. "
+                "It may be empty or corrupted. Recreate it with "
+                "create_workflow_db()."
+            )
         if "optimizer" not in existing_cols:
             try:
-                self.conn.execute(
+                self._execute_with_retry(
                     "ALTER TABLE structures ADD COLUMN optimizer TEXT DEFAULT NULL"
                 )
                 self._commit_with_retry()
@@ -130,13 +137,24 @@ class ArchitectorWorkflow:
                 else:
                     raise
 
+    @staticmethod
+    def _is_retryable(e: sqlite3.OperationalError) -> bool:
+        """Check if an OperationalError is a transient lock/busy error."""
+        msg = str(e).lower()
+        return any(
+            token in msg
+            for token in ("lock", "busy", "locking protocol", "database is locked")
+        )
+
     def _execute_with_retry(
-        self, query: str, params: tuple = (), max_retries: int = 10
+        self, query: str, params: tuple = (), max_retries: int = 20
     ):
         """Execute a query with retry logic for handling database locks.
 
         Uses exponential backoff with jitter to handle concurrent access
-        during long-running Parsl workflows.
+        during long-running Parsl workflows. For write statements (INSERT,
+        UPDATE, DELETE), uses BEGIN IMMEDIATE to acquire the write lock
+        early and avoid late SQLITE_BUSY errors at commit time.
 
         Args:
             query: SQL query string.
@@ -146,20 +164,28 @@ class ArchitectorWorkflow:
         Returns:
             Cursor after execution.
         """
+        is_write = query.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
         for attempt in range(max_retries):
             try:
                 cur = self.conn.cursor()
+                if is_write and not self.conn.in_transaction:
+                    cur.execute("BEGIN IMMEDIATE")
                 cur.execute(query, params)
                 return cur
             except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() and attempt < max_retries - 1:
-                    delay = min(0.1 * (2**attempt), 2.0)
-                    jitter = random.uniform(0, 0.1)
+                if self._is_retryable(e) and attempt < max_retries - 1:
+                    # Roll back any half-started transaction before retrying
+                    try:
+                        self.conn.rollback()
+                    except Exception:
+                        pass
+                    delay = min(0.1 * (2**attempt), 5.0)
+                    jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
                     continue
                 raise
 
-    def _commit_with_retry(self, max_retries: int = 10):
+    def _commit_with_retry(self, max_retries: int = 20):
         """Commit with retry logic for handling database locks.
 
         The conn.commit() call can also raise 'database is locked' when
@@ -174,9 +200,9 @@ class ArchitectorWorkflow:
                 self.conn.commit()
                 return
             except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() and attempt < max_retries - 1:
-                    delay = min(0.1 * (2**attempt), 2.0)
-                    jitter = random.uniform(0, 0.1)
+                if self._is_retryable(e) and attempt < max_retries - 1:
+                    delay = min(0.1 * (2**attempt), 5.0)
+                    jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
                     continue
                 raise
@@ -381,7 +407,6 @@ class ArchitectorWorkflow:
         if not metrics_list:
             return
 
-        cur = self.conn.cursor()
         for metrics in metrics_list:
             updates = []
             values = []
@@ -404,7 +429,7 @@ class ArchitectorWorkflow:
                 updates.append("updated_at = CURRENT_TIMESTAMP")
                 query = f"UPDATE structures SET {', '.join(updates)} WHERE id = ?"
                 values.append(job_id)
-                cur.execute(query, tuple(values))
+                self._execute_with_retry(query, tuple(values))
 
         self._commit_with_retry()
 
@@ -457,13 +482,12 @@ class ArchitectorWorkflow:
         if not status_groups:
             return
 
-        cur = self.conn.cursor()
         for new_status, job_ids in status_groups.items():
             if not job_ids:
                 continue
             placeholders = ",".join("?" * len(job_ids))
             query = f"UPDATE structures SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"
-            cur.execute(query, tuple([new_status.value] + job_ids))
+            self._execute_with_retry(query, tuple([new_status.value] + job_ids))
         self._commit_with_retry()
 
     def count_by_status(self) -> dict[JobStatus, int]:
