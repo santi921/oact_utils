@@ -84,54 +84,32 @@ class ArchitectorWorkflow:
         self.conn = self._get_connection()
         self._ensure_schema()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection using DELETE journal mode.
+    def _get_connection(self, max_retries: int = 5) -> sqlite3.Connection:
+        """Get a database connection with WAL mode enabled if possible.
 
-        WAL mode is intentionally avoided: parallel/network filesystems
-        (Lustre, VAST, GPFS) do not reliably support the shared-memory
-        locking that WAL requires. A single crashed WAL process leaves
-        stale -wal/-shm files that poison every subsequent connection.
-
-        DELETE journal mode works everywhere and is safe for the
-        single-writer-at-a-time pattern enforced by BEGIN IMMEDIATE.
-
-        Retries with exponential backoff on transient lock errors that
-        occur when another process holds the write lock.
+        Falls back to DELETE journal mode on network filesystems (NFS, Lustre)
+        that don't support WAL locking protocols. Retries on transient lock
+        errors that are common on parallel filesystems under contention.
         """
-        max_retries = 10
         for attempt in range(max_retries):
+            conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
             try:
-                conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
-                # Short busy timeout so SQLite returns SQLITE_BUSY quickly,
-                # letting the Python retry loop handle backoff. Avoids
-                # double-waiting (SQLite busy_timeout + Python backoff).
-                conn.execute("PRAGMA busy_timeout=5000")
-                # Always use DELETE journal mode for network filesystem safety.
-                # If the DB was previously in WAL mode, this converts it back
-                # (requires no other connections to be open).
-                result = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
-                if result and result[0].lower() != "delete":
-                    # Switch failed (another connection holds the DB open).
-                    # This is common on first access after WAL was set.
-                    # Close and retry so the stale -wal/-shm can be cleared.
+                conn.execute("PRAGMA journal_mode=WAL")
+                return conn
+            except sqlite3.OperationalError:
+                # Network filesystem (NFS/Lustre) can fail with various
+                # errors: "locking protocol", "database is locked", etc.
+                try:
+                    conn.execute("PRAGMA journal_mode=DELETE")
+                    return conn
+                except sqlite3.OperationalError:
                     conn.close()
                     if attempt < max_retries - 1:
                         delay = min(0.5 * (2**attempt), 5.0)
-                        jitter = random.uniform(0, delay * 0.2)
+                        jitter = random.uniform(0, 0.3)
                         time.sleep(delay + jitter)
                         continue
-                    # Last attempt: proceed with whatever mode is active
-                    # rather than crashing entirely.
-                    conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
-                    conn.execute("PRAGMA busy_timeout=5000")
-                return conn
-            except sqlite3.OperationalError as e:
-                if self._is_retryable(e) and attempt < max_retries - 1:
-                    delay = min(0.5 * (2**attempt), 5.0)
-                    jitter = random.uniform(0, delay * 0.2)
-                    time.sleep(delay + jitter)
-                    continue
-                raise
+                    raise
 
     def _ensure_schema(self) -> None:
         """Auto-migrate schema by adding missing columns.
