@@ -148,6 +148,4 @@ See [CLAUDE.md](CLAUDE.md) for detailed development guidelines.
 - **[oact_utilities/workflows/README.md](oact_utilities/workflows/README.md)** - Workflow system documentation
 - **[oact_utilities/workflows/QUICKSTART.md](oact_utilities/workflows/QUICKSTART.md)** - Workflow quick start guide
 
-## License
 
-Internal LLNL project - contact maintainers for access.
