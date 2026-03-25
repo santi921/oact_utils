@@ -583,6 +583,7 @@ class ArchitectorWorkflow:
                 UPDATE structures
                 SET status = ?,
                     error_message = NULL,
+                    worker_id = NULL,
                     fail_count = COALESCE(fail_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status IN ({placeholders}) AND COALESCE(fail_count, 0) < ?
@@ -596,6 +597,7 @@ class ArchitectorWorkflow:
                 UPDATE structures
                 SET status = ?,
                     error_message = NULL,
+                    worker_id = NULL,
                     fail_count = COALESCE(fail_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status IN ({placeholders})
@@ -619,6 +621,7 @@ class ArchitectorWorkflow:
                 UPDATE structures
                 SET status = ?,
                     error_message = NULL,
+                    worker_id = NULL,
                     fail_count = COALESCE(fail_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status = ? AND COALESCE(fail_count, 0) < ?
@@ -631,6 +634,7 @@ class ArchitectorWorkflow:
                 UPDATE structures
                 SET status = ?,
                     error_message = NULL,
+                    worker_id = NULL,
                     fail_count = COALESCE(fail_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status = ?

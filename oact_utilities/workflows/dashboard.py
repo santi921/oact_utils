@@ -1336,22 +1336,15 @@ def recover_orphaned_jobs(
         f"{len(orphans)} orphaned molecule(s)"
     )
 
-    # Step 4: Check each orphan on disk and update status
-    completed_count = 0
-    failed_count = 0
-    reset_count = 0
+    # Step 4: Check each orphan on disk, classify into batches
+    completed_ids: list[int] = []
+    failed_updates: list[tuple[int, str]] = []  # (job_id, error_msg)
+    reset_ids: list[int] = []
 
     for job in orphans:
         job_dir = job.job_dir
         if not job_dir:
-            # No job_dir means job was never prepared -- reset to TO_RUN
-            workflow.update_status(
-                job.id,
-                JobStatus.TO_RUN,
-                worker_id=None,
-                increment_fail_count=True,
-            )
-            reset_count += 1
+            reset_ids.append(job.id)
             if verbose:
                 print(f"  Job {job.id}: no job_dir -- reset to TO_RUN")
             continue
@@ -1360,37 +1353,51 @@ def recover_orphaned_jobs(
         disk_status = check_job_termination(job_dir, hours_cutoff=hours_cutoff)
 
         if disk_status == 1:
-            # Completed on disk -- mark COMPLETED (do not reset!)
-            workflow.update_status(job.id, JobStatus.COMPLETED, worker_id=None)
-            completed_count += 1
+            completed_ids.append(job.id)
             if verbose:
                 print(f"  Job {job.id}: completed on disk -- marked COMPLETED")
         elif disk_status == -1:
-            # Failed on disk
-            error_msg = parse_failure_reason(job_dir)
-            workflow.update_status(
-                job.id,
-                JobStatus.FAILED,
-                worker_id=None,
-                error_message=error_msg or "Orphaned job failed on disk",
-                increment_fail_count=True,
-            )
-            failed_count += 1
+            # Find the output file for error extraction
+            error_msg = None
+            try:
+                from ..utils.status import pull_log_file
+
+                log_file = pull_log_file(job_dir)
+                error_msg = parse_failure_reason(log_file)
+            except (FileNotFoundError, Exception):
+                pass
+            failed_updates.append((job.id, error_msg or "Orphaned job failed on disk"))
             if verbose:
                 print(f"  Job {job.id}: failed on disk -- marked FAILED")
         else:
-            # Inconclusive (0 = still running, -2 = timeout, or no output)
-            # Since the scheduler job is dead, this job cannot be running.
-            # Reset to TO_RUN for re-submission.
-            workflow.update_status(
-                job.id,
-                JobStatus.TO_RUN,
-                worker_id=None,
-                increment_fail_count=True,
-            )
-            reset_count += 1
+            reset_ids.append(job.id)
             if verbose:
                 print(f"  Job {job.id}: inconclusive on disk -- reset to TO_RUN")
+
+    # Step 5: Batch DB writes (minimizes commits on Lustre)
+    if completed_ids:
+        workflow.update_status_bulk(completed_ids, JobStatus.COMPLETED, worker_id=None)
+    if reset_ids:
+        workflow.update_status_bulk(
+            reset_ids,
+            JobStatus.TO_RUN,
+            worker_id=None,
+            increment_fail_count=True,
+        )
+    # Failed jobs need per-job error messages -- update individually
+    # but within fewer transactions than before
+    for job_id, error_msg in failed_updates:
+        workflow.update_status(
+            job_id,
+            JobStatus.FAILED,
+            worker_id=None,
+            error_message=error_msg,
+            increment_fail_count=True,
+        )
+
+    completed_count = len(completed_ids)
+    failed_count = len(failed_updates)
+    reset_count = len(reset_ids)
 
     total = completed_count + failed_count + reset_count
     print(

@@ -937,12 +937,25 @@ def submit_batch_parsl(
         print("No jobs available after marker filtering")
         return []
 
+    # Detect scheduler job ID early so it can be set atomically with the
+    # RUNNING status claim (avoids a window where jobs are RUNNING but have
+    # no worker_id, which would make them invisible to --recover-orphans).
+    _scheduler_job_id = (
+        os.environ.get("SLURM_JOB_ID")
+        or os.environ.get("FLUX_JOB_ID")
+        or f"pid_{os.getpid()}"
+    )
+
     # Claim jobs atomically BEFORE slow directory preparation to prevent
     # concurrent submitters from grabbing the same jobs (TOCTOU fix).
+    # Sets worker_id in the same UPDATE/commit for crash traceability.
     submitted_ids = [j.id for j in jobs_to_submit]
     if not dry_run:
-        workflow.mark_jobs_as_running(submitted_ids)
-        print(f"Claimed {len(submitted_ids)} jobs as RUNNING in database")
+        workflow.mark_jobs_as_running(submitted_ids, worker_id=_scheduler_job_id)
+        print(
+            f"Claimed {len(submitted_ids)} jobs as RUNNING "
+            f"(worker_id={_scheduler_job_id})"
+        )
 
     print(f"\nPreparing {len(jobs_to_submit)} jobs for Parsl submission...")
 
@@ -1047,16 +1060,6 @@ def submit_batch_parsl(
         return []
 
     # --- SIGTERM handler (register AFTER parsl.load to avoid Parsl overwriting) ---
-    # Detect current scheduler job ID for worker_id tracking.
-    # SLURM uses numeric IDs (e.g., "12345").
-    # Flux uses compact alphanumeric IDs (e.g., "f2xgUVYLJs27").
-    # Fallback to PID for local testing without a scheduler.
-    _scheduler_job_id = (
-        os.environ.get("SLURM_JOB_ID")
-        or os.environ.get("FLUX_JOB_ID")
-        or f"pid_{os.getpid()}"
-    )
-
     # Flag-based SIGTERM handler: set a flag instead of raising an exception.
     # The as_completed() loop checks this flag between jobs and exits cleanly.
     # This avoids interrupting SQLite commits mid-transaction.
@@ -1069,18 +1072,25 @@ def submit_batch_parsl(
     def _sigterm_handler(signum, frame):
         nonlocal _shutdown_requested
         _shutdown_requested = True
-        # Use sys.stderr.write instead of print() for async-signal-safety
-        sys.stderr.write(
-            "\nSIGTERM received -- finishing current DB write, "
-            "then shutting down...\n"
-        )
+        try:
+            sys.stderr.write(
+                "\nSIGTERM received -- finishing current DB write, "
+                "then shutting down...\n"
+            )
+        except Exception:
+            pass  # Best-effort notification; flag is already set
 
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
-    # Set worker_id on all claimed jobs so --recover-orphans can identify
-    # which scheduler allocation owns them.
-    workflow.mark_jobs_as_running(submitted_ids, worker_id=_scheduler_job_id)
-    print(f"Set worker_id={_scheduler_job_id} on {len(submitted_ids)} jobs")
+    # Check if SIGTERM arrived during Parsl setup (before handler was installed,
+    # the default handler may have set a pending signal that fires now).
+    if _shutdown_requested:
+        print("Shutdown requested during setup -- skipping submission")
+        # Falls through to the finally block which resets orphans
+        signal.signal(signal.SIGTERM, _original_sigterm)
+        workflow.update_status_bulk(submitted_ids, JobStatus.TO_RUN, worker_id=None)
+        print(f"Reset {len(submitted_ids)} jobs back to TO_RUN")
+        return submitted_ids
 
     # Submit futures
     print(f"\nSubmitting {len(jobs_to_submit)} jobs to Parsl...")

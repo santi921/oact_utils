@@ -7,6 +7,7 @@ orphaned when a scheduler allocation was killed (SIGKILL, OOM, node crash).
 
 from __future__ import annotations
 
+import getpass
 import os
 import subprocess
 
@@ -28,13 +29,21 @@ def get_active_scheduler_jobs(scheduler: str) -> set[str] | None:
     """
     try:
         if scheduler == "slurm":
+            # Determine current user -- fall back to getpass.getuser() which
+            # uses pwd.getpwuid(os.getuid()) when $USER is unset (containers,
+            # cron). Without a user identity, squeue -u "" returns all users'
+            # jobs, causing false-negative orphan detection.
+            user = os.environ.get("USER") or getpass.getuser()
+            if not user:
+                return None  # Cannot determine user -- skip recovery
+
             # squeue -u $USER -h -o "%A" outputs one numeric job ID per line,
             # no header. Only shows active jobs (PENDING, RUNNING, COMPLETING, etc.)
             result = subprocess.run(
                 [
                     "squeue",
                     "-u",
-                    os.environ.get("USER", ""),
+                    user,
                     "-h",
                     "-o",
                     "%A",
