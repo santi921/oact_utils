@@ -420,9 +420,7 @@ def filter_jobs_for_submission(
     """
     # Get ready jobs (DB is source of truth)
     # include_geometry=True so prepare_job_directory can write the .inp file
-    ready_jobs = workflow.get_jobs_by_status(
-        [JobStatus.TO_RUN, JobStatus.READY], include_geometry=True
-    )
+    ready_jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
 
     # Apply fail_count filter if specified
     if max_fail_count is not None:
@@ -975,16 +973,16 @@ def submit_batch_parsl(
         workflow.update_job_metrics_bulk(job_dir_updates)
         print(f"Persisted {len(job_dir_updates)} job directories in one transaction")
 
-    # Reset any jobs that failed during preparation back to READY
+    # Reset any jobs that failed during preparation back to TO_RUN
     if failed_prep_ids:
         for jid in failed_prep_ids:
             try:
-                workflow.update_status(jid, JobStatus.READY)
+                workflow.update_status(jid, JobStatus.TO_RUN)
             except Exception:
                 pass
         jobs_to_submit = [j for j in jobs_to_submit if j.id not in set(failed_prep_ids)]
         submitted_ids = [j.id for j in jobs_to_submit]
-        print(f"Reset {len(failed_prep_ids)} jobs back to READY due to prep failure")
+        print(f"Reset {len(failed_prep_ids)} jobs back to TO_RUN due to prep failure")
 
     if dry_run:
         print("\n[DRY RUN] Would submit to Parsl executor")
@@ -1038,13 +1036,13 @@ def submit_batch_parsl(
     except Exception as e:
         print(f"Failed to initialize Parsl: {e}")
         print("Check your conda environment and ORCA installation")
-        # Reset claimed jobs back to READY since we can't run them
+        # Reset claimed jobs back to TO_RUN since we can't run them
         for jid in submitted_ids:
             try:
-                workflow.update_status(jid, JobStatus.READY)
+                workflow.update_status(jid, JobStatus.TO_RUN)
             except Exception:
                 pass
-        print(f"Reset {len(submitted_ids)} claimed jobs back to READY")
+        print(f"Reset {len(submitted_ids)} claimed jobs back to TO_RUN")
         return []
 
     # Submit futures
@@ -1150,17 +1148,17 @@ def submit_batch_parsl(
         print("\n\nGraceful shutdown requested...")
 
     finally:
-        # Reset any jobs that are still RUNNING back to READY so they can be
+        # Reset any jobs that are still RUNNING back to TO_RUN so they can be
         # re-submitted in the next batch (e.g. after Ctrl+C or crash).
         resolved_ids = set(completed_ids) | set(failed_ids)
         orphaned_ids = [jid for jid in submitted_ids if jid not in resolved_ids]
         if orphaned_ids:
             for jid in orphaned_ids:
                 try:
-                    workflow.update_status(jid, JobStatus.READY)
+                    workflow.update_status(jid, JobStatus.TO_RUN)
                 except Exception:
                     pass
-            print(f"Reset {len(orphaned_ids)} in-flight jobs back to READY")
+            print(f"Reset {len(orphaned_ids)} in-flight jobs back to TO_RUN")
 
         # Cleanup Parsl
         print("\nCleaning up Parsl executor...")
@@ -1235,11 +1233,9 @@ def submit_batch(
             scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
         )
 
-    # Get ready jobs (includes both TO_RUN and READY for backward compatibility)
+    # Get jobs ready to run
     # include_geometry=True so prepare_job_directory can write the .inp file
-    ready_jobs = workflow.get_jobs_by_status(
-        [JobStatus.TO_RUN, JobStatus.READY], include_geometry=True
-    )
+    ready_jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
 
     # Filter out jobs that have failed too many times
     if max_fail_count is not None:
@@ -1349,7 +1345,7 @@ def submit_batch(
             print(f"  [{i+1}/{len(jobs_to_submit)}] Error for job {job.id}: {e}")
             if not dry_run:
                 try:
-                    workflow.update_status(job.id, JobStatus.READY)
+                    workflow.update_status(job.id, JobStatus.TO_RUN)
                 except Exception:
                     pass
             continue
@@ -1361,16 +1357,16 @@ def submit_batch(
         ]
         workflow.update_job_metrics_bulk(bulk_updates)
 
-    # Reset any claimed-but-not-submitted jobs back to READY
+    # Reset any claimed-but-not-submitted jobs back to TO_RUN
     if not dry_run:
         not_submitted = set(all_claimed_ids) - set(submitted_ids)
         if not_submitted:
             for jid in not_submitted:
                 try:
-                    workflow.update_status(jid, JobStatus.READY)
+                    workflow.update_status(jid, JobStatus.TO_RUN)
                 except Exception:
                     pass
-            print(f"Reset {len(not_submitted)} unclaimed jobs back to READY")
+            print(f"Reset {len(not_submitted)} unclaimed jobs back to TO_RUN")
 
     return submitted_ids
 

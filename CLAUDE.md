@@ -203,6 +203,7 @@ SQLite table `structures` with WAL mode for concurrent access:
 | `n_cores`       | INTEGER    | CPU cores used                                                                                    |
 | `error_message` | TEXT       | Error message if failed                                                                           |
 | `fail_count`    | INTEGER    | Retry counter (incremented on reset)                                                              |
+| `worker_id`     | TEXT       | Scheduler job ID owning this molecule (SLURM/Flux ID), used for crash recovery                    |
 
 **Performance notes:** Always use `include_geometry=False` or `_LIGHT_COLS` when you don't need XYZ coordinates. Push `LIMIT` into SQL, never slice in Python.
 
@@ -214,9 +215,9 @@ TO_RUN → RUNNING → COMPLETED
                   → TIMEOUT → (reset) → TO_RUN
 ```
 
-- **TO_RUN**: Ready for submission (new standard status)
-- **READY**: Legacy alias for TO_RUN (backwards compatibility)
-- **RUNNING**: Submitted and executing on HPC
+- **TO_RUN**: Ready for submission
+- **READY**: Legacy alias, auto-migrated to TO_RUN on database open
+- **RUNNING**: Submitted and executing on HPC (has `worker_id` set to scheduler job ID)
 - **COMPLETED**: Successfully finished (verified by content check)
 - **FAILED**: Crashed or error detected
 - **TIMEOUT**: No updates for 6+ hours (configurable via `hours_cutoff`)

@@ -41,6 +41,6 @@ He 0.0 0.0 0.0
         # check one record content
         val = txn.get(keys[0])
         rec = pickle.loads(val)
-        assert rec["status"] == "ready"
+        assert rec["status"] == "to_run"
         assert "geometry" in rec
         assert rec["natoms"] >= 1

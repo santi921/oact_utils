@@ -57,7 +57,7 @@ def test_create_workflow(sample_csv, tmp_path):
     assert db_path_ret.exists()
 
     # Check that jobs were created
-    jobs = workflow.get_jobs_by_status(JobStatus.READY)
+    jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN)
     assert len(jobs) == 2
 
     # Check job details
@@ -88,7 +88,7 @@ def test_workflow_status_updates(tmp_path):
         elements="H;H",
         natoms=2,
         geometry="H 0 0 0\nH 0 0 0.74",
-        status="ready",
+        status="to_run",
     )
     _insert_row(
         conn,
@@ -96,7 +96,7 @@ def test_workflow_status_updates(tmp_path):
         elements="O;H;H",
         natoms=3,
         geometry="O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0",
-        status="ready",
+        status="to_run",
     )
     conn.commit()
     conn.close()
@@ -104,14 +104,14 @@ def test_workflow_status_updates(tmp_path):
     # Test workflow
     with ArchitectorWorkflow(db_path) as workflow:
         # Check initial state
-        ready = workflow.get_jobs_by_status(JobStatus.READY)
+        ready = workflow.get_jobs_by_status(JobStatus.TO_RUN)
         assert len(ready) == 2
 
         # Update one job
         workflow.update_status(1, JobStatus.RUNNING)
 
         # Check updated state
-        ready = workflow.get_jobs_by_status(JobStatus.READY)
+        ready = workflow.get_jobs_by_status(JobStatus.TO_RUN)
         running = workflow.get_jobs_by_status(JobStatus.RUNNING)
         assert len(ready) == 1
         assert len(running) == 1
@@ -174,7 +174,7 @@ def test_count_by_status(tmp_path):
 
     for i in range(10):
         if i < 5:
-            status = "ready"
+            status = "to_run"
         elif i < 8:
             status = "running"
         elif i < 9:
@@ -196,7 +196,7 @@ def test_count_by_status(tmp_path):
     with ArchitectorWorkflow(db_path) as workflow:
         counts = workflow.count_by_status()
 
-        assert counts[JobStatus.READY] == 5
+        assert counts[JobStatus.TO_RUN] == 5
         assert counts[JobStatus.RUNNING] == 3
         assert counts[JobStatus.COMPLETED] == 1
         assert counts[JobStatus.FAILED] == 1
@@ -290,14 +290,14 @@ def test_to_run_status(tmp_path):
 
     conn = _init_db(db_path)
 
-    # Insert test rows with TO_RUN status
+    # Insert one row as legacy "ready" and one as "to_run"
     _insert_row(
         conn,
         orig_index=0,
         elements="H;H",
         natoms=2,
         geometry="H 0 0 0\nH 0 0 0.74",
-        status="to_run",
+        status="ready",
     )
     _insert_row(
         conn,
@@ -305,19 +305,19 @@ def test_to_run_status(tmp_path):
         elements="O;H;H",
         natoms=3,
         geometry="O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0",
-        status="ready",
+        status="to_run",
     )
     conn.commit()
     conn.close()
 
+    # Opening the DB triggers _ensure_schema() which migrates ready -> to_run
     with ArchitectorWorkflow(db_path) as workflow:
-        # Check TO_RUN jobs
         to_run = workflow.get_jobs_by_status(JobStatus.TO_RUN)
-        assert len(to_run) == 1
+        assert len(to_run) == 2  # Both rows are now to_run
 
-        # Check that we can get both TO_RUN and READY jobs
-        ready_jobs = workflow.get_jobs_by_status([JobStatus.TO_RUN, JobStatus.READY])
-        assert len(ready_jobs) == 2
+        # Verify no "ready" rows remain
+        ready = workflow.get_jobs_by_status(JobStatus.READY)
+        assert len(ready) == 0
 
 
 def test_reset_timeout_jobs(tmp_path):
@@ -848,7 +848,7 @@ def test_ensure_schema_adds_optimizer_column(tmp_path):
         elements="H;H",
         natoms=2,
         geometry="H 0 0 0\nH 0 0 0.74",
-        status="ready",
+        status="to_run",
     )
     conn.commit()
     conn.close()

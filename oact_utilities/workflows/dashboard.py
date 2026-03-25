@@ -1082,7 +1082,6 @@ def update_all_statuses(
     # Get jobs to check — optionally include completed for re-verification
     statuses_to_check = [
         JobStatus.RUNNING,
-        JobStatus.READY,
         JobStatus.FAILED,
         JobStatus.TIMEOUT,
         JobStatus.TO_RUN,
@@ -1214,7 +1213,7 @@ def show_timeout_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
 
 def show_ready_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
     """Display jobs that are ready to run."""
-    ready = workflow.get_jobs_by_status(JobStatus.READY)
+    ready = workflow.get_jobs_by_status(JobStatus.TO_RUN)
 
     if not ready:
         print("\nNo jobs ready to run.")

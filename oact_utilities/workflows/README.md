@@ -230,8 +230,8 @@ The SQLite database tracks each structure with:
 ## Job Statuses
 
 - **`to_run`**: Job is ready to be submitted (default for new jobs)
-- **`ready`**: Legacy status, use `to_run` instead (maintained for backward compatibility)
-- **`running`**: Job has been submitted to HPC scheduler and is executing
+- **`ready`**: Legacy status, auto-migrated to `to_run` when the database is opened
+- **`running`**: Job has been submitted to HPC scheduler and is executing. The `worker_id` column stores the scheduler job ID (SLURM/Flux) for crash recovery.
 - **`completed`**: Job finished successfully
 - **`failed`**: Job crashed or failed convergence (explicit error or abort)
 - **`timeout`**: Job timed out (file not modified for `--hours-cutoff` hours, default 24, likely stuck or walltime exceeded)
@@ -378,7 +378,7 @@ from oact_utilities.workflows import ArchitectorWorkflow, JobStatus
 with ArchitectorWorkflow("workflow.db") as workflow:
 
     # Get jobs by status
-    ready = workflow.get_jobs_by_status(JobStatus.READY)
+    ready = workflow.get_jobs_by_status(JobStatus.TO_RUN)
     completed = workflow.get_jobs_by_status(JobStatus.COMPLETED)
 
     # Count jobs

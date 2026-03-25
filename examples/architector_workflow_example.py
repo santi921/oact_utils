@@ -57,7 +57,7 @@ def setup_workflow():
     print("\nInitial status:")
     print(summary)
     # show row from db as an example
-    example_job = workflow.get_jobs_by_status(JobStatus.READY)[0]
+    example_job = workflow.get_jobs_by_status(JobStatus.TO_RUN)[0]
     print("\nExample job record:")
     print(example_job)
 
@@ -144,7 +144,7 @@ def programmatic_workflow_management():
     with ArchitectorWorkflow(db_path) as workflow:
 
         # Get jobs by status
-        ready_jobs = workflow.get_jobs_by_status(JobStatus.READY)
+        ready_jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN)
         running_jobs = workflow.get_jobs_by_status(JobStatus.RUNNING)
         completed_jobs = workflow.get_jobs_by_status(JobStatus.COMPLETED)
         failed_jobs = workflow.get_jobs_by_status(JobStatus.FAILED)
