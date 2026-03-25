@@ -1037,3 +1037,230 @@ def test_sigterm_handler_sets_flag():
         assert _shutdown_requested is True
     finally:
         signal.signal(signal.SIGTERM, _original)
+
+
+# --- Phase 3: Scheduler liveness checks and orphan recovery ---
+
+
+def test_get_active_scheduler_jobs_slurm_mock(monkeypatch):
+    """get_active_scheduler_jobs returns a set of job IDs for SLURM."""
+    from unittest.mock import MagicMock
+
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "12345\n12346\n12347\n"
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run", lambda *a, **kw: mock_result
+    )
+
+    active = get_active_scheduler_jobs("slurm")
+    assert active == {"12345", "12346", "12347"}
+
+
+def test_get_active_scheduler_jobs_flux_mock(monkeypatch):
+    """get_active_scheduler_jobs returns compact Flux IDs."""
+    from unittest.mock import MagicMock
+
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "f2xgUVYLJs27\nf2xgUVdyx8JK\n"
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run", lambda *a, **kw: mock_result
+    )
+
+    active = get_active_scheduler_jobs("flux")
+    assert active == {"f2xgUVYLJs27", "f2xgUVdyx8JK"}
+
+
+def test_get_active_scheduler_jobs_empty(monkeypatch):
+    """Empty scheduler queue returns empty set (not None)."""
+    from unittest.mock import MagicMock
+
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run", lambda *a, **kw: mock_result
+    )
+
+    active = get_active_scheduler_jobs("slurm")
+    assert active == set()
+    assert active is not None
+
+
+def test_get_active_scheduler_jobs_unreachable(monkeypatch):
+    """Unreachable scheduler returns None (conservative: skip recovery)."""
+    import subprocess as sp
+
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(sp.TimeoutExpired("squeue", 30)),
+    )
+
+    active = get_active_scheduler_jobs("slurm")
+    assert active is None
+
+
+def test_get_active_scheduler_jobs_command_not_found(monkeypatch):
+    """Missing scheduler command returns None."""
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("squeue")),
+    )
+
+    active = get_active_scheduler_jobs("slurm")
+    assert active is None
+
+
+def test_recover_orphaned_jobs_dead_scheduler(tmp_path, monkeypatch):
+    """Orphaned RUNNING jobs from a dead scheduler job are recovered."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    # Insert 3 jobs
+    for i in range(3):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="to_run",
+        )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Mark all as running under scheduler job "slurm_100"
+        workflow.mark_jobs_as_running([1, 2, 3], worker_id="slurm_100")
+
+        # Mock scheduler: slurm_100 is NOT in active set (it's dead)
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: set(),  # empty = nothing active
+        )
+
+        # Mock check_job_termination: job 1 completed, job 2 failed, job 3 inconclusive
+        def mock_check(job_dir, **kwargs):
+            if job_dir and "job_0" in str(job_dir):
+                return 1  # completed
+            elif job_dir and "job_1" in str(job_dir):
+                return -1  # failed
+            return 0  # inconclusive
+
+        monkeypatch.setattr(
+            "oact_utilities.workflows.dashboard.check_job_termination",
+            mock_check,
+        )
+
+        # Set job_dirs so the check function has something to work with
+        workflow.update_job_metrics(1, job_dir=str(tmp_path / "job_0"))
+        workflow.update_job_metrics(2, job_dir=str(tmp_path / "job_1"))
+        workflow.update_job_metrics(3, job_dir=str(tmp_path / "job_2"))
+
+        result = recover_orphaned_jobs(workflow, scheduler="slurm")
+
+        assert result["dead_jobs"] == 1
+        assert result["completed"] == 1
+        assert result["failed"] == 1
+        assert result["reset"] == 1
+        assert result["recovered"] == 3
+
+        # Verify final statuses
+        jobs = {j.id: j for j in workflow.get_jobs_by_status()}
+        assert jobs[1].status == JobStatus.COMPLETED
+        assert jobs[1].worker_id is None
+        assert jobs[2].status == JobStatus.FAILED
+        assert jobs[2].worker_id is None
+        assert jobs[3].status == JobStatus.TO_RUN
+        assert jobs[3].worker_id is None
+
+
+def test_recover_orphans_scheduler_unreachable(tmp_path, monkeypatch):
+    """When scheduler is unreachable, no jobs are modified (conservative)."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.mark_jobs_as_running([1], worker_id="slurm_100")
+
+        # Mock scheduler: returns None (unreachable)
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: None,
+        )
+
+        result = recover_orphaned_jobs(workflow, scheduler="slurm")
+
+        assert result["skipped"] == 1
+        assert result["recovered"] == 0
+
+        # Job should still be RUNNING (not modified)
+        jobs = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(jobs) == 1
+        assert jobs[0].worker_id == "slurm_100"
+
+
+def test_recover_orphans_all_active(tmp_path, monkeypatch):
+    """When all scheduler jobs are active, no orphans are detected."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.mark_jobs_as_running([1], worker_id="slurm_100")
+
+        # Mock scheduler: slurm_100 IS active
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: {"slurm_100"},
+        )
+
+        result = recover_orphaned_jobs(workflow, scheduler="slurm")
+
+        assert result["recovered"] == 0
+        assert result["dead_jobs"] == 0
+
+        # Job should still be RUNNING
+        jobs = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(jobs) == 1

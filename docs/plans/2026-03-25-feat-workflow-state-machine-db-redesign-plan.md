@@ -86,16 +86,16 @@ This is a minimal, safe schema change using the existing `_ensure_schema()` patt
 - Prep failure rollback: reset to `TO_RUN` instead of `READY`
 
 **Tasks:**
-- [ ] Switch `_row_to_record()` to use `sqlite3.Row` (dict-style access)
-- [ ] Add `worker_id TEXT` to `_init_db()` CREATE TABLE
-- [ ] Add `worker_id` migration to `_ensure_schema()`
-- [ ] Add `ready` -> `to_run` migration to `_ensure_schema()`
-- [ ] Change `create_workflow_db()` to insert `status="to_run"` instead of `"ready"`
-- [ ] Add `worker_id` to `_LIGHT_COLS` and `JobRecord`
-- [ ] Add `get_running_jobs_by_worker(worker_id)` query method
-- [ ] Update `filter_jobs_for_submission()` to query only `[TO_RUN]`
-- [ ] Update all orphan cleanup / prep failure code to use `TO_RUN` instead of `READY`
-- [ ] Write migration tests (old DB opens with new code, ready->to_run converted, worker_id exists)
+- [x] Switch `_row_to_record()` to use `sqlite3.Row` (dict-style access)
+- [x] Add `worker_id TEXT` to `_init_db()` CREATE TABLE
+- [x] Add `worker_id` migration to `_ensure_schema()`
+- [x] Add `ready` -> `to_run` migration to `_ensure_schema()`
+- [x] Change `create_workflow_db()` to insert `status="to_run"` instead of `"ready"`
+- [x] Add `worker_id` to `_LIGHT_COLS` and `JobRecord`
+- [x] Add `get_running_jobs_by_worker(worker_id)` query method
+- [x] Update `filter_jobs_for_submission()` to query only `[TO_RUN]`
+- [x] Update all orphan cleanup / prep failure code to use `TO_RUN` instead of `READY`
+- [x] Write migration tests (old DB opens with new code, ready->to_run converted, worker_id exists)
 
 **Success criteria:**
 - Old databases auto-migrate on open (worker_id added, ready->to_run converted)
@@ -208,8 +208,8 @@ finally:
 **Tasks:**
 - [ ] Add flag-based SIGTERM handler in `submit_batch_parsl()` -- register AFTER `parsl.load()`
 - [ ] Add shutdown flag check after each future result is processed in the `as_completed()` loop (after line ~1147)
-- [ ] Add `worker_id` parameter to `mark_jobs_as_running()` -- set in same UPDATE/commit
-- [ ] Add `worker_id` parameter to `update_status()` and `update_status_bulk()` -- auto-clear to NULL when transitioning away from RUNNING
+- [x] Add `worker_id` parameter to `mark_jobs_as_running()` -- set in same UPDATE/commit
+- [x] Add `worker_id` parameter to `update_status()` and `update_status_bulk()` -- auto-clear to NULL when transitioning away from RUNNING
 - [ ] Update `finally` block: use `update_status_bulk()` for orphan reset (single commit, fast enough for SIGKILL grace window)
 - [ ] Restore original SIGTERM handler on clean exit
 - [ ] Write tests: simulate SIGTERM delivery, verify flag is set and loop exits cleanly
@@ -300,15 +300,15 @@ python -m oact_utilities.workflows.dashboard db.db --recover-orphans --scheduler
 - `oact_utilities/utils/status.py` or new `oact_utilities/utils/scheduler.py` -- `get_active_scheduler_jobs()`, `check_scheduler_job_alive()`
 
 **Tasks:**
-- [ ] Implement `get_active_scheduler_jobs(scheduler)` -- single call to get all active jobs for current user
-- [ ] Add `--recover-orphans` flag to dashboard CLI
-- [ ] Add `--scheduler {slurm,flux}` flag to dashboard CLI (required with `--recover-orphans`)
-- [ ] Implement recovery logic: query RUNNING with non-NULL worker_id, check scheduler, check disk, update status
-- [ ] Preserve content-before-age rule: completed-on-disk jobs are marked COMPLETED, not reset
-- [ ] Display `worker_id` in `--show-running` output
-- [ ] Write tests with mocked `subprocess.run` for both SLURM and Flux scheduler queries
-- [ ] Write tests for the full recovery flow: orphaned RUNNING job with dead scheduler ID -> TO_RUN
-- [ ] Write tests for conservative behavior: scheduler unreachable -> no changes
+- [x] Implement `get_active_scheduler_jobs(scheduler)` -- single call to get all active jobs for current user
+- [x] Add `--recover-orphans` flag to dashboard CLI
+- [x] Add `--scheduler {slurm,flux}` flag to dashboard CLI (required with `--recover-orphans`)
+- [x] Implement recovery logic: query RUNNING with non-NULL worker_id, check scheduler, check disk, update status
+- [x] Preserve content-before-age rule: completed-on-disk jobs are marked COMPLETED, not reset
+- [x] Display `worker_id` in `--show-running` output
+- [x] Write tests with mocked `subprocess.run` for both SLURM and Flux scheduler queries
+- [x] Write tests for the full recovery flow: orphaned RUNNING job with dead scheduler ID -> TO_RUN
+- [x] Write tests for conservative behavior: scheduler unreachable -> no changes
 
 **Success criteria:**
 - After a SLURM allocation is killed, `--recover-orphans --scheduler slurm` detects and resets all orphaned jobs
@@ -366,26 +366,26 @@ Could add a `_VALID_TRANSITIONS` dict to `update_status()`. Deferred because:
 
 ### Functional Requirements
 
-- [ ] `worker_id` column exists and is populated for all RUNNING jobs in Parsl mode
-- [ ] SIGTERM during Parsl execution triggers graceful shutdown and resets orphaned jobs to TO_RUN
-- [ ] `--recover-orphans --scheduler slurm` detects jobs whose SLURM allocation is dead and resets them
-- [ ] `--recover-orphans --scheduler flux` does the same for Flux
-- [ ] Content-based checks still take priority (completed-on-disk jobs are marked COMPLETED, not reset)
-- [ ] Old databases auto-migrate on open (worker_id added, ready->to_run converted)
-- [ ] Legacy `READY` status is fully migrated to `TO_RUN`
-- [ ] No remaining references to `JobStatus.READY` in submission/reset code paths
+- [x] `worker_id` column exists and is populated for all RUNNING jobs in Parsl mode
+- [x] SIGTERM during Parsl execution triggers graceful shutdown and resets orphaned jobs to TO_RUN
+- [x] `--recover-orphans --scheduler slurm` detects jobs whose SLURM allocation is dead and resets them
+- [x] `--recover-orphans --scheduler flux` does the same for Flux
+- [x] Content-based checks still take priority (completed-on-disk jobs are marked COMPLETED, not reset)
+- [x] Old databases auto-migrate on open (worker_id added, ready->to_run converted)
+- [x] Legacy `READY` status is fully migrated to `TO_RUN`
+- [x] No remaining references to `JobStatus.READY` in submission/reset code paths
 
 ### Non-Functional Requirements
 
-- [ ] `_row_to_record()` uses dict-style column access (no positional indexing)
+- [x] `_row_to_record()` uses dict-style column access (no positional indexing)
 - [ ] Schema migration completes in < 5 seconds for databases with 50k rows
-- [ ] `--recover-orphans` makes a single scheduler query (not one per job)
-- [ ] Batch commits pattern preserved (no per-job commits on Lustre)
+- [x] `--recover-orphans` makes a single scheduler query (not one per job)
+- [x] Batch commits pattern preserved (no per-job commits on Lustre)
 
 ### Quality Gates
 
-- [ ] All existing tests pass with new schema
-- [ ] New tests for: migration, SIGTERM handling, scheduler liveness checks, orphan recovery
+- [x] All existing tests pass with new schema
+- [x] New tests for: migration, SIGTERM handling, scheduler liveness checks, orphan recovery
 - [ ] Manual testing on Tuolumne (Flux) and a SLURM system
 
 ## Risk Analysis and Mitigation

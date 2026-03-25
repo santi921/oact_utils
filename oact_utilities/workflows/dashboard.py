@@ -1239,14 +1239,176 @@ def show_running_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
         return
 
     print_header(f"Running Jobs (showing up to {limit})")
-    print(f"\n{'ID':<8} {'Orig Index':<12} {'N Atoms':<10}")
+    print(f"\n{'ID':<8} {'Orig Index':<12} {'N Atoms':<10} {'Worker ID':<20}")
     print("-" * 60)
 
     for job in running[:limit]:
-        print(f"{job.id:<8} {job.orig_index:<12} {job.natoms:<10}")
+        wid = job.worker_id or "N/A"
+        print(f"{job.id:<8} {job.orig_index:<12} {job.natoms:<10} {wid:<20}")
 
     if len(running) > limit:
         print(f"\n... and {len(running) - limit} more running jobs")
+
+
+def recover_orphaned_jobs(
+    workflow: ArchitectorWorkflow,
+    scheduler: str,
+    hours_cutoff: float = 24.0,
+    verbose: bool = False,
+) -> dict[str, int]:
+    """Detect and recover jobs orphaned by dead scheduler allocations.
+
+    Queries the scheduler for active jobs, then checks RUNNING jobs whose
+    worker_id is no longer in the active set. For each orphan, checks the
+    output file on disk (via job_dir from the DB) to determine the correct
+    status:
+    - Completed on disk -> mark COMPLETED
+    - Failed on disk -> mark FAILED
+    - Inconclusive (no output or partial) -> reset to TO_RUN
+
+    Content-based checks always take priority (a completed job is never reset).
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        scheduler: Scheduler type ("slurm" or "flux").
+        hours_cutoff: Hours threshold for timeout detection.
+        verbose: Print per-job details.
+
+    Returns:
+        Dict with counts: {"recovered": N, "completed": N, "failed": N,
+        "reset": N, "dead_jobs": N, "skipped": N}.
+    """
+    from ..utils.scheduler import get_active_scheduler_jobs
+
+    # Step 1: Get all RUNNING jobs with a worker_id
+    running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+    tracked = [j for j in running if j.worker_id is not None]
+
+    if not tracked:
+        print("No RUNNING jobs with worker_id found -- nothing to recover.")
+        return {
+            "recovered": 0,
+            "completed": 0,
+            "failed": 0,
+            "reset": 0,
+            "dead_jobs": 0,
+            "skipped": 0,
+        }
+
+    unique_workers = {j.worker_id for j in tracked}
+    print(
+        f"Found {len(tracked)} RUNNING jobs across {len(unique_workers)} "
+        f"scheduler job(s)"
+    )
+
+    # Step 2: Query scheduler for active jobs (single call)
+    active_jobs = get_active_scheduler_jobs(scheduler)
+    if active_jobs is None:
+        print(
+            f"Cannot reach {scheduler} scheduler -- skipping orphan recovery "
+            "(conservative: no jobs modified)"
+        )
+        return {
+            "recovered": 0,
+            "completed": 0,
+            "failed": 0,
+            "reset": 0,
+            "dead_jobs": 0,
+            "skipped": len(tracked),
+        }
+
+    # Step 3: Find dead scheduler jobs
+    dead_workers = unique_workers - active_jobs
+    if not dead_workers:
+        print("All scheduler jobs are still active -- no orphans detected.")
+        return {
+            "recovered": 0,
+            "completed": 0,
+            "failed": 0,
+            "reset": 0,
+            "dead_jobs": 0,
+            "skipped": 0,
+        }
+
+    orphans = [j for j in tracked if j.worker_id in dead_workers]
+    print(
+        f"Detected {len(dead_workers)} dead scheduler job(s) with "
+        f"{len(orphans)} orphaned molecule(s)"
+    )
+
+    # Step 4: Check each orphan on disk and update status
+    completed_count = 0
+    failed_count = 0
+    reset_count = 0
+
+    for job in orphans:
+        job_dir = job.job_dir
+        if not job_dir:
+            # No job_dir means job was never prepared -- reset to TO_RUN
+            workflow.update_status(
+                job.id,
+                JobStatus.TO_RUN,
+                worker_id=None,
+                increment_fail_count=True,
+            )
+            reset_count += 1
+            if verbose:
+                print(f"  Job {job.id}: no job_dir -- reset to TO_RUN")
+            continue
+
+        # Check output files on disk (content-based, preserves content > age rule)
+        disk_status = check_job_termination(job_dir, hours_cutoff=hours_cutoff)
+
+        if disk_status == 1:
+            # Completed on disk -- mark COMPLETED (do not reset!)
+            workflow.update_status(job.id, JobStatus.COMPLETED, worker_id=None)
+            completed_count += 1
+            if verbose:
+                print(f"  Job {job.id}: completed on disk -- marked COMPLETED")
+        elif disk_status == -1:
+            # Failed on disk
+            error_msg = parse_failure_reason(job_dir)
+            workflow.update_status(
+                job.id,
+                JobStatus.FAILED,
+                worker_id=None,
+                error_message=error_msg or "Orphaned job failed on disk",
+                increment_fail_count=True,
+            )
+            failed_count += 1
+            if verbose:
+                print(f"  Job {job.id}: failed on disk -- marked FAILED")
+        else:
+            # Inconclusive (0 = still running, -2 = timeout, or no output)
+            # Since the scheduler job is dead, this job cannot be running.
+            # Reset to TO_RUN for re-submission.
+            workflow.update_status(
+                job.id,
+                JobStatus.TO_RUN,
+                worker_id=None,
+                increment_fail_count=True,
+            )
+            reset_count += 1
+            if verbose:
+                print(f"  Job {job.id}: inconclusive on disk -- reset to TO_RUN")
+
+    total = completed_count + failed_count + reset_count
+    print(
+        f"\nRecovered {total} orphaned jobs from {len(dead_workers)} "
+        f"dead scheduler job(s):"
+    )
+    print(f"  Completed on disk: {completed_count}")
+    print(f"  Failed on disk: {failed_count}")
+    print(f"  Reset to TO_RUN: {reset_count}")
+
+    return {
+        "recovered": total,
+        "completed": completed_count,
+        "failed": failed_count,
+        "reset": reset_count,
+        "dead_jobs": len(dead_workers),
+        "skipped": 0,
+    }
 
 
 def main():
@@ -1374,6 +1536,20 @@ def main():
         help="Recompute metrics for all completed jobs, even those that already have them",
     )
     parser.add_argument(
+        "--recover-orphans",
+        action="store_true",
+        help="Detect and recover jobs orphaned by dead scheduler allocations. "
+        "Checks if worker_id scheduler jobs are still active; resets orphans "
+        "to TO_RUN (or marks COMPLETED/FAILED based on disk output).",
+    )
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        choices=["slurm", "flux"],
+        default=None,
+        help="Scheduler type for --recover-orphans (required with --recover-orphans)",
+    )
+    parser.add_argument(
         "--debug",
         type=int,
         metavar="N",
@@ -1485,6 +1661,18 @@ def main():
             f"\nFix-unlinked: {result['linked']} linked, "
             f"{result['reset']} reset to TO_RUN, "
             f"{result['skipped']} skipped"
+        )
+
+    # Recover orphaned jobs if requested
+    if args.recover_orphans:
+        if not args.scheduler:
+            print("Error: --scheduler is required with --recover-orphans")
+            sys.exit(1)
+        recover_orphaned_jobs(
+            workflow,
+            scheduler=args.scheduler,
+            hours_cutoff=args.hours_cutoff,
+            verbose=getattr(args, "verbose", False),
         )
 
     # Always show summary
