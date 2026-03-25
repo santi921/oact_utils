@@ -166,6 +166,16 @@ For a 64-core node:
 - **Import check**: Parsl features disabled if package not installed
 - **Cleanup**: Parsl `dfk.cleanup()` called in finally block
 
+### Crash Recovery and Graceful Shutdown
+
+The Parsl submission flow has three layers of crash recovery:
+
+**Worker ID tracking**: When jobs are marked RUNNING, the scheduler job ID (`$SLURM_JOB_ID` or `$FLUX_JOB_ID`) is stored in the `worker_id` column in a single atomic UPDATE. This enables post-crash identification of which allocation owned each job.
+
+**SIGTERM handler**: A flag-based signal handler is registered after `parsl.load()` (to avoid Parsl overwriting it). When SLURM sends SIGTERM (walltime limit, scancel, preemption), the handler sets `_shutdown_requested = True`. The `as_completed()` monitoring loop checks this flag after each job's DB writes complete and exits cleanly. The `finally` block then bulk-resets all unresolved jobs to TO_RUN with `worker_id=None`.
+
+**Dashboard orphan recovery**: For SIGKILL/OOM/node crash scenarios where no Python cleanup runs, the dashboard's `--recover-orphans --scheduler {slurm,flux}` command queries the scheduler for active jobs, identifies dead allocations by comparing against `worker_id` values of RUNNING jobs, and recovers orphans based on their disk output (completed/failed/reset). See `oact_utilities/utils/scheduler.py`.
+
 ## Performance Benefits
 
 ### Speedup Example

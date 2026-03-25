@@ -82,6 +82,7 @@ oact_utilities/
 │   ├── hpc.py                  # HPC job file writers (Flux, SLURM)
 │   ├── jobs.py                 # Job launching utilities
 │   ├── status.py               # Job termination/completion checking, failure reason parsing
+│   ├── scheduler.py            # Scheduler liveness checks for crash recovery (SLURM/Flux)
 │   ├── an66.py                 # Actinide-66 compound utilities
 │   ├── baselines.py            # Baseline calculation helpers
 │   └── table_summary.py        # Data table utilities
@@ -328,6 +329,10 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --fix-unlinked <job_dir>     # Repair NULL job_dir: auto-link directories or reset to TO_RUN
 --include-timeout-in-reset   # Reset both failed and timeout
 --max-retries N              # Only reset jobs with fail_count < N
+
+# Crash recovery
+--recover-orphans            # Detect jobs orphaned by dead scheduler allocations
+--scheduler {slurm,flux}     # Scheduler type (required with --recover-orphans)
 
 # Performance
 --debug N                    # Limit to N jobs for testing

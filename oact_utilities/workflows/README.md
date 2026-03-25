@@ -210,7 +210,7 @@ The SQLite database tracks each structure with:
 | `orig_index` | INTEGER | Original row index from CSV |
 | `elements` | TEXT | Semicolon-separated element symbols |
 | `natoms` | INTEGER | Number of atoms |
-| `status` | TEXT | Job status: to_run, ready, running, completed, failed, timeout |
+| `status` | TEXT | Job status: to_run, running, completed, failed, timeout (legacy "ready" auto-migrated) |
 | `charge` | INTEGER | Molecular charge (optional) |
 | `spin` | INTEGER | Spin multiplicity (2S+1) |
 | `geometry` | TEXT | XYZ geometry string |
@@ -222,6 +222,7 @@ The SQLite database tracks each structure with:
 | `fail_count` | INTEGER | Number of times job has failed (for retry tracking) |
 | `wall_time` | REAL | Total wall time in seconds (extracted from ORCA output) |
 | `n_cores` | INTEGER | Number of CPU cores used |
+| `worker_id` | TEXT | Scheduler job ID (SLURM/Flux) for crash recovery |
 | `created_at` | TIMESTAMP | Creation time |
 | `updated_at` | TIMESTAMP | Last update time |
 
@@ -668,6 +669,33 @@ python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 50
 # Check which jobs are chronically failing
 python -m oact_utilities.workflows.dashboard workflow.db --show-chronic-failures 3
 ```
+
+## Crash Recovery
+
+When a scheduler allocation is killed (walltime limit, scancel, node crash), jobs can get stuck in RUNNING status. The system provides three layers of recovery:
+
+**Layer 1 -- SIGINT (Ctrl+C):** The existing `KeyboardInterrupt` handler resets orphaned jobs in the `finally` block.
+
+**Layer 2 -- SIGTERM (scancel, walltime):** A flag-based SIGTERM handler is registered after `parsl.load()`. When SLURM sends SIGTERM (~30s before SIGKILL), the handler sets a shutdown flag. The monitoring loop checks this flag between jobs and exits cleanly, triggering the bulk orphan reset in `finally`.
+
+**Layer 3 -- SIGKILL / node crash:** When no Python cleanup is possible, use the dashboard's `--recover-orphans` command. It queries the scheduler to find dead allocations and recovers their jobs:
+
+```bash
+# Check SLURM for dead allocations and recover orphaned jobs
+python -m oact_utilities.workflows.dashboard workflow.db --recover-orphans --scheduler slurm
+
+# Same for Flux
+python -m oact_utilities.workflows.dashboard workflow.db --recover-orphans --scheduler flux
+```
+
+The recovery process:
+1. Finds all RUNNING jobs with a `worker_id` (scheduler job ID set at submission time)
+2. Queries the scheduler (`squeue` or `flux jobs`) for active jobs -- single call for all
+3. Jobs whose `worker_id` is no longer active are orphans
+4. Each orphan is checked on disk: completed -> COMPLETED, failed -> FAILED, inconclusive -> TO_RUN
+5. Content-based checks always take priority (a completed job is never incorrectly reset)
+
+If the scheduler is unreachable, no jobs are modified (conservative default).
 
 ## Job Directory Cleanup
 
