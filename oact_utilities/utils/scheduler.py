@@ -11,6 +11,15 @@ import getpass
 import os
 import subprocess
 
+# Scheduler commands that list active job IDs (one per line, no header).
+# SLURM: squeue -u <user> -h -o "%A" outputs numeric job IDs.
+# Flux: flux jobs outputs compact alphanumeric IDs (e.g., "f2xgUVYLJs27")
+#       that match the $FLUX_JOB_ID env var format.
+_SCHEDULER_COMMANDS: dict[str, list[str]] = {
+    "slurm": ["squeue", "-u", "{user}", "-h", "-o", "%A"],
+    "flux": ["flux", "jobs", "--filter=pending,running,completing", "-no", "{{id}}"],
+}
+
 
 def get_active_scheduler_jobs(scheduler: str) -> set[str] | None:
     """Get the set of all currently active scheduler job IDs for the current user.
@@ -27,66 +36,29 @@ def get_active_scheduler_jobs(scheduler: str) -> set[str] | None:
         None: Could not reach the scheduler (timeout, command not found, etc.).
             Caller MUST skip recovery when None is returned (conservative default).
     """
+    cmd_template = _SCHEDULER_COMMANDS.get(scheduler)
+    if cmd_template is None:
+        print(f"Unknown scheduler: {scheduler}")
+        return None
+
+    # Determine current user for SLURM's -u flag. Falls back to
+    # getpass.getuser() which uses pwd.getpwuid(os.getuid()) when $USER
+    # is unset (containers, cron). Without a user identity, squeue -u ""
+    # would return all users' jobs, causing false-negative orphan detection.
+    user = os.environ.get("USER") or getpass.getuser()
+    if not user:
+        return None  # Cannot determine user -- skip recovery
+
+    # Substitute {user} placeholder in the command template
+    cmd = [arg.format(user=user) for arg in cmd_template]
+
     try:
-        if scheduler == "slurm":
-            # Determine current user -- fall back to getpass.getuser() which
-            # uses pwd.getpwuid(os.getuid()) when $USER is unset (containers,
-            # cron). Without a user identity, squeue -u "" returns all users'
-            # jobs, causing false-negative orphan detection.
-            user = os.environ.get("USER") or getpass.getuser()
-            if not user:
-                return None  # Cannot determine user -- skip recovery
-
-            # squeue -u $USER -h -o "%A" outputs one numeric job ID per line,
-            # no header. Only shows active jobs (PENDING, RUNNING, COMPLETING, etc.)
-            result = subprocess.run(
-                [
-                    "squeue",
-                    "-u",
-                    user,
-                    "-h",
-                    "-o",
-                    "%A",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode != 0:
-                return None
-            output = result.stdout.strip()
-            return set(output.split("\n")) if output else set()
-
-        elif scheduler == "flux":
-            # flux jobs outputs compact alphanumeric IDs (e.g., "f2xgUVYLJs27").
-            # --filter=pending,running,completing limits to active jobs.
-            # -no "{id}" outputs one job ID per line with no header.
-            # These IDs match the $FLUX_JOB_ID env var format.
-            result = subprocess.run(
-                [
-                    "flux",
-                    "jobs",
-                    "--filter=pending,running,completing",
-                    "-no",
-                    "{id}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode != 0:
-                return None
-            output = result.stdout.strip()
-            return set(output.split("\n")) if output else set()
-
-        else:
-            print(f"Unknown scheduler: {scheduler}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
             return None
-
-    except subprocess.TimeoutExpired:
-        return None
-    except FileNotFoundError:
-        # squeue or flux command not found
-        return None
-    except OSError:
+        output = result.stdout.strip()
+        return set(output.split("\n")) if output else set()
+    except (subprocess.TimeoutExpired, OSError):
+        # OSError covers FileNotFoundError (command not found) and other
+        # OS-level errors (permissions, etc.)
         return None

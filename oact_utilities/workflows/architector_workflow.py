@@ -544,22 +544,6 @@ class ArchitectorWorkflow:
         """
         self.update_status_bulk(job_ids, JobStatus.RUNNING, worker_id=worker_id)
 
-    def get_running_jobs_by_worker(self, worker_id: str) -> list[JobRecord]:
-        """Get all RUNNING jobs owned by a specific scheduler job.
-
-        Args:
-            worker_id: Scheduler job ID to filter by.
-
-        Returns:
-            List of JobRecord objects that are RUNNING with this worker_id.
-        """
-        query = (
-            f"SELECT {self._LIGHT_COLS} FROM structures "
-            "WHERE status = ? AND worker_id = ?"
-        )
-        cur = self._execute_with_retry(query, (JobStatus.RUNNING.value, worker_id))
-        return [self._row_to_record(r) for r in cur.fetchall()]
-
     def reset_failed_jobs(
         self, max_fail_count: int | None = None, include_timeout: bool = False
     ):

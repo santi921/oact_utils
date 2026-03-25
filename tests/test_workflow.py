@@ -932,42 +932,6 @@ def test_worker_id_bulk_reset(tmp_path):
         assert all(j.worker_id == "flux_abc123" for j in still_running)
 
 
-def test_get_running_jobs_by_worker(tmp_path):
-    """get_running_jobs_by_worker filters by worker_id."""
-    from oact_utilities.utils.architector import _init_db, _insert_row
-
-    db_path = tmp_path / "test.db"
-    conn = _init_db(db_path)
-    for i in range(4):
-        _insert_row(
-            conn,
-            orig_index=i,
-            elements="H;H",
-            natoms=2,
-            geometry="H 0 0 0\nH 0 0 0.74",
-            status="to_run",
-        )
-    conn.commit()
-    conn.close()
-
-    with ArchitectorWorkflow(db_path) as workflow:
-        # Two jobs owned by worker A, two by worker B
-        workflow.mark_jobs_as_running([1, 2], worker_id="slurm_100")
-        workflow.mark_jobs_as_running([3, 4], worker_id="slurm_200")
-
-        worker_a = workflow.get_running_jobs_by_worker("slurm_100")
-        assert len(worker_a) == 2
-        assert {j.id for j in worker_a} == {1, 2}
-
-        worker_b = workflow.get_running_jobs_by_worker("slurm_200")
-        assert len(worker_b) == 2
-        assert {j.id for j in worker_b} == {3, 4}
-
-        # Non-existent worker returns empty
-        none = workflow.get_running_jobs_by_worker("slurm_999")
-        assert len(none) == 0
-
-
 def test_ensure_schema_migrates_worker_id(tmp_path):
     """_ensure_schema adds worker_id column to old databases."""
     import sqlite3
@@ -1015,8 +979,9 @@ def test_ensure_schema_migrates_worker_id(tmp_path):
 
         # Verify worker_id column works
         workflow.mark_jobs_as_running([1], worker_id="test_123")
-        running = workflow.get_running_jobs_by_worker("test_123")
+        running = workflow.get_jobs_by_status(JobStatus.RUNNING)
         assert len(running) == 1
+        assert running[0].worker_id == "test_123"
 
 
 def test_sigterm_handler_sets_flag():
