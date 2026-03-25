@@ -860,3 +860,180 @@ def test_ensure_schema_adds_optimizer_column(tmp_path):
         row = cur.fetchone()
         assert row is not None
         assert row[0] is None  # Default should be NULL
+
+
+def test_worker_id_set_and_cleared(tmp_path):
+    """worker_id is set on mark_jobs_as_running and cleared on status change."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Mark as running with a worker_id
+        workflow.mark_jobs_as_running([1], worker_id="slurm_12345")
+        jobs = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(jobs) == 1
+        assert jobs[0].worker_id == "slurm_12345"
+
+        # Complete the job -- worker_id should be cleared
+        workflow.update_status(1, JobStatus.COMPLETED, worker_id=None)
+        jobs = workflow.get_jobs_by_status(JobStatus.COMPLETED)
+        assert len(jobs) == 1
+        assert jobs[0].worker_id is None
+
+
+def test_worker_id_bulk_reset(tmp_path):
+    """update_status_bulk clears worker_id for multiple jobs at once."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    for i in range(5):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="to_run",
+        )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        job_ids = [1, 2, 3, 4, 5]
+        workflow.mark_jobs_as_running(job_ids, worker_id="flux_abc123")
+
+        # Verify all have worker_id set
+        running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert all(j.worker_id == "flux_abc123" for j in running)
+
+        # Bulk reset orphans to TO_RUN, clearing worker_id
+        workflow.update_status_bulk([1, 2, 3], JobStatus.TO_RUN, worker_id=None)
+
+        to_run = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(to_run) == 3
+        assert all(j.worker_id is None for j in to_run)
+
+        # Remaining jobs still have worker_id
+        still_running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(still_running) == 2
+        assert all(j.worker_id == "flux_abc123" for j in still_running)
+
+
+def test_get_running_jobs_by_worker(tmp_path):
+    """get_running_jobs_by_worker filters by worker_id."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    for i in range(4):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="to_run",
+        )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Two jobs owned by worker A, two by worker B
+        workflow.mark_jobs_as_running([1, 2], worker_id="slurm_100")
+        workflow.mark_jobs_as_running([3, 4], worker_id="slurm_200")
+
+        worker_a = workflow.get_running_jobs_by_worker("slurm_100")
+        assert len(worker_a) == 2
+        assert {j.id for j in worker_a} == {1, 2}
+
+        worker_b = workflow.get_running_jobs_by_worker("slurm_200")
+        assert len(worker_b) == 2
+        assert {j.id for j in worker_b} == {3, 4}
+
+        # Non-existent worker returns empty
+        none = workflow.get_running_jobs_by_worker("slurm_999")
+        assert len(none) == 0
+
+
+def test_ensure_schema_migrates_worker_id(tmp_path):
+    """_ensure_schema adds worker_id column to old databases."""
+    import sqlite3
+
+    db_path = tmp_path / "old.db"
+    # Create a DB without worker_id column (simulating old schema)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE structures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orig_index INTEGER,
+            elements TEXT,
+            natoms INTEGER,
+            status TEXT,
+            charge INTEGER,
+            spin INTEGER,
+            geometry TEXT,
+            job_dir TEXT,
+            max_forces REAL,
+            scf_steps INTEGER,
+            final_energy REAL,
+            error_message TEXT,
+            fail_count INTEGER DEFAULT 0,
+            wall_time REAL,
+            n_cores INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+    )
+    conn.execute(
+        "INSERT INTO structures (orig_index, elements, natoms, status, geometry) "
+        "VALUES (0, 'H;H', 2, 'ready', 'H 0 0 0')"
+    )
+    conn.commit()
+    conn.close()
+
+    # Opening triggers _ensure_schema which adds worker_id and migrates ready->to_run
+    with ArchitectorWorkflow(db_path) as workflow:
+        jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(jobs) == 1
+        assert jobs[0].worker_id is None
+        assert jobs[0].status == JobStatus.TO_RUN
+
+        # Verify worker_id column works
+        workflow.mark_jobs_as_running([1], worker_id="test_123")
+        running = workflow.get_running_jobs_by_worker("test_123")
+        assert len(running) == 1
+
+
+def test_sigterm_handler_sets_flag():
+    """SIGTERM handler sets the shutdown flag without raising."""
+    import signal
+
+    _shutdown_requested = False
+    _original = signal.getsignal(signal.SIGTERM)
+
+    def _handler(signum, frame):
+        nonlocal _shutdown_requested
+        _shutdown_requested = True
+
+    try:
+        signal.signal(signal.SIGTERM, _handler)
+        # Send SIGTERM to ourselves
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert _shutdown_requested is True
+    finally:
+        signal.signal(signal.SIGTERM, _original)

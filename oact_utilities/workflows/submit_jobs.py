@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import signal
 import subprocess
 import sys
 import time
@@ -1039,11 +1040,47 @@ def submit_batch_parsl(
         # Reset claimed jobs back to TO_RUN since we can't run them
         for jid in submitted_ids:
             try:
-                workflow.update_status(jid, JobStatus.TO_RUN)
+                workflow.update_status(jid, JobStatus.TO_RUN, worker_id=None)
             except Exception:
                 pass
         print(f"Reset {len(submitted_ids)} claimed jobs back to TO_RUN")
         return []
+
+    # --- SIGTERM handler (register AFTER parsl.load to avoid Parsl overwriting) ---
+    # Detect current scheduler job ID for worker_id tracking.
+    # SLURM uses numeric IDs (e.g., "12345").
+    # Flux uses compact alphanumeric IDs (e.g., "f2xgUVYLJs27").
+    # Fallback to PID for local testing without a scheduler.
+    _scheduler_job_id = (
+        os.environ.get("SLURM_JOB_ID")
+        or os.environ.get("FLUX_JOB_ID")
+        or f"pid_{os.getpid()}"
+    )
+
+    # Flag-based SIGTERM handler: set a flag instead of raising an exception.
+    # The as_completed() loop checks this flag between jobs and exits cleanly.
+    # This avoids interrupting SQLite commits mid-transaction.
+    # Signal handlers run on the main thread in CPython, and the flag is
+    # checked on the main thread in the as_completed() loop, so no
+    # synchronization is needed.
+    _shutdown_requested = False
+    _original_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _sigterm_handler(signum, frame):
+        nonlocal _shutdown_requested
+        _shutdown_requested = True
+        # Use sys.stderr.write instead of print() for async-signal-safety
+        sys.stderr.write(
+            "\nSIGTERM received -- finishing current DB write, "
+            "then shutting down...\n"
+        )
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    # Set worker_id on all claimed jobs so --recover-orphans can identify
+    # which scheduler allocation owns them.
+    workflow.mark_jobs_as_running(submitted_ids, worker_id=_scheduler_job_id)
+    print(f"Set worker_id={_scheduler_job_id} on {len(submitted_ids)} jobs")
 
     # Submit futures
     print(f"\nSubmitting {len(jobs_to_submit)} jobs to Parsl...")
@@ -1081,7 +1118,7 @@ def submit_batch_parsl(
                 result = future.result()
 
                 if result["status"] == "completed":
-                    workflow.update_status(job_id, JobStatus.COMPLETED)
+                    workflow.update_status(job_id, JobStatus.COMPLETED, worker_id=None)
                     completed_ids.append(job_id)
 
                     # Extract metrics on the fly for successful jobs
@@ -1119,7 +1156,10 @@ def submit_batch_parsl(
                     )
                 elif result["status"] == "timeout":
                     workflow.update_status(
-                        job_id, JobStatus.TIMEOUT, error_message=result.get("error")
+                        job_id,
+                        JobStatus.TIMEOUT,
+                        error_message=result.get("error"),
+                        worker_id=None,
                     )
                     failed_ids.append(job_id)
                     print(f"Job {job_id} timeout")
@@ -1129,6 +1169,7 @@ def submit_batch_parsl(
                         JobStatus.FAILED,
                         error_message=result.get("error"),
                         increment_fail_count=True,
+                        worker_id=None,
                     )
                     failed_ids.append(job_id)
                     error_msg = result.get("error", "Unknown error")[:100]
@@ -1140,27 +1181,45 @@ def submit_batch_parsl(
                     JobStatus.FAILED,
                     error_message=str(e),
                     increment_fail_count=True,
+                    worker_id=None,
                 )
                 failed_ids.append(job_id)
                 print(f"Job {job_id} exception: {str(e)[:100]}")
+
+            # Check shutdown flag AFTER all DB writes for this future complete.
+            # This is the safe point -- no transaction is in progress.
+            if _shutdown_requested:
+                print("Shutdown requested -- exiting monitoring loop...")
+                break
 
     except KeyboardInterrupt:
         print("\n\nGraceful shutdown requested...")
 
     finally:
-        # Reset any jobs that are still RUNNING back to TO_RUN so they can be
-        # re-submitted in the next batch (e.g. after Ctrl+C or crash).
+        # Reset orphaned jobs (still RUNNING) back to TO_RUN.
+        # Use bulk update (single UPDATE + single commit) to stay well within
+        # SLURM's ~30s SIGKILL grace window after SIGTERM.
         resolved_ids = set(completed_ids) | set(failed_ids)
         orphaned_ids = [jid for jid in submitted_ids if jid not in resolved_ids]
         if orphaned_ids:
-            for jid in orphaned_ids:
-                try:
-                    workflow.update_status(jid, JobStatus.TO_RUN)
-                except Exception:
-                    pass
+            try:
+                workflow.update_status_bulk(
+                    orphaned_ids, JobStatus.TO_RUN, worker_id=None
+                )
+            except Exception:
+                # Fallback: try individually if bulk fails
+                for jid in orphaned_ids:
+                    try:
+                        workflow.update_status(jid, JobStatus.TO_RUN, worker_id=None)
+                    except Exception:
+                        pass
             print(f"Reset {len(orphaned_ids)} in-flight jobs back to TO_RUN")
 
-        # Cleanup Parsl
+        # Restore original SIGTERM handler
+        signal.signal(signal.SIGTERM, _original_sigterm)
+
+        # Cleanup Parsl -- running workers are terminated by dfk.cleanup().
+        # Their job IDs are already classified as orphans and reset above.
         print("\nCleaning up Parsl executor...")
         try:
             dfk = parsl.dfk()
