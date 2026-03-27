@@ -20,7 +20,7 @@ from ..core.orca.calc import write_orca_inputs
 from ..core.orca.sella_runner import write_sella_runner_shim
 from ..utils.analysis import find_timings_and_cores, parse_job_metrics
 from ..utils.architector import xyz_string_to_atoms
-from ..utils.status import pull_log_file
+from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
 
 try:
@@ -399,6 +399,103 @@ def _filter_marker_jobs(
             error_message="Blocked by .do_not_rerun.json marker",
         )
         print(f"Skipped {len(skip_ids)} jobs due to .do_not_rerun.json marker")
+
+    return clean_jobs
+
+
+def _skip_finished_on_disk(
+    jobs: list,
+    root_dir: Path,
+    job_dir_pattern: str,
+    workflow: ArchitectorWorkflow,
+    hours_cutoff: float = 168,
+) -> list:
+    """Filter out jobs that already completed or failed on disk.
+
+    Checks each candidate job's output directory before submission. Jobs
+    found completed are auto-updated to COMPLETED in the DB. Jobs found
+    failed are auto-updated to FAILED. This prevents re-submitting jobs
+    whose results would be overwritten by prepare_job_directory().
+
+    Uses the same dual-lookup pattern as _filter_marker_jobs: tries
+    job.job_dir first, then falls back to constructing the path from
+    job_dir_pattern.
+
+    Args:
+        jobs: List of JobRecord objects to filter.
+        root_dir: Root directory for job directories.
+        job_dir_pattern: Pattern for job directory names.
+        workflow: ArchitectorWorkflow instance for DB updates.
+        hours_cutoff: Hours threshold for timeout detection in
+            check_job_termination. Defaults to 168 (1 week) to avoid
+            false timeout classifications on idle directories.
+
+    Returns:
+        Filtered list of jobs (without completed/failed ones).
+    """
+    completed_ids: list[int] = []
+    failed_ids: list[int] = []
+    failed_errors: dict[int, str] = {}
+    clean_jobs = []
+
+    for job in jobs:
+        # Resolve directory: try DB job_dir first, then pattern-based path
+        job_dir = None
+        if job.job_dir and Path(job.job_dir).is_dir():
+            job_dir = job.job_dir
+        else:
+            pattern = job_dir_pattern.replace(
+                "{orig_index}", str(job.orig_index)
+            ).replace("{id}", str(job.id))
+            candidate = root_dir / pattern
+            if candidate.is_dir():
+                job_dir = str(candidate)
+
+        if not job_dir:
+            clean_jobs.append(job)
+            continue
+
+        status = check_job_termination(job_dir, hours_cutoff=hours_cutoff)
+
+        if status == 1:
+            completed_ids.append(job.id)
+        elif status == -1:
+            failed_ids.append(job.id)
+            try:
+                log_file = pull_log_file(job_dir)
+                reason = parse_failure_reason(log_file)
+                if reason:
+                    failed_errors[job.id] = reason
+            except (FileNotFoundError, Exception):
+                pass
+        else:
+            # 0 (running/unknown) or -2 (timeout): submit normally
+            clean_jobs.append(job)
+
+    # Batch DB updates
+    if completed_ids:
+        workflow.update_status_bulk(completed_ids, JobStatus.COMPLETED)
+        print(
+            f"Skipped {len(completed_ids)} jobs already completed on disk "
+            "(updated DB to COMPLETED)"
+        )
+
+    if failed_ids:
+        # Failed jobs need per-job error messages for the ones we extracted
+        for jid in failed_ids:
+            error_msg = failed_errors.get(
+                jid, "Failed on disk (detected at submission)"
+            )
+            workflow.update_status(
+                jid,
+                JobStatus.FAILED,
+                error_message=error_msg,
+                increment_fail_count=True,
+            )
+        print(
+            f"Skipped {len(failed_ids)} jobs already failed on disk "
+            "(updated DB to FAILED)"
+        )
 
     return clean_jobs
 
@@ -1060,25 +1157,36 @@ def submit_batch_parsl(
         return []
 
     # --- SIGTERM handler (register AFTER parsl.load to avoid Parsl overwriting) ---
-    # Flag-based SIGTERM handler: set a flag instead of raising an exception.
-    # The as_completed() loop checks this flag between jobs and exits cleanly.
-    # This avoids interrupting SQLite commits mid-transaction.
-    # Signal handlers run on the main thread in CPython, and the flag is
-    # checked on the main thread in the as_completed() loop, so no
-    # synchronization is needed.
+    # When the scheduler cancels an allocation (scancel / flux cancel), it
+    # sends SIGTERM to our process.  Workers die immediately, so no futures
+    # will ever complete -- as_completed() blocks forever.  A flag-only
+    # handler would never be checked and the finally block (which resets
+    # orphaned jobs) would never run before SIGKILL arrives.
+    #
+    # Fix: after setting the flag, raise KeyboardInterrupt.  This interrupts
+    # as_completed(), is caught by the existing `except KeyboardInterrupt`
+    # handler, and falls through to the finally block which bulk-resets all
+    # in-flight jobs to TO_RUN.  SQLite transactions are atomic, so an
+    # interrupted commit simply rolls back -- at most one job's status update
+    # is lost (and the finally block will correct it).
     _shutdown_requested = False
     _original_sigterm = signal.getsignal(signal.SIGTERM)
 
     def _sigterm_handler(signum, frame):
         nonlocal _shutdown_requested
         _shutdown_requested = True
+        # Restore original handler so a second SIGTERM during cleanup
+        # does not raise another KeyboardInterrupt mid-finally.
+        signal.signal(signal.SIGTERM, _original_sigterm)
         try:
             sys.stderr.write(
-                "\nSIGTERM received -- finishing current DB write, "
-                "then shutting down...\n"
+                "\nSIGTERM received -- shutting down and resetting "
+                "in-flight jobs...\n"
             )
         except Exception:
             pass  # Best-effort notification; flag is already set
+        # Break out of as_completed() so the finally block can reset orphans
+        raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _sigterm_handler)
 

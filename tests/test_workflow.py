@@ -984,8 +984,12 @@ def test_ensure_schema_migrates_worker_id(tmp_path):
         assert running[0].worker_id == "test_123"
 
 
-def test_sigterm_handler_sets_flag():
-    """SIGTERM handler sets the shutdown flag without raising."""
+def test_sigterm_handler_sets_flag_and_raises():
+    """SIGTERM handler sets the shutdown flag and raises KeyboardInterrupt.
+
+    The raise is necessary to break out of as_completed() which blocks
+    indefinitely when Parsl workers are dead (e.g., after flux cancel).
+    """
     import signal
 
     _shutdown_requested = False
@@ -994,11 +998,13 @@ def test_sigterm_handler_sets_flag():
     def _handler(signum, frame):
         nonlocal _shutdown_requested
         _shutdown_requested = True
+        signal.signal(signal.SIGTERM, _original)
+        raise KeyboardInterrupt
 
     try:
         signal.signal(signal.SIGTERM, _handler)
-        # Send SIGTERM to ourselves
-        os.kill(os.getpid(), signal.SIGTERM)
+        with pytest.raises(KeyboardInterrupt):
+            os.kill(os.getpid(), signal.SIGTERM)
         assert _shutdown_requested is True
     finally:
         signal.signal(signal.SIGTERM, _original)
