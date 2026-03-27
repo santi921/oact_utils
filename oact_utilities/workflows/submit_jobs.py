@@ -1034,6 +1034,15 @@ def submit_batch_parsl(
         print("No jobs available after marker filtering")
         return []
 
+    # Filter out jobs that already completed or failed on disk
+    jobs_to_submit = _skip_finished_on_disk(
+        jobs_to_submit, root_dir, job_dir_pattern, workflow
+    )
+
+    if not jobs_to_submit:
+        print("No jobs available after disk check")
+        return []
+
     # Detect scheduler job ID early so it can be set atomically with the
     # RUNNING status claim (avoids a window where jobs are RUNNING but have
     # no worker_id, which would make them invisible to --recover-orphans).
@@ -1440,6 +1449,15 @@ def submit_batch(
 
     if not jobs_to_submit:
         print("No jobs available after marker filtering")
+        return []
+
+    # Filter out jobs that already completed or failed on disk
+    jobs_to_submit = _skip_finished_on_disk(
+        jobs_to_submit, root_dir, job_dir_pattern, workflow
+    )
+
+    if not jobs_to_submit:
+        print("No jobs available after disk check")
         return []
 
     # Claim jobs atomically BEFORE slow directory preparation to prevent

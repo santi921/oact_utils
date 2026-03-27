@@ -728,3 +728,183 @@ class TestMultiNodeCLIValidation:
         )
         assert result.returncode != 0
         assert "must be >= 1" in result.stderr
+
+
+# --- Pre-submission disk check tests ---
+
+
+class TestSkipFinishedOnDisk:
+    """Tests for _skip_finished_on_disk()."""
+
+    def _make_db(self, tmp_path, n_jobs=3):
+        """Helper: create a workflow DB with n TO_RUN jobs."""
+        from oact_utilities.utils.architector import _init_db, _insert_row
+
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        for i in range(n_jobs):
+            _insert_row(
+                conn,
+                orig_index=i,
+                elements="H;H",
+                natoms=2,
+                geometry="H 0 0 0\nH 0 0 0.74",
+                status="to_run",
+            )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_no_directories_all_pass_through(self, tmp_path):
+        """Jobs with no directories on disk all pass through."""
+        from oact_utilities.workflows.architector_workflow import (
+            ArchitectorWorkflow,
+            JobStatus,
+        )
+        from oact_utilities.workflows.submit_jobs import _skip_finished_on_disk
+
+        db_path = self._make_db(tmp_path)
+        root_dir = tmp_path / "jobs"
+        root_dir.mkdir()
+
+        with ArchitectorWorkflow(db_path) as wf:
+            jobs = wf.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
+            result = _skip_finished_on_disk(jobs, root_dir, "job_{orig_index}", wf)
+            assert len(result) == 3
+
+    def test_completed_on_disk_filtered_and_db_updated(self, tmp_path):
+        """A job with 'ORCA TERMINATED NORMALLY' on disk is skipped and DB updated."""
+        from oact_utilities.workflows.architector_workflow import (
+            ArchitectorWorkflow,
+            JobStatus,
+        )
+        from oact_utilities.workflows.submit_jobs import _skip_finished_on_disk
+
+        db_path = self._make_db(tmp_path)
+        root_dir = tmp_path / "jobs"
+
+        # Create a completed job directory
+        job_dir = root_dir / "job_0"
+        job_dir.mkdir(parents=True)
+        (job_dir / "orca.out").write_text("Some output\nORCA TERMINATED NORMALLY\n")
+
+        with ArchitectorWorkflow(db_path) as wf:
+            jobs = wf.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
+            result = _skip_finished_on_disk(jobs, root_dir, "job_{orig_index}", wf)
+            # Job 0 should be filtered out
+            assert len(result) == 2
+            assert all(j.orig_index != 0 for j in result)
+
+            # DB should be updated to COMPLETED
+            completed = wf.get_jobs_by_status(JobStatus.COMPLETED)
+            assert len(completed) == 1
+            assert completed[0].orig_index == 0
+
+    def test_failed_on_disk_filtered_and_db_updated(self, tmp_path):
+        """A job with 'aborting the run' on disk is skipped and DB updated."""
+        from oact_utilities.workflows.architector_workflow import (
+            ArchitectorWorkflow,
+            JobStatus,
+        )
+        from oact_utilities.workflows.submit_jobs import _skip_finished_on_disk
+
+        db_path = self._make_db(tmp_path)
+        root_dir = tmp_path / "jobs"
+
+        # Create a failed job directory
+        job_dir = root_dir / "job_1"
+        job_dir.mkdir(parents=True)
+        (job_dir / "orca.out").write_text("SCF NOT CONVERGED\naborting the run\n")
+
+        with ArchitectorWorkflow(db_path) as wf:
+            jobs = wf.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
+            result = _skip_finished_on_disk(jobs, root_dir, "job_{orig_index}", wf)
+            assert len(result) == 2
+
+            # DB should be updated to FAILED with fail_count incremented
+            failed = wf.get_jobs_by_status(JobStatus.FAILED)
+            assert len(failed) == 1
+            assert failed[0].fail_count == 1
+            assert failed[0].error_message is not None
+
+    def test_no_output_file_passes_through(self, tmp_path):
+        """A directory with no .out file passes through for submission."""
+        from oact_utilities.workflows.architector_workflow import (
+            ArchitectorWorkflow,
+            JobStatus,
+        )
+        from oact_utilities.workflows.submit_jobs import _skip_finished_on_disk
+
+        db_path = self._make_db(tmp_path)
+        root_dir = tmp_path / "jobs"
+
+        # Create an empty job directory (just orca.inp, no output)
+        job_dir = root_dir / "job_0"
+        job_dir.mkdir(parents=True)
+        (job_dir / "orca.inp").write_text("! UKS wB97M-V\n")
+
+        with ArchitectorWorkflow(db_path) as wf:
+            jobs = wf.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
+            result = _skip_finished_on_disk(jobs, root_dir, "job_{orig_index}", wf)
+            # All jobs pass through (no output = nothing to detect)
+            assert len(result) == 3
+
+    def test_pattern_fallback_when_job_dir_null(self, tmp_path):
+        """Uses pattern-based path when job.job_dir is NULL in DB."""
+        from oact_utilities.workflows.architector_workflow import (
+            ArchitectorWorkflow,
+            JobStatus,
+        )
+        from oact_utilities.workflows.submit_jobs import _skip_finished_on_disk
+
+        db_path = self._make_db(tmp_path)
+        root_dir = tmp_path / "jobs"
+
+        # Create completed output at pattern-based path (job_dir is NULL in DB)
+        job_dir = root_dir / "job_0"
+        job_dir.mkdir(parents=True)
+        (job_dir / "orca.out").write_text("Some output\nORCA TERMINATED NORMALLY\n")
+
+        with ArchitectorWorkflow(db_path) as wf:
+            jobs = wf.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
+            # Verify job_dir is NULL
+            assert jobs[0].job_dir is None
+
+            result = _skip_finished_on_disk(jobs, root_dir, "job_{orig_index}", wf)
+            # Job 0 detected via pattern fallback
+            assert len(result) == 2
+
+    def test_mixed_batch(self, tmp_path):
+        """Mixed batch: one completed, one failed, one new."""
+        from oact_utilities.workflows.architector_workflow import (
+            ArchitectorWorkflow,
+            JobStatus,
+        )
+        from oact_utilities.workflows.submit_jobs import _skip_finished_on_disk
+
+        db_path = self._make_db(tmp_path)
+        root_dir = tmp_path / "jobs"
+
+        # Job 0: completed
+        d0 = root_dir / "job_0"
+        d0.mkdir(parents=True)
+        (d0 / "orca.out").write_text("ORCA TERMINATED NORMALLY\n")
+
+        # Job 1: failed
+        d1 = root_dir / "job_1"
+        d1.mkdir(parents=True)
+        (d1 / "orca.out").write_text("aborting the run\n")
+
+        # Job 2: no directory (new)
+
+        with ArchitectorWorkflow(db_path) as wf:
+            jobs = wf.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
+            result = _skip_finished_on_disk(jobs, root_dir, "job_{orig_index}", wf)
+
+            assert len(result) == 1
+            assert result[0].orig_index == 2
+
+            counts = wf.count_by_status()
+            assert counts.get(JobStatus.COMPLETED, 0) == 1
+            assert counts.get(JobStatus.FAILED, 0) == 1
+            assert counts.get(JobStatus.TO_RUN, 0) == 1
