@@ -13,6 +13,7 @@ import random
 import re
 import sqlite3
 import time
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -68,47 +69,66 @@ class ArchitectorWorkflow:
     - Generate dashboard reports
     """
 
-    def __init__(self, db_path: str | Path, timeout: float = 5.0):
+    def __init__(
+        self,
+        db_path: str | Path,
+        timeout: float = 5.0,
+        max_retries: int = 5,
+        retry_delay_cap: float = 5.0,
+    ):
         """Initialize workflow manager with existing database.
 
         Args:
             db_path: Path to the SQLite database file.
             timeout: SQLite busy-wait timeout in seconds per lock attempt.
                 Kept short so the retry loop can fail fast for interactive
-                use. Parsl workers can pass a higher value if needed.
+                use. Parsl coordinators should pass a higher value.
+            max_retries: Maximum number of retries for lock/busy errors.
+                Higher values improve resilience on contended parallel
+                filesystems (Lustre). Default 5 is fine for interactive
+                use; Parsl coordinators should pass 10+.
+            retry_delay_cap: Maximum sleep between retries in seconds.
+                Default 5.0 for interactive; Parsl coordinators should
+                pass 10.0 for longer contention windows.
         """
         self.db_path = Path(db_path)
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found at {db_path}")
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_delay_cap = retry_delay_cap
         self.conn = self._get_connection()
         self._ensure_schema()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection with WAL mode enabled if possible.
+        """Get a database connection with DELETE journal mode.
 
-        Falls back to DELETE journal mode on network filesystems (NFS, Lustre)
-        that don't support WAL locking protocols. If both journal mode pragmas
-        fail (common on Lustre where POSIX locking is broken), skips the
-        pragma entirely -- SQLite defaults to DELETE mode anyway.
+        Always uses DELETE journal mode because WAL requires shared-memory
+        locking that fails on network filesystems (Lustre, GPFS, NFS).
+        A crashed WAL process leaves stale -wal/-shm files that poison
+        every subsequent connection on these filesystems.
 
         Uses sqlite3.Row as the row factory so columns can be accessed by
         name instead of positional index. This eliminates fragile positional
         indexing that breaks when columns are added via ALTER TABLE.
         """
+        # Check for stale WAL files BEFORE connecting, because SQLite's
+        # WAL recovery (triggered on connect) may delete them automatically.
+        wal_path = Path(str(self.db_path) + "-wal")
+        shm_path = Path(str(self.db_path) + "-shm")
+        has_stale_wal = wal_path.exists() or shm_path.exists()
+
         conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
         conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError:
-            # Network filesystem (NFS/Lustre) can fail with various
-            # errors: "locking protocol", "database is locked", etc.
-            try:
-                conn.execute("PRAGMA journal_mode=DELETE")
-            except sqlite3.OperationalError:
-                # Lustre POSIX locking completely broken for this path.
-                # Skip the pragma -- SQLite defaults to DELETE mode.
-                pass
+        conn.execute("PRAGMA journal_mode=DELETE")
+
+        if has_stale_wal:
+            warnings.warn(
+                f"Stale WAL files detected next to {self.db_path}. "
+                "They were likely left by a prior run that used WAL mode. "
+                "SQLite may have recovered them automatically.",
+                stacklevel=2,
+            )
         return conn
 
     def _ensure_schema(self) -> None:
@@ -165,7 +185,12 @@ class ArchitectorWorkflow:
             for token in ("lock", "busy", "locking protocol", "database is locked")
         )
 
-    def _execute_with_retry(self, query: str, params: tuple = (), max_retries: int = 5):
+    def _execute_with_retry(
+        self,
+        query: str,
+        params: tuple = (),
+        max_retries: int | None = None,
+    ):
         """Execute a query with retry logic for handling database locks.
 
         Uses exponential backoff with jitter to handle concurrent access
@@ -176,11 +201,14 @@ class ArchitectorWorkflow:
         Args:
             query: SQL query string.
             params: Query parameters.
-            max_retries: Maximum number of retries.
+            max_retries: Maximum number of retries. Defaults to
+                ``self.max_retries``.
 
         Returns:
             Cursor after execution.
         """
+        if max_retries is None:
+            max_retries = self.max_retries
         is_write = query.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
         for attempt in range(max_retries):
             try:
@@ -196,13 +224,13 @@ class ArchitectorWorkflow:
                         self.conn.rollback()
                     except Exception:
                         pass
-                    delay = min(0.1 * (2**attempt), 5.0)
+                    delay = min(0.1 * (2**attempt), self.retry_delay_cap)
                     jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
                     continue
                 raise
 
-    def _commit_with_retry(self, max_retries: int = 5):
+    def _commit_with_retry(self, max_retries: int | None = None):
         """Commit with retry logic for handling database locks.
 
         The conn.commit() call can also raise 'database is locked' when
@@ -210,15 +238,18 @@ class ArchitectorWorkflow:
         job statuses concurrently).
 
         Args:
-            max_retries: Maximum number of retries.
+            max_retries: Maximum number of retries. Defaults to
+                ``self.max_retries``.
         """
+        if max_retries is None:
+            max_retries = self.max_retries
         for attempt in range(max_retries):
             try:
                 self.conn.commit()
                 return
             except sqlite3.OperationalError as e:
                 if self._is_retryable(e) and attempt < max_retries - 1:
-                    delay = min(0.1 * (2**attempt), 5.0)
+                    delay = min(0.1 * (2**attempt), self.retry_delay_cap)
                     jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
                     continue

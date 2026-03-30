@@ -101,6 +101,75 @@ DEFAULT_LD_LIBRARY_PATHS = {
     "slurm": "",
 }
 
+# Number of completed jobs to accumulate before flushing to DB.
+# Reduces per-job commits on Lustre (100-500ms each) by batching.
+_BATCH_COMMIT_SIZE = 10
+
+
+def _flush_pending_updates(
+    workflow: ArchitectorWorkflow,
+    pending: list[dict],
+) -> None:
+    """Flush accumulated job updates to the DB in a single transaction.
+
+    Each entry in *pending* is a dict with keys:
+        job_id (int), status (JobStatus),
+        error_message (str | None), increment_fail_count (bool),
+        metrics (dict | None -- keys: job_dir, max_forces, scf_steps,
+                 final_energy, wall_time, n_cores).
+
+    All updates share one BEGIN IMMEDIATE / COMMIT pair, cutting
+    commit overhead from O(N) to O(1) per batch.
+    """
+    if not pending:
+        return
+
+    for u in pending:
+        job_id = u["job_id"]
+
+        # -- status update --
+        set_clauses = [
+            "status = ?",
+            "worker_id = NULL",
+            "updated_at = CURRENT_TIMESTAMP",
+        ]
+        params: list = [u["status"].value]
+
+        if u.get("increment_fail_count"):
+            set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+
+        if u.get("error_message") is not None:
+            set_clauses.append("error_message = ?")
+            params.append(u["error_message"])
+
+        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
+        params.append(job_id)
+        workflow._execute_with_retry(query, tuple(params))
+
+        # -- metrics update (completed jobs only) --
+        metrics = u.get("metrics")
+        if metrics:
+            mcols: list[str] = []
+            mvals: list = []
+            for col in (
+                "job_dir",
+                "max_forces",
+                "scf_steps",
+                "final_energy",
+                "wall_time",
+                "n_cores",
+            ):
+                if metrics.get(col) is not None:
+                    mcols.append(f"{col} = ?")
+                    mvals.append(metrics[col])
+            if mcols:
+                mcols.append("updated_at = CURRENT_TIMESTAMP")
+                mquery = f"UPDATE structures SET {', '.join(mcols)} WHERE id = ?"
+                mvals.append(job_id)
+                workflow._execute_with_retry(mquery, tuple(mvals))
+
+    workflow._commit_with_retry()
+
 
 def prepare_job_directory(
     job_record,
@@ -466,7 +535,7 @@ def _skip_finished_on_disk(
                 reason = parse_failure_reason(log_file)
                 if reason:
                     failed_errors[job.id] = reason
-            except (FileNotFoundError, Exception):
+            except (FileNotFoundError, OSError):
                 pass
         else:
             # 0 (running/unknown) or -2 (timeout): submit normally
@@ -699,6 +768,37 @@ if PARSL_AVAILABLE:
                             "error": "Sella status file not found after process exit",
                             "wall_time": elapsed,
                         }
+                else:
+                    # ORCA can exit 0 even when an MPI child process
+                    # (e.g. orca_leanscf_mpi) fails with "aborting the
+                    # run".  Verify the output file actually shows normal
+                    # termination before trusting the return code.
+                    from collections import deque
+
+                    out_path = job_dir_path / "orca.out"
+                    if out_path.exists():
+                        try:
+                            with open(out_path, errors="replace") as fh:
+                                tail = deque(fh, maxlen=10)
+                            has_normal = any(
+                                "ORCA TERMINATED NORMALLY" in ln for ln in tail
+                            )
+                            has_abort = any(
+                                "aborting the run" in ln or "Error" in ln for ln in tail
+                            )
+                            if not has_normal and has_abort:
+                                err_tail = "".join(tail).strip()[-300:]
+                                return {
+                                    "job_id": job_id,
+                                    "status": "failed",
+                                    "error": (
+                                        "ORCA exited 0 but output shows "
+                                        f"error: {err_tail}"
+                                    ),
+                                    "wall_time": elapsed,
+                                }
+                        except OSError:
+                            pass  # Fall through to completed
 
                 return {
                     "job_id": job_id,
@@ -1231,8 +1331,9 @@ def submit_batch_parsl(
     print("\nMonitoring job execution...")
     print("(Press Ctrl+C for graceful shutdown)\n")
 
-    completed_ids = []
-    failed_ids = []
+    completed_ids: list[int] = []
+    failed_ids: list[int] = []
+    pending_updates: list[dict] = []
 
     # Create future->(job_id, job_dir) mapping for concurrent completion
     futures_map = {future: (job_id, job_dir) for job_id, job_dir, future in futures}
@@ -1245,76 +1346,89 @@ def submit_batch_parsl(
                 result = future.result()
 
                 if result["status"] == "completed":
-                    workflow.update_status(job_id, JobStatus.COMPLETED, worker_id=None)
                     completed_ids.append(job_id)
 
                     # Extract metrics on the fly for successful jobs
+                    metrics_dict: dict | None = None
                     try:
                         metrics = parse_job_metrics(job_dir)
                         wall_time = None
-                        n_cores = None
+                        n_cores_val = None
                         try:
                             log_file = pull_log_file(str(job_dir))
-                            n_cores_val, time_dict = find_timings_and_cores(log_file)
+                            n_cores_parsed, time_dict = find_timings_and_cores(log_file)
                             if time_dict and "Total" in time_dict:
                                 wall_time = time_dict["Total"]
-                            n_cores = n_cores_val
+                            n_cores_val = n_cores_parsed
                         except Exception as e:
                             print(
                                 f"  Warning: timing extraction failed for job {job_id}: {e}"
                             )
                         if metrics["success"]:
-                            workflow.update_job_metrics(
-                                job_id,
-                                job_dir=job_dir,
-                                max_forces=metrics.get("max_forces"),
-                                scf_steps=metrics.get("scf_steps"),
-                                final_energy=metrics.get("final_energy"),
-                                wall_time=wall_time,
-                                n_cores=n_cores,
-                            )
+                            metrics_dict = {
+                                "job_dir": job_dir,
+                                "max_forces": metrics.get("max_forces"),
+                                "scf_steps": metrics.get("scf_steps"),
+                                "final_energy": metrics.get("final_energy"),
+                                "wall_time": wall_time,
+                                "n_cores": n_cores_val,
+                            }
                     except Exception as e:
                         print(
                             f"  Warning: metrics extraction failed for job {job_id}: {e}"
                         )
 
+                    pending_updates.append(
+                        {
+                            "job_id": job_id,
+                            "status": JobStatus.COMPLETED,
+                            "metrics": metrics_dict,
+                        }
+                    )
                     print(
                         f" Job {job_id} completed ({len(completed_ids)}/{len(futures)} done)"
                     )
                 elif result["status"] == "timeout":
-                    workflow.update_status(
-                        job_id,
-                        JobStatus.TIMEOUT,
-                        error_message=result.get("error"),
-                        worker_id=None,
+                    pending_updates.append(
+                        {
+                            "job_id": job_id,
+                            "status": JobStatus.TIMEOUT,
+                            "error_message": result.get("error"),
+                        }
                     )
                     failed_ids.append(job_id)
                     print(f"Job {job_id} timeout")
                 else:
-                    workflow.update_status(
-                        job_id,
-                        JobStatus.FAILED,
-                        error_message=result.get("error"),
-                        increment_fail_count=True,
-                        worker_id=None,
+                    pending_updates.append(
+                        {
+                            "job_id": job_id,
+                            "status": JobStatus.FAILED,
+                            "error_message": result.get("error"),
+                            "increment_fail_count": True,
+                        }
                     )
                     failed_ids.append(job_id)
                     error_msg = result.get("error", "Unknown error")[:100]
                     print(f"Job {job_id} failed: {error_msg}")
 
             except Exception as e:
-                workflow.update_status(
-                    job_id,
-                    JobStatus.FAILED,
-                    error_message=str(e),
-                    increment_fail_count=True,
-                    worker_id=None,
+                pending_updates.append(
+                    {
+                        "job_id": job_id,
+                        "status": JobStatus.FAILED,
+                        "error_message": str(e),
+                        "increment_fail_count": True,
+                    }
                 )
                 failed_ids.append(job_id)
                 print(f"Job {job_id} exception: {str(e)[:100]}")
 
-            # Check shutdown flag AFTER all DB writes for this future complete.
-            # This is the safe point -- no transaction is in progress.
+            # Flush batch when it reaches _BATCH_COMMIT_SIZE
+            if len(pending_updates) >= _BATCH_COMMIT_SIZE:
+                _flush_pending_updates(workflow, pending_updates)
+                pending_updates.clear()
+
+            # Check shutdown flag AFTER DB writes for this future.
             if _shutdown_requested:
                 print("Shutdown requested -- exiting monitoring loop...")
                 break
@@ -1323,6 +1437,16 @@ def submit_batch_parsl(
         print("\n\nGraceful shutdown requested...")
 
     finally:
+        # Flush any remaining buffered updates before resetting orphans.
+        # Best-effort: if this fails, _skip_finished_on_disk catches it
+        # on the next submission pass.
+        if pending_updates:
+            try:
+                _flush_pending_updates(workflow, pending_updates)
+                pending_updates.clear()
+            except Exception:
+                pass
+
         # Reset orphaned jobs (still RUNNING) back to TO_RUN.
         # Use bulk update (single UPDATE + single commit) to stay well within
         # SLURM's ~30s SIGKILL grace window after SIGTERM.
@@ -1852,9 +1976,17 @@ def main():
     if args.orca_path:
         orca_config["orca_path"] = args.orca_path
 
-    # Open workflow
+    # Open workflow (higher retry budget for Parsl to survive Lustre contention)
     try:
-        workflow = ArchitectorWorkflow(args.db_path)
+        if args.use_parsl:
+            workflow = ArchitectorWorkflow(
+                args.db_path,
+                timeout=15.0,
+                max_retries=10,
+                retry_delay_cap=10.0,
+            )
+        else:
+            workflow = ArchitectorWorkflow(args.db_path)
     except FileNotFoundError:
         print(f"Error: Database not found at {args.db_path}")
         sys.exit(1)

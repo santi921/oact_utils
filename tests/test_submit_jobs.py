@@ -1,13 +1,16 @@
 """Tests for submit_jobs module."""
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from oact_utilities.workflows.architector_workflow import ArchitectorWorkflow, JobStatus
 from oact_utilities.workflows.submit_jobs import (
     DEFAULT_ORCA_CONFIG,
     DEFAULT_ORCA_PATHS,
     OrcaConfig,
+    _flush_pending_updates,
     prepare_job_directory,
     write_flux_job_file,
     write_slurm_job_file,
@@ -908,3 +911,214 @@ class TestSkipFinishedOnDisk:
             assert counts.get(JobStatus.COMPLETED, 0) == 1
             assert counts.get(JobStatus.FAILED, 0) == 1
             assert counts.get(JobStatus.TO_RUN, 0) == 1
+
+
+class TestOrcaExitCodeVerification:
+    """Test that Parsl path verifies ORCA output even when exit code is 0.
+
+    ORCA can exit with code 0 while an MPI child (e.g. orca_leanscf_mpi)
+    has failed and printed 'aborting the run' to the output file.
+    """
+
+    def _check_orca_output(self, job_dir: Path) -> str | None:
+        """Replicate the verification logic from orca_job_wrapper.
+
+        Returns None if the output looks good, or an error string if it
+        shows a failure despite exit code 0.
+        """
+        from collections import deque
+
+        out_path = job_dir / "orca.out"
+        if not out_path.exists():
+            return None
+
+        try:
+            with open(out_path, errors="replace") as fh:
+                tail = deque(fh, maxlen=10)
+            has_normal = any("ORCA TERMINATED NORMALLY" in ln for ln in tail)
+            has_abort = any("aborting the run" in ln or "Error" in ln for ln in tail)
+            if not has_normal and has_abort:
+                return "ORCA exited 0 but output shows error"
+        except OSError:
+            pass
+
+        return None
+
+    def test_normal_termination_passes(self, tmp_path):
+        """Exit code 0 + ORCA TERMINATED NORMALLY -> completed."""
+        job_dir = tmp_path / "job_0"
+        job_dir.mkdir()
+        (job_dir / "orca.out").write_text(
+            "Some output\n****ORCA TERMINATED NORMALLY****\n"
+        )
+        assert self._check_orca_output(job_dir) is None
+
+    def test_abort_despite_exit_zero(self, tmp_path):
+        """Exit code 0 + 'aborting the run' -> detected as failed."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+        (job_dir / "orca.out").write_text(
+            "ORCA finished by error termination in LEANSCF\n"
+            "[file orca_tools/qcmsg.cpp, line 394]:\n"
+            "  .... aborting the run\n"
+        )
+        result = self._check_orca_output(job_dir)
+        assert result is not None
+        assert "error" in result.lower()
+
+    def test_error_despite_exit_zero(self, tmp_path):
+        """Exit code 0 + 'Error' in tail -> detected as failed."""
+        job_dir = tmp_path / "job_2"
+        job_dir.mkdir()
+        (job_dir / "orca.out").write_text(
+            "Error (TDIISSCF_AO): Cannot read Error matrix\n"
+            "ORCA finished by error termination in LEANSCF\n"
+            "  .... aborting the run\n"
+        )
+        result = self._check_orca_output(job_dir)
+        assert result is not None
+
+    def test_no_output_file_passes(self, tmp_path):
+        """Missing orca.out -> no error (trust exit code)."""
+        job_dir = tmp_path / "job_3"
+        job_dir.mkdir()
+        assert self._check_orca_output(job_dir) is None
+
+    def test_benign_error_with_normal_termination(self, tmp_path):
+        """'Error' line followed by ORCA TERMINATED NORMALLY -> passes.
+
+        ORCA can print benign messages containing 'Error' (e.g. integral
+        error warnings) before completing normally.
+        """
+        job_dir = tmp_path / "job_4"
+        job_dir.mkdir()
+        (job_dir / "orca.out").write_text(
+            "Some of the Onep Integrals have an Error larger than 1.0e-05\n"
+            "****ORCA TERMINATED NORMALLY****\n"
+        )
+        assert self._check_orca_output(job_dir) is None
+
+
+# --- Tests for _flush_pending_updates (Change 2: batch commits) ---
+
+
+@pytest.fixture
+def workflow_db(tmp_path):
+    """Create a workflow DB with 5 test jobs for flush tests."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    for i in range(5):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="running",
+        )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+class TestFlushPendingUpdates:
+    """Tests for the _flush_pending_updates batch commit function."""
+
+    def test_empty_list_is_noop(self, workflow_db):
+        """Flushing an empty list does nothing."""
+        with ArchitectorWorkflow(workflow_db) as wf:
+            _flush_pending_updates(wf, [])
+            # All jobs still running
+            running = wf.get_jobs_by_status(JobStatus.RUNNING)
+            assert len(running) == 5
+
+    def test_completed_jobs_with_metrics(self, workflow_db):
+        """Completed jobs get status + metrics in one transaction."""
+        with ArchitectorWorkflow(workflow_db) as wf:
+            pending = [
+                {
+                    "job_id": 1,
+                    "status": JobStatus.COMPLETED,
+                    "metrics": {
+                        "job_dir": "/path/to/job_0",
+                        "max_forces": 0.001,
+                        "scf_steps": 10,
+                        "final_energy": -1.5,
+                        "wall_time": 120.0,
+                        "n_cores": 4,
+                    },
+                },
+                {
+                    "job_id": 2,
+                    "status": JobStatus.COMPLETED,
+                    "metrics": {
+                        "job_dir": "/path/to/job_1",
+                        "max_forces": 0.002,
+                        "scf_steps": 15,
+                        "final_energy": -2.5,
+                    },
+                },
+            ]
+            _flush_pending_updates(wf, pending)
+
+            completed = wf.get_jobs_by_status(JobStatus.COMPLETED)
+            assert len(completed) == 2
+            assert completed[0].max_forces == 0.001
+            assert completed[0].wall_time == 120.0
+            assert completed[1].scf_steps == 15
+
+            # worker_id should be cleared
+            assert completed[0].worker_id is None
+
+    def test_failed_jobs_with_error_and_fail_count(self, workflow_db):
+        """Failed jobs get error_message and incremented fail_count."""
+        with ArchitectorWorkflow(workflow_db) as wf:
+            pending = [
+                {
+                    "job_id": 1,
+                    "status": JobStatus.FAILED,
+                    "error_message": "SCF did not converge",
+                    "increment_fail_count": True,
+                },
+            ]
+            _flush_pending_updates(wf, pending)
+
+            failed = wf.get_jobs_by_status(JobStatus.FAILED)
+            assert len(failed) == 1
+            assert failed[0].error_message == "SCF did not converge"
+            assert failed[0].fail_count == 1
+
+    def test_mixed_statuses(self, workflow_db):
+        """Mix of completed, failed, and timeout in one batch."""
+        with ArchitectorWorkflow(workflow_db) as wf:
+            pending = [
+                {
+                    "job_id": 1,
+                    "status": JobStatus.COMPLETED,
+                    "metrics": {"job_dir": "/j0", "final_energy": -1.0},
+                },
+                {
+                    "job_id": 2,
+                    "status": JobStatus.FAILED,
+                    "error_message": "memory error",
+                    "increment_fail_count": True,
+                },
+                {
+                    "job_id": 3,
+                    "status": JobStatus.TIMEOUT,
+                    "error_message": "exceeded 20h",
+                },
+            ]
+            _flush_pending_updates(wf, pending)
+
+            completed = wf.get_jobs_by_status(JobStatus.COMPLETED)
+            failed = wf.get_jobs_by_status(JobStatus.FAILED)
+            timeout = wf.get_jobs_by_status(JobStatus.TIMEOUT)
+            running = wf.get_jobs_by_status(JobStatus.RUNNING)
+
+            assert len(completed) == 1
+            assert len(failed) == 1
+            assert len(timeout) == 1
+            assert len(running) == 2  # jobs 4 and 5 unchanged

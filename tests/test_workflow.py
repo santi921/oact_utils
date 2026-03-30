@@ -1235,3 +1235,115 @@ def test_recover_orphans_all_active(tmp_path, monkeypatch):
         # Job should still be RUNNING
         jobs = workflow.get_jobs_by_status(JobStatus.RUNNING)
         assert len(jobs) == 1
+
+
+# --- Tests for DELETE journal mode (Change 1) ---
+
+
+def test_get_connection_uses_delete_journal_mode(tmp_path):
+    """_get_connection() always sets DELETE journal mode."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        cur = workflow.conn.execute("PRAGMA journal_mode")
+        mode = cur.fetchone()[0]
+        assert mode == "delete"
+
+
+def test_stale_wal_files_produce_warning(tmp_path):
+    """Stale .db-wal/.db-shm files trigger a warning on DB open."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    # Create stale WAL files
+    (tmp_path / "test.db-wal").write_text("stale")
+    (tmp_path / "test.db-shm").write_text("stale")
+
+    import warnings
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        workflow = ArchitectorWorkflow(db_path)
+        workflow.close()
+
+    assert len(w) == 1
+    assert "Stale WAL files" in str(w[0].message)
+
+
+# --- Tests for configurable retry budget (Change 3) ---
+
+
+def test_retry_budget_defaults(tmp_path):
+    """Default max_retries and retry_delay_cap are backward-compatible."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.max_retries == 5
+        assert workflow.retry_delay_cap == 5.0
+
+
+def test_retry_budget_custom_values(tmp_path):
+    """Custom max_retries and retry_delay_cap are stored."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(
+        db_path, timeout=15.0, max_retries=10, retry_delay_cap=10.0
+    ) as workflow:
+        assert workflow.max_retries == 10
+        assert workflow.retry_delay_cap == 10.0
+        assert workflow.timeout == 15.0
