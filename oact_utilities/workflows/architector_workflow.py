@@ -118,9 +118,34 @@ class ArchitectorWorkflow:
         shm_path = Path(str(self.db_path) + "-shm")
         has_stale_wal = wal_path.exists() or shm_path.exists()
 
-        conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=DELETE")
+        # Retry the connection + journal_mode PRAGMA together.  On Lustre with
+        # 50+ processes starting simultaneously, the PRAGMA journal_mode=DELETE
+        # requires a brief write lock and can fail with SQLITE_BUSY even though
+        # sqlite3.connect() itself succeeded.  The connection-level busy timeout
+        # does not cover the period before the first execute, so we retry the
+        # whole setup with exponential backoff.
+        conn: sqlite3.Connection | None = None
+        for attempt in range(10):
+            try:
+                conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=DELETE")
+                break
+            except sqlite3.OperationalError as e:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    conn = None
+                if "lock" in str(e).lower() or "busy" in str(e).lower():
+                    if attempt < 9:
+                        delay = min(0.5 * (2**attempt), 30.0)
+                        jitter = random.uniform(0, delay * 0.2)
+                        time.sleep(delay + jitter)
+                        continue
+                raise
+        assert conn is not None  # loop always breaks or raises
 
         if has_stale_wal:
             warnings.warn(
