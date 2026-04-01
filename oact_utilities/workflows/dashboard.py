@@ -1384,16 +1384,17 @@ def recover_orphaned_jobs(
             worker_id=None,
             increment_fail_count=True,
         )
-    # Failed jobs need per-job error messages -- update individually
-    # but within fewer transactions than before
+    # Failed jobs have per-job error messages so they can't use update_status_bulk.
+    # Execute all UPDATEs first, then commit once to minimize Lustre fsync cost.
     for job_id, error_msg in failed_updates:
-        workflow.update_status(
-            job_id,
-            JobStatus.FAILED,
-            worker_id=None,
-            error_message=error_msg,
-            increment_fail_count=True,
+        workflow._execute_with_retry(
+            "UPDATE structures SET status = ?, error_message = ?, "
+            "fail_count = COALESCE(fail_count, 0) + 1, worker_id = NULL, "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (JobStatus.FAILED.value, error_msg, job_id),
         )
+    if failed_updates:
+        workflow._commit_with_retry()
 
     completed_count = len(completed_ids)
     failed_count = len(failed_updates)
