@@ -194,12 +194,20 @@ class ArchitectorWorkflow:
                     else:
                         raise
 
-        # Migrate legacy "ready" status to "to_run" (idempotent)
-        self._execute_with_retry(
-            "UPDATE structures SET status = ? WHERE status = ?",
-            (JobStatus.TO_RUN.value, JobStatus.READY.value),
+        # Migrate legacy "ready" status to "to_run" (idempotent).
+        # Guard with a read-only count check so mature databases skip the write
+        # entirely -- avoids 50+ simultaneous write-lock acquisitions at startup
+        # when many Parsl workers open the DB at the same time on Lustre.
+        cur = self._execute_with_retry(
+            "SELECT COUNT(*) FROM structures WHERE status = ?",
+            (JobStatus.READY.value,),
         )
-        self._commit_with_retry()
+        if cur.fetchone()[0] > 0:
+            self._execute_with_retry(
+                "UPDATE structures SET status = ? WHERE status = ?",
+                (JobStatus.TO_RUN.value, JobStatus.READY.value),
+            )
+            self._commit_with_retry()
 
     @staticmethod
     def _is_retryable(e: sqlite3.OperationalError) -> bool:
