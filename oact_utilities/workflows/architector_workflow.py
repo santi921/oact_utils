@@ -720,6 +720,31 @@ class ArchitectorWorkflow:
         rows = cur.fetchall()
         return [self._row_to_record(r) for r in rows]
 
+    def get_chronic_reset_counts(
+        self, thresholds: tuple[int, int] = (5, 25)
+    ) -> tuple[int, int]:
+        """Return counts of to_run jobs exceeding each fail_count threshold.
+
+        Uses a single conditional-aggregation query to avoid loading rows into
+        memory. Safe on Lustre/GPFS (one round-trip, no fetchall).
+
+        Args:
+            thresholds: Pair of (low, high) fail_count thresholds.
+
+        Returns:
+            Tuple of (count_low, count_high).
+        """
+        low, high = thresholds
+        query = """
+            SELECT
+                SUM(CASE WHEN status = 'to_run' AND COALESCE(fail_count, 0) >= ? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN status = 'to_run' AND COALESCE(fail_count, 0) >= ? THEN 1 ELSE 0 END)
+            FROM structures
+        """
+        cur = self._execute_with_retry(query, (low, high))
+        row = cur.fetchone()
+        return (row[0] or 0, row[1] or 0)
+
 
 def create_workflow(
     csv_path: str | Path,

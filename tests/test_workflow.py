@@ -1347,3 +1347,172 @@ def test_retry_budget_custom_values(tmp_path):
         assert workflow.max_retries == 10
         assert workflow.retry_delay_cap == 10.0
         assert workflow.timeout == 15.0
+
+
+def test_get_chronic_reset_counts_zeros(tmp_path):
+    """Returns (0, 0) when no jobs exceed either threshold."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    # Jobs with fail_count below threshold
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=0,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=3,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.get_chronic_reset_counts() == (0, 0)
+
+
+def test_get_chronic_reset_counts_low_band_only(tmp_path):
+    """Returns correct count when only the 5+ band is populated."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=6,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=7,
+    )
+    _insert_row(
+        conn,
+        orig_index=2,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=2,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.get_chronic_reset_counts() == (2, 0)
+
+
+def test_get_chronic_reset_counts_both_bands(tmp_path):
+    """Both thresholds populated; high count is a subset of low count."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=30,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=8,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        low, high = workflow.get_chronic_reset_counts()
+        assert low == 2
+        assert high == 1
+        assert low >= high
+
+
+def test_get_chronic_reset_counts_excludes_non_to_run(tmp_path):
+    """Jobs not in to_run status are excluded from counts."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    # High fail_count but not to_run
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="failed",
+        fail_count=10,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="completed",
+        fail_count=30,
+    )
+    # to_run but below threshold
+    _insert_row(
+        conn,
+        orig_index=2,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=1,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.get_chronic_reset_counts() == (0, 0)
+
+
+def test_get_chronic_reset_counts_null_fail_count(tmp_path):
+    """NULL fail_count is treated as 0 and excluded from counts."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.get_chronic_reset_counts() == (0, 0)

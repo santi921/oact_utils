@@ -76,6 +76,14 @@ def print_summary(workflow: ArchitectorWorkflow):
             f" {n_all:>6}/{total:<5} ({pct_all:>5.1f}%)"
         )
 
+    # Chronic reset indicator -- always shown when jobs exceed the lower threshold
+    count_5, count_25 = workflow.get_chronic_reset_counts()
+    if count_5 > 0:
+        print(
+            f"\nChronic resets (to_run):  "
+            f"{count_5} failed 5+ times,  {count_25} failed 25+ times"
+        )
+
     print()
 
 
