@@ -129,14 +129,15 @@ oact_utilities/
 
 ## ORCA Templates
 
-Four configurable templates defined in `core/orca/calc.py`:
+Five configurable templates defined in `core/orca/calc.py`:
 
-| Template         | Use Case                  | Key Settings                                                       |
-| ---------------- | ------------------------- | ------------------------------------------------------------------ |
-| `omol` (default) | Standard DFT              | RIJCOSX, def2/J, DIIS, NormalConv, DEFGRID3, ALLPOP                |
-| `omol_base`      | Difficult SCF convergence | Simplified SCF (MaxIter=600), MediumConv, fewer convergence tweaks |
-| `x2c`            | Relativistic (actinides)  | DLU-X2C, RIJCOSX, AutoAux                                          |
-| `dk3`            | Heavy relativistic        | DKH (Douglas-Kroll-Hess), SARC/J                                   |
+| Template         | Use Case                  | Key Settings                                                                         |
+| ---------------- | ------------------------- | ------------------------------------------------------------------------------------ |
+| `omol` (default) | Standard DFT              | RIJCOSX, def2/J, DIIS, NormalConv, DEFGRID3, ALLPOP                                 |
+| `omol_base`      | Difficult SCF convergence | Simplified SCF (MaxIter=600), MediumConv, fewer convergence tweaks                  |
+| `x2c`            | Relativistic (actinides)  | DLU-X2C, RIJCOSX, AutoAux                                                            |
+| `dk3`            | Heavy relativistic        | DKH (Douglas-Kroll-Hess), SARC/J                                                    |
+| `pm3`            | Debug / fast CI runs      | PM3 semiempirical, no Gaussian basis, under 1s on small organics; no actinide support |
 
 All templates now include `Print[ P_Hirshfeld ] 1` in the `%output` block for Hirshfeld population analysis by default.
 
