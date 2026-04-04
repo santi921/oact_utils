@@ -22,6 +22,7 @@
 DB_PATH="/path/to/workflow.db"  #(update USE ACTINIDES DB)
 ROOT_DIR="/path/to/job_output_dir" #(update)
 ORCA_PATH="/path/to/orca"          #(update -- must be absolute path to ORCA binary)
+JOB_PREFIX=""                     # optional stable prefix reused across coordinator requeues
 
 BATCH_SIZE=500          # number of jobs to dispatch at once (update)
 MAX_WORKERS=4              # workers per node (update)
@@ -61,6 +62,7 @@ python -m oact_utilities.workflows.submit_jobs \
     "${ROOT_DIR}" \
     --use-parsl \
     --scheduler slurm \
+    ${JOB_PREFIX:+--job-prefix "${JOB_PREFIX}"} \
     --batch-size "${BATCH_SIZE}" \
     --max-workers "${MAX_WORKERS}" \
     --cores-per-worker "${CORES_PER_WORKER}" \

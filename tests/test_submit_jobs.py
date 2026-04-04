@@ -54,7 +54,9 @@ def orca_config_with_path():
 class TestPrepareJobDirectory:
     """Tests for prepare_job_directory function."""
 
-    def test_creates_directory(self, mock_job_record, tmp_path, orca_config_with_path):
+    def test_creates_directory(
+        self, mock_job_record, tmp_path, orca_config_with_path
+    ):
         """Test that job directory is created."""
         job_dir = prepare_job_directory(
             mock_job_record, tmp_path, orca_config=orca_config_with_path
@@ -115,6 +117,38 @@ class TestPrepareJobDirectory:
         )
 
         assert job_dir.name == "calc_1_42"
+
+    def test_hostname_placeholder_in_job_dir_pattern(
+        self, mock_job_record, tmp_path, orca_config_with_path, monkeypatch
+    ):
+        """Custom job directory patterns may include the coordinator hostname."""
+        monkeypatch.setattr(
+            "oact_utilities.workflows.job_dir_patterns.get_job_dir_hostname",
+            lambda: "coord01",
+        )
+        job_dir = prepare_job_directory(
+            mock_job_record,
+            tmp_path,
+            job_dir_pattern="{hostname}_calc_{id}_{orig_index}",
+            orca_config=orca_config_with_path,
+        )
+
+        assert job_dir.name == "coord01_calc_1_42"
+
+    def test_apply_job_dir_prefix(self):
+        """Stable run prefixes prepend cleanly to the base job directory pattern."""
+        from oact_utilities.workflows.job_dir_patterns import apply_job_dir_prefix
+
+        assert apply_job_dir_prefix("job_{orig_index}", "campaignA") == (
+            "campaignA_job_{orig_index}"
+        )
+
+    def test_apply_job_dir_prefix_rejects_invalid_chars(self):
+        """Run prefixes reject path-like or unsafe characters."""
+        from oact_utilities.workflows.job_dir_patterns import apply_job_dir_prefix
+
+        with pytest.raises(ValueError, match="job_prefix may contain only"):
+            apply_job_dir_prefix("job_{orig_index}", "../campaign")
 
     def test_default_orca_config_applied(
         self, mock_job_record, tmp_path, orca_config_with_path

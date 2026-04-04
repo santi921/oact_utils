@@ -21,6 +21,7 @@
 DB_PATH="/path/to/workflow.db"
 ROOT_DIR="/path/to/job_output_dir"
 ORCA_PATH="/path/to/orca"
+JOB_PREFIX=""  # optional stable prefix reused across coordinator requeues
 
 BATCH_SIZE=500
 # Reserve full nodes but intentionally leave some cores idle for memory headroom.
@@ -60,6 +61,7 @@ python -m oact_utilities.workflows.submit_jobs \
     "${ROOT_DIR}" \
     --use-parsl \
     --scheduler pbspro \
+    ${JOB_PREFIX:+--job-prefix "${JOB_PREFIX}"} \
     --batch-size "${BATCH_SIZE}" \
     --max-workers "${MAX_WORKERS}" \
     --cores-per-worker "${CORES_PER_WORKER}" \

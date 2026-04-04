@@ -25,6 +25,11 @@ from ..utils.analysis import find_timings_and_cores, parse_job_metrics
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .job_dir_patterns import (
+    DEFAULT_JOB_DIR_PATTERN,
+    apply_job_dir_prefix,
+    render_job_dir_pattern,
+)
 
 try:
     from parsl import python_app
@@ -223,7 +228,7 @@ def _build_parsl_htex_launch_cmd(python_executable: str | None = None) -> str:
 def prepare_job_directory(
     job_record,
     root_dir: Path,
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     orca_config: OrcaConfig | None = None,
     n_cores: int = 4,
     setup_func: Callable | None = None,
@@ -234,7 +239,8 @@ def prepare_job_directory(
     Args:
         job_record: JobRecord from the workflow database.
         root_dir: Root directory where job directories will be created.
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         orca_config: ORCA calculation configuration.
         n_cores: Number of CPU cores for ORCA.
         setup_func: Optional function to set up additional files. Called with
@@ -244,21 +250,10 @@ def prepare_job_directory(
     Returns:
         Path to the created job directory.
     """
-    # Use limited, explicit placeholder replacement to avoid format string issues.
-    # Supported placeholders: {orig_index}, {id}. Any other braces are rejected.
-    pattern = job_dir_pattern
-
-    allowed_placeholders = ("{orig_index}", "{id}")
-    temp_pattern = pattern
-    for placeholder in allowed_placeholders:
-        temp_pattern = temp_pattern.replace(placeholder, "")
-    if "{" in temp_pattern or "}" in temp_pattern:
-        raise ValueError(
-            f"Unsupported placeholder or stray brace in job_dir_pattern: {job_dir_pattern!r}"
-        )
-
-    job_dir_name = pattern.replace("{orig_index}", str(job_record.orig_index)).replace(
-        "{id}", str(job_record.id)
+    job_dir_name = render_job_dir_pattern(
+        job_dir_pattern,
+        orig_index=job_record.orig_index,
+        job_id=job_record.id,
     )
 
     job_dir = root_dir / job_dir_name
@@ -480,7 +475,8 @@ def _filter_marker_jobs(
     Args:
         jobs: List of JobRecord objects to filter.
         root_dir: Root directory for job directories.
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         workflow: ArchitectorWorkflow instance for DB updates.
 
     Returns:
@@ -497,9 +493,11 @@ def _filter_marker_jobs(
             if marker_path.exists():
                 marker_found = True
         if not marker_found:
-            pattern = job_dir_pattern.replace(
-                "{orig_index}", str(job.orig_index)
-            ).replace("{id}", str(job.id))
+            pattern = render_job_dir_pattern(
+                job_dir_pattern,
+                orig_index=job.orig_index,
+                job_id=job.id,
+            )
             candidate = root_dir / pattern / ".do_not_rerun.json"
             if candidate.exists():
                 marker_found = True
@@ -1193,7 +1191,7 @@ def submit_batch_parsl(
     cores_per_worker: int = 16,
     cpus_per_node: int | None = None,
     scheduler: str = "flux",
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     orca_config: OrcaConfig | None = None,
     setup_func: Callable | None = None,
     n_cores: int = 16,
@@ -1228,7 +1226,8 @@ def submit_batch_parsl(
         scheduler: Parsl provider backend ("flux" for LocalProvider,
             "slurm" for SlurmProvider multi-node, "pbspro" for
             PBSProProvider multi-node).
-        job_dir_pattern: Pattern for job directory names
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         orca_config: ORCA configuration
         setup_func: Optional setup function per job
         n_cores: Cores per ORCA job
@@ -1464,9 +1463,11 @@ def submit_batch_parsl(
     print(f"Writing Parsl task mapping to {task_map_path}")
 
     for job in jobs_to_submit:
-        job_dir_name = job_dir_pattern.replace(
-            "{orig_index}", str(job.orig_index)
-        ).replace("{id}", str(job.id))
+        job_dir_name = render_job_dir_pattern(
+            job_dir_pattern,
+            orig_index=job.orig_index,
+            job_id=job.id,
+        )
         job_dir_abs = (root_dir / job_dir_name).resolve()
 
         future = orca_job_wrapper(
@@ -1605,7 +1606,7 @@ def submit_batch(
     root_dir: str | Path,
     batch_size: int = 10,
     scheduler: str = "flux",
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     orca_config: OrcaConfig | None = None,
     setup_func: Callable | None = None,
     n_cores: int = 4,
@@ -1625,7 +1626,8 @@ def submit_batch(
         root_dir: Root directory for job directories.
         batch_size: Number of jobs to submit in this batch.
         scheduler: Either "flux" or "slurm".
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         orca_config: ORCA calculation configuration.
         setup_func: Optional function to set up job-specific files.
         n_cores: Number of cores per job.
@@ -1820,8 +1822,21 @@ def main():
     )
     parser.add_argument(
         "--job-dir-pattern",
-        default="job_{orig_index}",
-        help="Pattern for job directory names (default: job_{orig_index})",
+        default=DEFAULT_JOB_DIR_PATTERN,
+        help=(
+            "Pattern for job directory names. Supports {hostname}, "
+            "{orig_index}, and {id} (default: "
+            f"{DEFAULT_JOB_DIR_PATTERN})"
+        ),
+    )
+    parser.add_argument(
+        "--job-prefix",
+        default=None,
+        help=(
+            "Optional stable prefix to prepend to job directories, for example "
+            "'campaignA' -> campaignA_job_{orig_index}. Useful across coordinator "
+            "requeues when the same run should keep reusing the same job directories."
+        ),
     )
     parser.add_argument(
         "--n-cores",
@@ -2077,6 +2092,13 @@ def main():
     if args.optimizer is None and args.opt_level != "normal":
         parser.error("--opt-level requires --optimizer orca")
 
+    try:
+        effective_job_dir_pattern = apply_job_dir_prefix(
+            args.job_dir_pattern, args.job_prefix
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
     # Build ORCA config from CLI arguments
     orca_config: OrcaConfig = {
         "functional": args.functional,
@@ -2117,7 +2139,7 @@ def main():
             max_workers=args.max_workers,
             cores_per_worker=args.cores_per_worker,
             scheduler=args.scheduler,
-            job_dir_pattern=args.job_dir_pattern,
+            job_dir_pattern=effective_job_dir_pattern,
             orca_config=orca_config,
             n_cores=args.n_cores,
             conda_env=args.conda_env,
@@ -2145,7 +2167,7 @@ def main():
             root_dir=args.root_dir,
             batch_size=args.batch_size,
             scheduler=args.scheduler,
-            job_dir_pattern=args.job_dir_pattern,
+            job_dir_pattern=effective_job_dir_pattern,
             orca_config=orca_config,
             n_cores=args.n_cores,
             n_hours=args.n_hours,
