@@ -1,6 +1,5 @@
 """Tests for submit_jobs module."""
 
-import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -16,8 +15,6 @@ from oact_utilities.workflows.submit_jobs import (
     write_flux_job_file,
     write_slurm_job_file,
 )
-
-PARSL_INSTALLED = importlib.util.find_spec("parsl") is not None
 
 
 @pytest.fixture
@@ -601,12 +598,7 @@ class TestDefaultOrcaPaths:
         """Test that slurm has a default ORCA path."""
         assert "slurm" in DEFAULT_ORCA_PATHS
 
-    def test_pbspro_default_path(self):
-        """Test that PBS Pro has a default ORCA path."""
-        assert "pbspro" in DEFAULT_ORCA_PATHS
 
-
-@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
 class TestBuildParslConfigSlurm:
     """Tests for build_parsl_config_slurm function."""
 
@@ -673,23 +665,6 @@ class TestBuildParslConfigSlurm:
         config = build_parsl_config_slurm()
         assert config.run_dir.startswith("runinfo/run_")
 
-    def test_monitoring_db_written_to_runinfo(self):
-        """Monitoring is enabled with a per-run database inside run_dir."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
-
-        config = build_parsl_config_slurm()
-        assert config.monitoring is not None
-        expected = f"sqlite:///{(Path(config.run_dir).resolve() / 'monitoring.db')}"
-        assert config.monitoring.logging_endpoint == expected
-
-    def test_executor_has_runtime_address(self):
-        """HTEX sets a runtime-resolved address for worker connectivity."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
-
-        config = build_parsl_config_slurm()
-        executor = config.executors[0]
-        assert executor.address is not None
-
     def test_worker_init_prepends_orca_bin_dir_for_absolute_path(self):
         """Absolute orca_path causes its parent dir to be prepended to PATH in worker_init."""
         from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
@@ -697,32 +672,6 @@ class TestBuildParslConfigSlurm:
         config = build_parsl_config_slurm(orca_path="/opt/orca/bin/orca")
         provider = config.executors[0].provider
         assert "export PATH=/opt/orca/bin:" in provider.worker_init
-
-    def test_worker_init_prepends_active_mpirun_dir(self, monkeypatch):
-        """Active mpirun dir is propagated into worker PATH."""
-        monkeypatch.setattr(
-            "oact_utilities.workflows.submit_jobs.shutil.which",
-            lambda exe: "/opt/openmpi/bin/mpirun" if exe == "mpirun" else None,
-        )
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
-
-        config = build_parsl_config_slurm(orca_path="/opt/orca/bin/orca")
-        provider = config.executors[0].provider
-        assert "export PATH=/opt/openmpi/bin:/opt/orca/bin:$PATH" in provider.worker_init
-
-    def test_worker_init_prefers_explicit_mpirun_path(self):
-        """Explicit mpirun path overrides coordinator-side discovery."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
-
-        config = build_parsl_config_slurm(
-            orca_path="/opt/orca/bin/orca",
-            mpirun_path="/p/home/ritwik/opt/openmpi-4.1.8/bin/mpirun",
-        )
-        provider = config.executors[0].provider
-        assert (
-            "export PATH=/p/home/ritwik/opt/openmpi-4.1.8/bin:/opt/orca/bin:$PATH"
-            in provider.worker_init
-        )
 
     def test_worker_init_no_path_export_for_non_absolute_orca_path(self):
         """No PATH export when orca_path is None or a bare executable name."""
@@ -732,80 +681,6 @@ class TestBuildParslConfigSlurm:
             config = build_parsl_config_slurm(orca_path=val)
             provider = config.executors[0].provider
             assert "export PATH=" not in provider.worker_init
-
-
-@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
-class TestBuildParslConfigPbsPro:
-    """Tests for build_parsl_config_pbspro function."""
-
-    def test_single_node_uses_simple_launcher(self):
-        """nodes_per_block=1 uses SimpleLauncher."""
-        from parsl.launchers import SimpleLauncher
-
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
-
-        config = build_parsl_config_pbspro(nodes_per_block=1)
-        provider = config.executors[0].provider
-        assert isinstance(provider.launcher, SimpleLauncher)
-
-    def test_multi_node_uses_pbsdsh_launcher(self):
-        """nodes_per_block > 1 uses a pbsdsh-based launcher, not mpiexec."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
-
-        config = build_parsl_config_pbspro(nodes_per_block=4)
-        provider = config.executors[0].provider
-        assert provider.launcher.__class__.__name__ == "PbsdshLauncher"
-        wrapped = provider.launcher("echo hi", tasks_per_node=1, nodes_per_block=4)
-        assert "awk '!seen[$1]++ {print NR-1}'" in wrapped
-        assert 'pbsdsh -n "$NODE_INDEX"' in wrapped
-        assert "mpiexec" not in wrapped
-
-    def test_nodes_per_block_passed_to_provider(self):
-        """nodes_per_block value is forwarded to PBSProProvider."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
-
-        config = build_parsl_config_pbspro(nodes_per_block=39)
-        provider = config.executors[0].provider
-        assert provider.nodes_per_block == 39
-
-    def test_pbs_cpu_shape_derived_from_worker_layout(self):
-        """ncpus and mpiprocs derive from max_workers * cores_per_worker."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
-
-        config = build_parsl_config_pbspro(
-            max_workers=12, cores_per_worker=16, nodes_per_block=39
-        )
-        provider = config.executors[0].provider
-        assert provider.cpus_per_node == 192
-        assert provider.select_options == "mpiprocs=192"
-
-    def test_monitoring_db_written_to_runinfo(self):
-        """Monitoring is enabled with a per-run database inside run_dir."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
-
-        config = build_parsl_config_pbspro()
-        assert config.monitoring is not None
-        expected = f"sqlite:///{(Path(config.run_dir).resolve() / 'monitoring.db')}"
-        assert config.monitoring.logging_endpoint == expected
-
-    def test_executor_has_runtime_address(self):
-        """HTEX sets a runtime-resolved address for worker connectivity."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
-
-        config = build_parsl_config_pbspro()
-        executor = config.executors[0]
-        assert executor.address is not None
-
-    def test_executor_uses_python_module_launch_cmd(self):
-        """PBS HTEX launch uses absolute python -m, not a PATH-based console script."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
-
-        config = build_parsl_config_pbspro()
-        executor = config.executors[0]
-        assert " -m parsl.executors.high_throughput.process_worker_pool " in (
-            executor.launch_cmd
-        )
-        assert "process_worker_pool.py" not in executor.launch_cmd
 
 
 class TestMultiNodeCLIValidation:
@@ -832,7 +707,7 @@ class TestMultiNodeCLIValidation:
             text=True,
         )
         assert result.returncode != 0
-        assert "only supported with --scheduler slurm or pbspro" in result.stderr
+        assert "only supported with --scheduler slurm" in result.stderr
 
     def test_nodes_per_block_less_than_one_errors(self):
         """--nodes-per-block 0 should error."""
@@ -857,25 +732,6 @@ class TestMultiNodeCLIValidation:
         assert result.returncode != 0
         assert "must be >= 1" in result.stderr
 
-    def test_pbspro_requires_parsl_mode(self):
-        """PBS Pro support is currently only available through Parsl mode."""
-        import subprocess
-
-        result = subprocess.run(
-            [
-                "python",
-                "-m",
-                "oact_utilities.workflows.submit_jobs",
-                "fake.db",
-                "fake_dir",
-                "--scheduler",
-                "pbspro",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode != 0
-        assert "currently only supported with --use-parsl" in result.stderr
 
 # --- Pre-submission disk check tests ---
 
