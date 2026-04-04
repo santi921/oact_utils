@@ -13,6 +13,7 @@ import random
 import re
 import sqlite3
 import time
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -54,6 +55,7 @@ class JobRecord:
     wall_time: float | None = None
     n_cores: int | None = None
     optimizer: str | None = None
+    worker_id: str | None = None
 
 
 class ArchitectorWorkflow:
@@ -67,51 +69,101 @@ class ArchitectorWorkflow:
     - Generate dashboard reports
     """
 
-    def __init__(self, db_path: str | Path, timeout: float = 30.0):
+    def __init__(
+        self,
+        db_path: str | Path,
+        timeout: float = 5.0,
+        max_retries: int = 5,
+        retry_delay_cap: float = 5.0,
+    ):
         """Initialize workflow manager with existing database.
 
         Args:
             db_path: Path to the SQLite database file.
             timeout: SQLite busy-wait timeout in seconds per lock attempt.
-                Set high enough (30s) so that the built-in busy handler
-                can wait out concurrent writers on network filesystems
-                (Lustre/GPFS) before the Python retry loop kicks in.
+                Kept short so the retry loop can fail fast for interactive
+                use. Parsl coordinators should pass a higher value.
+            max_retries: Maximum number of retries for lock/busy errors.
+                Higher values improve resilience on contended parallel
+                filesystems (Lustre). Default 5 is fine for interactive
+                use; Parsl coordinators should pass 10+.
+            retry_delay_cap: Maximum sleep between retries in seconds.
+                Default 5.0 for interactive; Parsl coordinators should
+                pass 10.0 for longer contention windows.
         """
         self.db_path = Path(db_path)
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found at {db_path}")
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_delay_cap = retry_delay_cap
         self.conn = self._get_connection()
         self._ensure_schema()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection with WAL mode enabled if possible.
+        """Get a database connection with DELETE journal mode.
 
-        Falls back to DELETE journal mode on network filesystems (NFS, Lustre)
-        that don't support WAL locking protocols. If both journal mode pragmas
-        fail (common on Lustre where POSIX locking is broken), skips the
-        pragma entirely -- SQLite defaults to DELETE mode anyway.
+        Always uses DELETE journal mode because WAL requires shared-memory
+        locking that fails on network filesystems (Lustre, GPFS, NFS).
+        A crashed WAL process leaves stale -wal/-shm files that poison
+        every subsequent connection on these filesystems.
+
+        Uses sqlite3.Row as the row factory so columns can be accessed by
+        name instead of positional index. This eliminates fragile positional
+        indexing that breaks when columns are added via ALTER TABLE.
         """
-        conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError:
-            # Network filesystem (NFS/Lustre) can fail with various
-            # errors: "locking protocol", "database is locked", etc.
+        # Check for stale WAL files BEFORE connecting, because SQLite's
+        # WAL recovery (triggered on connect) may delete them automatically.
+        wal_path = Path(str(self.db_path) + "-wal")
+        shm_path = Path(str(self.db_path) + "-shm")
+        has_stale_wal = wal_path.exists() or shm_path.exists()
+
+        # Retry the connection + journal_mode PRAGMA together.  On Lustre with
+        # 50+ processes starting simultaneously, the PRAGMA journal_mode=DELETE
+        # requires a brief write lock and can fail with SQLITE_BUSY even though
+        # sqlite3.connect() itself succeeded.  The connection-level busy timeout
+        # does not cover the period before the first execute, so we retry the
+        # whole setup with exponential backoff.
+        conn: sqlite3.Connection | None = None
+        for attempt in range(10):
             try:
+                conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
+                conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA journal_mode=DELETE")
-            except sqlite3.OperationalError:
-                # Lustre POSIX locking completely broken for this path.
-                # Skip the pragma -- SQLite defaults to DELETE mode.
-                pass
+                break
+            except sqlite3.OperationalError as e:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    conn = None
+                if "lock" in str(e).lower() or "busy" in str(e).lower():
+                    if attempt < 9:
+                        delay = min(0.5 * (2**attempt), 30.0)
+                        jitter = random.uniform(0, delay * 0.2)
+                        time.sleep(delay + jitter)
+                        continue
+                raise
+        assert conn is not None  # loop always breaks or raises
+
+        if has_stale_wal:
+            warnings.warn(
+                f"Stale WAL files detected next to {self.db_path}. "
+                "They were likely left by a prior run that used WAL mode. "
+                "SQLite may have recovered them automatically.",
+                stacklevel=2,
+            )
         return conn
 
     def _ensure_schema(self) -> None:
         """Auto-migrate schema by adding missing columns.
 
-        Adds the ``optimizer`` TEXT column if it doesn't already exist.
-        This allows older databases (pre-optimizer feature) to work
-        seamlessly without a manual migration step.
+        Adds columns that may not exist in older databases:
+        - ``optimizer`` TEXT (added in v1)
+        - ``worker_id`` TEXT (added in v2 -- scheduler job ID for crash recovery)
+
+        Also migrates legacy ``ready`` status values to ``to_run``.
 
         Safe under concurrent access: catches the duplicate column error
         that arises when another process adds the column between our
@@ -125,17 +177,37 @@ class ArchitectorWorkflow:
                 "It may be empty or corrupted. Recreate it with "
                 "create_workflow_db()."
             )
-        if "optimizer" not in existing_cols:
-            try:
-                self._execute_with_retry(
-                    "ALTER TABLE structures ADD COLUMN optimizer TEXT DEFAULT NULL"
-                )
-                self._commit_with_retry()
-            except sqlite3.OperationalError as e:
-                if "duplicate column name" in str(e).lower():
-                    pass  # Another process already added the column
-                else:
-                    raise
+
+        # Add missing columns (each wrapped individually for concurrent safety)
+        migrations = {
+            "optimizer": "ALTER TABLE structures ADD COLUMN optimizer TEXT DEFAULT NULL",
+            "worker_id": "ALTER TABLE structures ADD COLUMN worker_id TEXT DEFAULT NULL",
+        }
+        for col_name, alter_sql in migrations.items():
+            if col_name not in existing_cols:
+                try:
+                    self._execute_with_retry(alter_sql)
+                    self._commit_with_retry()
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" in str(e).lower():
+                        pass  # Another process already added the column
+                    else:
+                        raise
+
+        # Migrate legacy "ready" status to "to_run" (idempotent).
+        # Guard with a read-only count check so mature databases skip the write
+        # entirely -- avoids 50+ simultaneous write-lock acquisitions at startup
+        # when many Parsl workers open the DB at the same time on Lustre.
+        cur = self._execute_with_retry(
+            "SELECT COUNT(*) FROM structures WHERE status = ?",
+            (JobStatus.READY.value,),
+        )
+        if cur.fetchone()[0] > 0:
+            self._execute_with_retry(
+                "UPDATE structures SET status = ? WHERE status = ?",
+                (JobStatus.TO_RUN.value, JobStatus.READY.value),
+            )
+            self._commit_with_retry()
 
     @staticmethod
     def _is_retryable(e: sqlite3.OperationalError) -> bool:
@@ -147,7 +219,10 @@ class ArchitectorWorkflow:
         )
 
     def _execute_with_retry(
-        self, query: str, params: tuple = (), max_retries: int = 20
+        self,
+        query: str,
+        params: tuple = (),
+        max_retries: int | None = None,
     ):
         """Execute a query with retry logic for handling database locks.
 
@@ -159,11 +234,14 @@ class ArchitectorWorkflow:
         Args:
             query: SQL query string.
             params: Query parameters.
-            max_retries: Maximum number of retries.
+            max_retries: Maximum number of retries. Defaults to
+                ``self.max_retries``.
 
         Returns:
             Cursor after execution.
         """
+        if max_retries is None:
+            max_retries = self.max_retries
         is_write = query.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
         for attempt in range(max_retries):
             try:
@@ -179,13 +257,13 @@ class ArchitectorWorkflow:
                         self.conn.rollback()
                     except Exception:
                         pass
-                    delay = min(0.1 * (2**attempt), 5.0)
+                    delay = min(0.1 * (2**attempt), self.retry_delay_cap)
                     jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
                     continue
                 raise
 
-    def _commit_with_retry(self, max_retries: int = 20):
+    def _commit_with_retry(self, max_retries: int | None = None):
         """Commit with retry logic for handling database locks.
 
         The conn.commit() call can also raise 'database is locked' when
@@ -193,15 +271,18 @@ class ArchitectorWorkflow:
         job statuses concurrently).
 
         Args:
-            max_retries: Maximum number of retries.
+            max_retries: Maximum number of retries. Defaults to
+                ``self.max_retries``.
         """
+        if max_retries is None:
+            max_retries = self.max_retries
         for attempt in range(max_retries):
             try:
                 self.conn.commit()
                 return
             except sqlite3.OperationalError as e:
                 if self._is_retryable(e) and attempt < max_retries - 1:
-                    delay = min(0.1 * (2**attempt), 5.0)
+                    delay = min(0.1 * (2**attempt), self.retry_delay_cap)
                     jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
                     continue
@@ -224,55 +305,40 @@ class ArchitectorWorkflow:
     _LIGHT_COLS = (
         "id, orig_index, elements, natoms, status, charge, spin, "
         "job_dir, max_forces, scf_steps, final_energy, error_message, "
-        "fail_count, wall_time, n_cores, optimizer"
+        "fail_count, wall_time, n_cores, optimizer, worker_id"
     )
 
     @staticmethod
-    def _row_to_record(r: tuple, has_geometry: bool = False) -> JobRecord:
-        """Convert a database row tuple to a JobRecord.
+    def _row_to_record(r: sqlite3.Row) -> JobRecord:
+        """Convert a sqlite3.Row to a JobRecord.
+
+        Uses column-name access so the code is independent of column
+        ordering. Columns added via ALTER TABLE (which appends to the
+        end) work without any positional adjustments.
 
         Args:
-            r: Row tuple from SQLite cursor.
-            has_geometry: If True, geometry is at index 7 and shifts
-                subsequent indices by 1 (SELECT * layout).
+            r: sqlite3.Row from cursor with row_factory=sqlite3.Row.
         """
-        if has_geometry:
-            return JobRecord(
-                id=r[0],
-                orig_index=r[1],
-                elements=r[2],
-                natoms=r[3],
-                status=JobStatus(r[4]),
-                charge=r[5],
-                spin=r[6],
-                geometry=r[7],
-                job_dir=r[8],
-                max_forces=r[9],
-                scf_steps=r[10],
-                final_energy=r[11],
-                error_message=r[12],
-                fail_count=r[13] if len(r) > 13 and r[13] is not None else 0,
-                wall_time=r[14] if len(r) > 14 else None,
-                n_cores=r[15] if len(r) > 15 else None,
-                optimizer=r[16] if len(r) > 16 else None,
-            )
+        keys = r.keys()
         return JobRecord(
-            id=r[0],
-            orig_index=r[1],
-            elements=r[2],
-            natoms=r[3],
-            status=JobStatus(r[4]),
-            charge=r[5],
-            spin=r[6],
-            job_dir=r[7],
-            max_forces=r[8],
-            scf_steps=r[9],
-            final_energy=r[10],
-            error_message=r[11],
-            fail_count=r[12] if len(r) > 12 and r[12] is not None else 0,
-            wall_time=r[13] if len(r) > 13 else None,
-            n_cores=r[14] if len(r) > 14 else None,
-            optimizer=r[15] if len(r) > 15 else None,
+            id=r["id"],
+            orig_index=r["orig_index"],
+            elements=r["elements"],
+            natoms=r["natoms"],
+            status=JobStatus(r["status"]),
+            charge=r["charge"],
+            spin=r["spin"],
+            geometry=r["geometry"] if "geometry" in keys else None,
+            job_dir=r["job_dir"],
+            max_forces=r["max_forces"],
+            scf_steps=r["scf_steps"],
+            final_energy=r["final_energy"],
+            error_message=r["error_message"],
+            fail_count=r["fail_count"] if r["fail_count"] is not None else 0,
+            wall_time=r["wall_time"] if "wall_time" in keys else None,
+            n_cores=r["n_cores"] if "n_cores" in keys else None,
+            optimizer=r["optimizer"] if "optimizer" in keys else None,
+            worker_id=r["worker_id"] if "worker_id" in keys else None,
         )
 
     def get_jobs_by_status(
@@ -307,7 +373,9 @@ class ArchitectorWorkflow:
             cur = self._execute_with_retry(query, (status.value,))
 
         rows = cur.fetchall()
-        return [self._row_to_record(r, has_geometry=include_geometry) for r in rows]
+        return [self._row_to_record(r) for r in rows]
+
+    _SENTINEL = object()  # distinguishes "not passed" from None
 
     def update_status(
         self,
@@ -315,6 +383,7 @@ class ArchitectorWorkflow:
         new_status: JobStatus,
         error_message: str | None = None,
         increment_fail_count: bool = False,
+        worker_id: object = _SENTINEL,
     ):
         """Update the status of a single job.
 
@@ -323,6 +392,8 @@ class ArchitectorWorkflow:
             new_status: New status value.
             error_message: Optional error message.
             increment_fail_count: If True, atomically increment fail_count by 1.
+            worker_id: If provided, set worker_id to this value. Pass None to
+                clear it. Omit (default sentinel) to leave it unchanged.
         """
         set_clauses = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
         values: list = [new_status.value]
@@ -333,6 +404,10 @@ class ArchitectorWorkflow:
 
         if increment_fail_count:
             set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+
+        if worker_id is not self._SENTINEL:
+            set_clauses.append("worker_id = ?")
+            values.append(worker_id)
 
         query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
         values.append(job_id)
@@ -439,6 +514,7 @@ class ArchitectorWorkflow:
         new_status: JobStatus,
         increment_fail_count: bool = False,
         error_message: str | None = None,
+        worker_id: object = _SENTINEL,
     ):
         """Update status for multiple jobs at once.
 
@@ -447,6 +523,8 @@ class ArchitectorWorkflow:
             new_status: New status to set for all jobs.
             increment_fail_count: If True, atomically increment fail_count by 1.
             error_message: If provided, set error_message for all jobs.
+            worker_id: If provided, set worker_id for all jobs. Pass None to
+                clear it. Omit (default sentinel) to leave unchanged.
         """
         if not job_ids:
             return
@@ -460,6 +538,10 @@ class ArchitectorWorkflow:
         if error_message is not None:
             set_clauses.append("error_message = ?")
             params.append(error_message)
+
+        if worker_id is not self._SENTINEL:
+            set_clauses.append("worker_id = ?")
+            params.append(worker_id)
 
         placeholders = ",".join("?" * len(job_ids))
         query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id IN ({placeholders})"
@@ -516,13 +598,15 @@ class ArchitectorWorkflow:
             data.append({"status": status.value, "count": count, "percent": pct})
         return pd.DataFrame(data)
 
-    def mark_jobs_as_running(self, job_ids: list[int]):
+    def mark_jobs_as_running(self, job_ids: list[int], worker_id: str | None = None):
         """Mark jobs as running (e.g., after submission to HPC queue).
 
         Args:
             job_ids: List of job database IDs.
+            worker_id: Optional scheduler job ID to associate with these jobs
+                (e.g., SLURM_JOB_ID or FLUX_JOB_ID). Used for crash recovery.
         """
-        self.update_status_bulk(job_ids, JobStatus.RUNNING)
+        self.update_status_bulk(job_ids, JobStatus.RUNNING, worker_id=worker_id)
 
     def reset_failed_jobs(
         self, max_fail_count: int | None = None, include_timeout: bool = False
@@ -547,6 +631,7 @@ class ArchitectorWorkflow:
                 UPDATE structures
                 SET status = ?,
                     error_message = NULL,
+                    worker_id = NULL,
                     fail_count = COALESCE(fail_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status IN ({placeholders}) AND COALESCE(fail_count, 0) < ?
@@ -560,6 +645,7 @@ class ArchitectorWorkflow:
                 UPDATE structures
                 SET status = ?,
                     error_message = NULL,
+                    worker_id = NULL,
                     fail_count = COALESCE(fail_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status IN ({placeholders})
@@ -583,6 +669,7 @@ class ArchitectorWorkflow:
                 UPDATE structures
                 SET status = ?,
                     error_message = NULL,
+                    worker_id = NULL,
                     fail_count = COALESCE(fail_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status = ? AND COALESCE(fail_count, 0) < ?
@@ -595,6 +682,7 @@ class ArchitectorWorkflow:
                 UPDATE structures
                 SET status = ?,
                     error_message = NULL,
+                    worker_id = NULL,
                     fail_count = COALESCE(fail_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status = ?
@@ -630,7 +718,32 @@ class ArchitectorWorkflow:
         query = f"SELECT {self._LIGHT_COLS} FROM structures WHERE COALESCE(fail_count, 0) >= ?"
         cur = self._execute_with_retry(query, (min_fail_count,))
         rows = cur.fetchall()
-        return [self._row_to_record(r, has_geometry=False) for r in rows]
+        return [self._row_to_record(r) for r in rows]
+
+    def get_chronic_reset_counts(
+        self, thresholds: tuple[int, int] = (5, 25)
+    ) -> tuple[int, int]:
+        """Return counts of to_run jobs exceeding each fail_count threshold.
+
+        Uses a single conditional-aggregation query to avoid loading rows into
+        memory. Safe on Lustre/GPFS (one round-trip, no fetchall).
+
+        Args:
+            thresholds: Pair of (low, high) fail_count thresholds.
+
+        Returns:
+            Tuple of (count_low, count_high).
+        """
+        low, high = thresholds
+        query = """
+            SELECT
+                SUM(CASE WHEN status = 'to_run' AND COALESCE(fail_count, 0) >= ? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN status = 'to_run' AND COALESCE(fail_count, 0) >= ? THEN 1 ELSE 0 END)
+            FROM structures
+        """
+        cur = self._execute_with_retry(query, (low, high))
+        row = cur.fetchone()
+        return (row[0] or 0, row[1] or 0)
 
 
 def create_workflow(

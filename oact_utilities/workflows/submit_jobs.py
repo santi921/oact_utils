@@ -13,6 +13,7 @@ import os
 import random
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -23,7 +24,7 @@ from ..core.orca.calc import write_orca_inputs
 from ..core.orca.sella_runner import write_sella_runner_shim
 from ..utils.analysis import find_timings_and_cores, parse_job_metrics
 from ..utils.architector import xyz_string_to_atoms
-from ..utils.status import pull_log_file
+from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
 
 try:
@@ -41,7 +42,7 @@ class OrcaConfig(TypedDict, total=False):
 
     Attributes:
         functional: DFT functional (default: "wB97M-V").
-        simple_input: Input template (default: "omol"). Options: "omol", "omol_base", "x2c", "dk3".
+        simple_input: Input template (default: "omol"). Options: "omol", "omol_base", "x2c", "dk3", "pm3" (PM3 semiempirical, debug only -- no actinide support).
         actinide_basis: Basis set for actinides (default: "ma-def-TZVP").
         actinide_ecp: ECP for actinides (default: None).
         non_actinide_basis: Basis set for non-actinides (default: "def2-TZVPD").
@@ -105,6 +106,75 @@ DEFAULT_LD_LIBRARY_PATHS = {
     "slurm": "",
     "pbspro": "",
 }
+
+# Number of completed jobs to accumulate before flushing to DB.
+# Reduces per-job commits on Lustre (100-500ms each) by batching.
+_BATCH_COMMIT_SIZE = 10
+
+
+def _flush_pending_updates(
+    workflow: ArchitectorWorkflow,
+    pending: list[dict],
+) -> None:
+    """Flush accumulated job updates to the DB in a single transaction.
+
+    Each entry in *pending* is a dict with keys:
+        job_id (int), status (JobStatus),
+        error_message (str | None), increment_fail_count (bool),
+        metrics (dict | None -- keys: job_dir, max_forces, scf_steps,
+                 final_energy, wall_time, n_cores).
+
+    All updates share one BEGIN IMMEDIATE / COMMIT pair, cutting
+    commit overhead from O(N) to O(1) per batch.
+    """
+    if not pending:
+        return
+
+    for u in pending:
+        job_id = u["job_id"]
+
+        # -- status update --
+        set_clauses = [
+            "status = ?",
+            "worker_id = NULL",
+            "updated_at = CURRENT_TIMESTAMP",
+        ]
+        params: list = [u["status"].value]
+
+        if u.get("increment_fail_count"):
+            set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+
+        if u.get("error_message") is not None:
+            set_clauses.append("error_message = ?")
+            params.append(u["error_message"])
+
+        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
+        params.append(job_id)
+        workflow._execute_with_retry(query, tuple(params))
+
+        # -- metrics update (completed jobs only) --
+        metrics = u.get("metrics")
+        if metrics:
+            mcols: list[str] = []
+            mvals: list = []
+            for col in (
+                "job_dir",
+                "max_forces",
+                "scf_steps",
+                "final_energy",
+                "wall_time",
+                "n_cores",
+            ):
+                if metrics.get(col) is not None:
+                    mcols.append(f"{col} = ?")
+                    mvals.append(metrics[col])
+            if mcols:
+                mcols.append("updated_at = CURRENT_TIMESTAMP")
+                mquery = f"UPDATE structures SET {', '.join(mcols)} WHERE id = ?"
+                mvals.append(job_id)
+                workflow._execute_with_retry(mquery, tuple(mvals))
+
+    workflow._commit_with_retry()
 
 
 def _build_parsl_run_dir() -> str:
@@ -521,6 +591,103 @@ def _filter_marker_jobs(
     return clean_jobs
 
 
+def _skip_finished_on_disk(
+    jobs: list,
+    root_dir: Path,
+    job_dir_pattern: str,
+    workflow: ArchitectorWorkflow,
+    hours_cutoff: float = 168,
+) -> list:
+    """Filter out jobs that already completed or failed on disk.
+
+    Checks each candidate job's output directory before submission. Jobs
+    found completed are auto-updated to COMPLETED in the DB. Jobs found
+    failed are auto-updated to FAILED. This prevents re-submitting jobs
+    whose results would be overwritten by prepare_job_directory().
+
+    Uses the same dual-lookup pattern as _filter_marker_jobs: tries
+    job.job_dir first, then falls back to constructing the path from
+    job_dir_pattern.
+
+    Args:
+        jobs: List of JobRecord objects to filter.
+        root_dir: Root directory for job directories.
+        job_dir_pattern: Pattern for job directory names.
+        workflow: ArchitectorWorkflow instance for DB updates.
+        hours_cutoff: Hours threshold for timeout detection in
+            check_job_termination. Defaults to 168 (1 week) to avoid
+            false timeout classifications on idle directories.
+
+    Returns:
+        Filtered list of jobs (without completed/failed ones).
+    """
+    completed_ids: list[int] = []
+    failed_ids: list[int] = []
+    failed_errors: dict[int, str] = {}
+    clean_jobs = []
+
+    for job in jobs:
+        # Resolve directory: try DB job_dir first, then pattern-based path
+        job_dir = None
+        if job.job_dir and Path(job.job_dir).is_dir():
+            job_dir = job.job_dir
+        else:
+            pattern = job_dir_pattern.replace(
+                "{orig_index}", str(job.orig_index)
+            ).replace("{id}", str(job.id))
+            candidate = root_dir / pattern
+            if candidate.is_dir():
+                job_dir = str(candidate)
+
+        if not job_dir:
+            clean_jobs.append(job)
+            continue
+
+        status = check_job_termination(job_dir, hours_cutoff=hours_cutoff)
+
+        if status == 1:
+            completed_ids.append(job.id)
+        elif status == -1:
+            failed_ids.append(job.id)
+            try:
+                log_file = pull_log_file(job_dir)
+                reason = parse_failure_reason(log_file)
+                if reason:
+                    failed_errors[job.id] = reason
+            except (FileNotFoundError, OSError):
+                pass
+        else:
+            # 0 (running/unknown) or -2 (timeout): submit normally
+            clean_jobs.append(job)
+
+    # Batch DB updates
+    if completed_ids:
+        workflow.update_status_bulk(completed_ids, JobStatus.COMPLETED)
+        print(
+            f"Skipped {len(completed_ids)} jobs already completed on disk "
+            "(updated DB to COMPLETED)"
+        )
+
+    if failed_ids:
+        # Failed jobs need per-job error messages for the ones we extracted
+        for jid in failed_ids:
+            error_msg = failed_errors.get(
+                jid, "Failed on disk (detected at submission)"
+            )
+            workflow.update_status(
+                jid,
+                JobStatus.FAILED,
+                error_message=error_msg,
+                increment_fail_count=True,
+            )
+        print(
+            f"Skipped {len(failed_ids)} jobs already failed on disk "
+            "(updated DB to FAILED)"
+        )
+
+    return clean_jobs
+
+
 def filter_jobs_for_submission(
     workflow: ArchitectorWorkflow,
     num_jobs: int,
@@ -539,9 +706,7 @@ def filter_jobs_for_submission(
     """
     # Get ready jobs (DB is source of truth)
     # include_geometry=True so prepare_job_directory can write the .inp file
-    ready_jobs = workflow.get_jobs_by_status(
-        [JobStatus.TO_RUN, JobStatus.READY], include_geometry=True
-    )
+    ready_jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
 
     # Apply fail_count filter if specified
     if max_fail_count is not None:
@@ -1266,12 +1431,34 @@ def submit_batch_parsl(
         print("No jobs available after marker filtering")
         return []
 
+    # Filter out jobs that already completed or failed on disk
+    jobs_to_submit = _skip_finished_on_disk(
+        jobs_to_submit, root_dir, job_dir_pattern, workflow
+    )
+
+    if not jobs_to_submit:
+        print("No jobs available after disk check")
+        return []
+
+    # Detect scheduler job ID early so it can be set atomically with the
+    # RUNNING status claim (avoids a window where jobs are RUNNING but have
+    # no worker_id, which would make them invisible to --recover-orphans).
+    _scheduler_job_id = (
+        os.environ.get("SLURM_JOB_ID")
+        or os.environ.get("FLUX_JOB_ID")
+        or f"pid_{os.getpid()}"
+    )
+
     # Claim jobs atomically BEFORE slow directory preparation to prevent
     # concurrent submitters from grabbing the same jobs (TOCTOU fix).
+    # Sets worker_id in the same UPDATE/commit for crash traceability.
     submitted_ids = [j.id for j in jobs_to_submit]
     if not dry_run:
-        workflow.mark_jobs_as_running(submitted_ids)
-        print(f"Claimed {len(submitted_ids)} jobs as RUNNING in database")
+        workflow.mark_jobs_as_running(submitted_ids, worker_id=_scheduler_job_id)
+        print(
+            f"Claimed {len(submitted_ids)} jobs as RUNNING "
+            f"(worker_id={_scheduler_job_id})"
+        )
 
     print(f"\nPreparing {len(jobs_to_submit)} jobs for Parsl submission...")
 
@@ -1303,16 +1490,16 @@ def submit_batch_parsl(
         workflow.update_job_metrics_bulk(job_dir_updates)
         print(f"Persisted {len(job_dir_updates)} job directories in one transaction")
 
-    # Reset any jobs that failed during preparation back to READY
+    # Reset any jobs that failed during preparation back to TO_RUN
     if failed_prep_ids:
         for jid in failed_prep_ids:
             try:
-                workflow.update_status(jid, JobStatus.READY)
+                workflow.update_status(jid, JobStatus.TO_RUN)
             except Exception:
                 pass
         jobs_to_submit = [j for j in jobs_to_submit if j.id not in set(failed_prep_ids)]
         submitted_ids = [j.id for j in jobs_to_submit]
-        print(f"Reset {len(failed_prep_ids)} jobs back to READY due to prep failure")
+        print(f"Reset {len(failed_prep_ids)} jobs back to TO_RUN due to prep failure")
 
     if dry_run:
         print("\n[DRY RUN] Would submit to Parsl executor")
@@ -1397,14 +1584,58 @@ def submit_batch_parsl(
     except Exception as e:
         print(f"Failed to initialize Parsl: {e}")
         print("Check your conda environment and ORCA installation")
-        # Reset claimed jobs back to READY since we can't run them
+        # Reset claimed jobs back to TO_RUN since we can't run them
         for jid in submitted_ids:
             try:
-                workflow.update_status(jid, JobStatus.READY)
+                workflow.update_status(jid, JobStatus.TO_RUN, worker_id=None)
             except Exception:
                 pass
-        print(f"Reset {len(submitted_ids)} claimed jobs back to READY")
+        print(f"Reset {len(submitted_ids)} claimed jobs back to TO_RUN")
         return []
+
+    # --- SIGTERM handler (register AFTER parsl.load to avoid Parsl overwriting) ---
+    # When the scheduler cancels an allocation (scancel / flux cancel), it
+    # sends SIGTERM to our process.  Workers die immediately, so no futures
+    # will ever complete -- as_completed() blocks forever.  A flag-only
+    # handler would never be checked and the finally block (which resets
+    # orphaned jobs) would never run before SIGKILL arrives.
+    #
+    # Fix: after setting the flag, raise KeyboardInterrupt.  This interrupts
+    # as_completed(), is caught by the existing `except KeyboardInterrupt`
+    # handler, and falls through to the finally block which bulk-resets all
+    # in-flight jobs to TO_RUN.  SQLite transactions are atomic, so an
+    # interrupted commit simply rolls back -- at most one job's status update
+    # is lost (and the finally block will correct it).
+    _shutdown_requested = False
+    _original_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _sigterm_handler(signum, frame):
+        nonlocal _shutdown_requested
+        _shutdown_requested = True
+        # Restore original handler so a second SIGTERM during cleanup
+        # does not raise another KeyboardInterrupt mid-finally.
+        signal.signal(signal.SIGTERM, _original_sigterm)
+        try:
+            sys.stderr.write(
+                "\nSIGTERM received -- shutting down and resetting "
+                "in-flight jobs...\n"
+            )
+        except Exception:
+            pass  # Best-effort notification; flag is already set
+        # Break out of as_completed() so the finally block can reset orphans
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    # Check if SIGTERM arrived during Parsl setup (before handler was installed,
+    # the default handler may have set a pending signal that fires now).
+    if _shutdown_requested:
+        print("Shutdown requested during setup -- skipping submission")
+        # Falls through to the finally block which resets orphans
+        signal.signal(signal.SIGTERM, _original_sigterm)
+        workflow.update_status_bulk(submitted_ids, JobStatus.TO_RUN, worker_id=None)
+        print(f"Reset {len(submitted_ids)} jobs back to TO_RUN")
+        return submitted_ids
 
     # Submit futures
     print(f"\nSubmitting {len(jobs_to_submit)} jobs to Parsl...")
@@ -1435,8 +1666,9 @@ def submit_batch_parsl(
     print("\nMonitoring job execution...")
     print("(Press Ctrl+C for graceful shutdown)\n")
 
-    completed_ids = []
-    failed_ids = []
+    completed_ids: list[int] = []
+    failed_ids: list[int] = []
+    pending_updates: list[dict] = []
 
     # Create future->(job_id, job_dir) mapping for concurrent completion
     futures_map = {future: (job_id, job_dir) for job_id, job_dir, future in futures}
@@ -1449,86 +1681,131 @@ def submit_batch_parsl(
                 result = future.result()
 
                 if result["status"] == "completed":
-                    workflow.update_status(job_id, JobStatus.COMPLETED)
                     completed_ids.append(job_id)
 
                     # Extract metrics on the fly for successful jobs
+                    metrics_dict: dict | None = None
                     try:
                         metrics = parse_job_metrics(job_dir)
                         wall_time = None
-                        n_cores = None
+                        n_cores_val = None
                         try:
                             log_file = pull_log_file(str(job_dir))
-                            n_cores_val, time_dict = find_timings_and_cores(log_file)
+                            n_cores_parsed, time_dict = find_timings_and_cores(log_file)
                             if time_dict and "Total" in time_dict:
                                 wall_time = time_dict["Total"]
-                            n_cores = n_cores_val
+                            n_cores_val = n_cores_parsed
                         except Exception as e:
                             print(
                                 f"  Warning: timing extraction failed for job {job_id}: {e}"
                             )
                         if metrics["success"]:
-                            workflow.update_job_metrics(
-                                job_id,
-                                job_dir=job_dir,
-                                max_forces=metrics.get("max_forces"),
-                                scf_steps=metrics.get("scf_steps"),
-                                final_energy=metrics.get("final_energy"),
-                                wall_time=wall_time,
-                                n_cores=n_cores,
-                            )
+                            metrics_dict = {
+                                "job_dir": job_dir,
+                                "max_forces": metrics.get("max_forces"),
+                                "scf_steps": metrics.get("scf_steps"),
+                                "final_energy": metrics.get("final_energy"),
+                                "wall_time": wall_time,
+                                "n_cores": n_cores_val,
+                            }
                     except Exception as e:
                         print(
                             f"  Warning: metrics extraction failed for job {job_id}: {e}"
                         )
 
+                    pending_updates.append(
+                        {
+                            "job_id": job_id,
+                            "status": JobStatus.COMPLETED,
+                            "metrics": metrics_dict,
+                        }
+                    )
                     print(
                         f" Job {job_id} completed ({len(completed_ids)}/{len(futures)} done)"
                     )
                 elif result["status"] == "timeout":
-                    workflow.update_status(
-                        job_id, JobStatus.TIMEOUT, error_message=result.get("error")
+                    pending_updates.append(
+                        {
+                            "job_id": job_id,
+                            "status": JobStatus.TIMEOUT,
+                            "error_message": result.get("error"),
+                        }
                     )
                     failed_ids.append(job_id)
                     print(f"Job {job_id} timeout")
                 else:
-                    workflow.update_status(
-                        job_id,
-                        JobStatus.FAILED,
-                        error_message=result.get("error"),
-                        increment_fail_count=True,
+                    pending_updates.append(
+                        {
+                            "job_id": job_id,
+                            "status": JobStatus.FAILED,
+                            "error_message": result.get("error"),
+                            "increment_fail_count": True,
+                        }
                     )
                     failed_ids.append(job_id)
                     error_msg = result.get("error", "Unknown error")[:100]
                     print(f"Job {job_id} failed: {error_msg}")
 
             except Exception as e:
-                workflow.update_status(
-                    job_id,
-                    JobStatus.FAILED,
-                    error_message=str(e),
-                    increment_fail_count=True,
+                pending_updates.append(
+                    {
+                        "job_id": job_id,
+                        "status": JobStatus.FAILED,
+                        "error_message": str(e),
+                        "increment_fail_count": True,
+                    }
                 )
                 failed_ids.append(job_id)
                 print(f"Job {job_id} exception: {str(e)[:100]}")
+
+            # Flush batch when it reaches _BATCH_COMMIT_SIZE
+            if len(pending_updates) >= _BATCH_COMMIT_SIZE:
+                _flush_pending_updates(workflow, pending_updates)
+                pending_updates.clear()
+
+            # Check shutdown flag AFTER DB writes for this future.
+            if _shutdown_requested:
+                print("Shutdown requested -- exiting monitoring loop...")
+                break
 
     except KeyboardInterrupt:
         print("\n\nGraceful shutdown requested...")
 
     finally:
-        # Reset any jobs that are still RUNNING back to READY so they can be
-        # re-submitted in the next batch (e.g. after Ctrl+C or crash).
+        # Flush any remaining buffered updates before resetting orphans.
+        # Best-effort: if this fails, _skip_finished_on_disk catches it
+        # on the next submission pass.
+        if pending_updates:
+            try:
+                _flush_pending_updates(workflow, pending_updates)
+                pending_updates.clear()
+            except Exception:
+                pass
+
+        # Reset orphaned jobs (still RUNNING) back to TO_RUN.
+        # Use bulk update (single UPDATE + single commit) to stay well within
+        # SLURM's ~30s SIGKILL grace window after SIGTERM.
         resolved_ids = set(completed_ids) | set(failed_ids)
         orphaned_ids = [jid for jid in submitted_ids if jid not in resolved_ids]
         if orphaned_ids:
-            for jid in orphaned_ids:
-                try:
-                    workflow.update_status(jid, JobStatus.READY)
-                except Exception:
-                    pass
-            print(f"Reset {len(orphaned_ids)} in-flight jobs back to READY")
+            try:
+                workflow.update_status_bulk(
+                    orphaned_ids, JobStatus.TO_RUN, worker_id=None
+                )
+            except Exception:
+                # Fallback: try individually if bulk fails
+                for jid in orphaned_ids:
+                    try:
+                        workflow.update_status(jid, JobStatus.TO_RUN, worker_id=None)
+                    except Exception:
+                        pass
+            print(f"Reset {len(orphaned_ids)} in-flight jobs back to TO_RUN")
 
-        # Cleanup Parsl
+        # Restore original SIGTERM handler
+        signal.signal(signal.SIGTERM, _original_sigterm)
+
+        # Cleanup Parsl -- running workers are terminated by dfk.cleanup().
+        # Their job IDs are already classified as orphans and reset above.
         print("\nCleaning up Parsl executor...")
         try:
             dfk = parsl.dfk()
@@ -1601,11 +1878,9 @@ def submit_batch(
             scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
         )
 
-    # Get ready jobs (includes both TO_RUN and READY for backward compatibility)
+    # Get jobs ready to run
     # include_geometry=True so prepare_job_directory can write the .inp file
-    ready_jobs = workflow.get_jobs_by_status(
-        [JobStatus.TO_RUN, JobStatus.READY], include_geometry=True
-    )
+    ready_jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
 
     # Filter out jobs that have failed too many times
     if max_fail_count is not None:
@@ -1633,6 +1908,15 @@ def submit_batch(
 
     if not jobs_to_submit:
         print("No jobs available after marker filtering")
+        return []
+
+    # Filter out jobs that already completed or failed on disk
+    jobs_to_submit = _skip_finished_on_disk(
+        jobs_to_submit, root_dir, job_dir_pattern, workflow
+    )
+
+    if not jobs_to_submit:
+        print("No jobs available after disk check")
         return []
 
     # Claim jobs atomically BEFORE slow directory preparation to prevent
@@ -1715,7 +1999,7 @@ def submit_batch(
             print(f"  [{i+1}/{len(jobs_to_submit)}] Error for job {job.id}: {e}")
             if not dry_run:
                 try:
-                    workflow.update_status(job.id, JobStatus.READY)
+                    workflow.update_status(job.id, JobStatus.TO_RUN)
                 except Exception:
                     pass
             continue
@@ -1727,16 +2011,16 @@ def submit_batch(
         ]
         workflow.update_job_metrics_bulk(bulk_updates)
 
-    # Reset any claimed-but-not-submitted jobs back to READY
+    # Reset any claimed-but-not-submitted jobs back to TO_RUN
     if not dry_run:
         not_submitted = set(all_claimed_ids) - set(submitted_ids)
         if not_submitted:
             for jid in not_submitted:
                 try:
-                    workflow.update_status(jid, JobStatus.READY)
+                    workflow.update_status(jid, JobStatus.TO_RUN)
                 except Exception:
                     pass
-            print(f"Reset {len(not_submitted)} unclaimed jobs back to READY")
+            print(f"Reset {len(not_submitted)} unclaimed jobs back to TO_RUN")
 
     return submitted_ids
 
@@ -1904,7 +2188,7 @@ def main():
     )
     orca_group.add_argument(
         "--simple-input",
-        choices=["omol", "omol_base", "x2c", "dk3"],
+        choices=["omol", "omol_base", "x2c", "dk3", "pm3"],
         default="omol",
         help="ORCA input template (default: omol)",
     )
@@ -2034,9 +2318,17 @@ def main():
     if args.orca_path:
         orca_config["orca_path"] = args.orca_path
 
-    # Open workflow
+    # Open workflow (higher retry budget for Parsl to survive Lustre contention)
     try:
-        workflow = ArchitectorWorkflow(args.db_path)
+        if args.use_parsl:
+            workflow = ArchitectorWorkflow(
+                args.db_path,
+                timeout=15.0,
+                max_retries=10,
+                retry_delay_cap=10.0,
+            )
+        else:
+            workflow = ArchitectorWorkflow(args.db_path)
     except FileNotFoundError:
         print(f"Error: Database not found at {args.db_path}")
         sys.exit(1)

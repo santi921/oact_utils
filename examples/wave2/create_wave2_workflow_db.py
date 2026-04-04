@@ -362,7 +362,7 @@ After creating the database, submit jobs using:
         "--status",
         type=str,
         default="to_run",
-        choices=["to_run", "ready"],
+        choices=["to_run"],
         help="Initial status for all jobs (default: to_run)",
     )
 

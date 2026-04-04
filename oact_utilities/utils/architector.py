@@ -95,7 +95,7 @@ def chunk_architector_to_lmdb(
     lmdb_path: str | Path,
     chunk_size: int = 10000,
     column: str = "aligned_csd_core",
-    status: str = "ready",
+    status: str = "to_run",
     map_size: int = 1 << 40,
 ) -> Path:
     """Chunk an Architector CSV and store structures and metadata into an LMDB.
@@ -293,6 +293,7 @@ def _init_db(
             fail_count INTEGER DEFAULT 0,
             wall_time REAL,
             n_cores INTEGER,
+            worker_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"""
 
@@ -322,7 +323,7 @@ def _insert_row(
     elements: str,
     natoms: int,
     geometry: str,
-    status: str = "ready",
+    status: str = "to_run",
     charge: int | None = None,
     spin: int | None = None,
     job_dir: str | None = None,
@@ -341,7 +342,7 @@ def _insert_row(
         elements: Semicolon-separated element symbols.
         natoms: Number of atoms.
         geometry: XYZ geometry string.
-        status: Job status (default: "ready").
+        status: Job status (default: "to_run").
         charge: Molecular charge.
         spin: Spin multiplicity.
         job_dir: Path to job directory.
@@ -473,7 +474,7 @@ def chunk_architector_csv(
                             elements=";".join(elems),
                             natoms=len(elems),
                             geometry=str(xyz_str),
-                            status="ready",
+                            status="to_run",
                         )
 
                     idx_in_chunk += 1
@@ -620,7 +621,7 @@ def create_workflow_db(
                     elements=";".join(elems),
                     natoms=natoms,
                     geometry=str(xyz_str),
-                    status="ready",
+                    status="to_run",
                     charge=charge,
                     spin=spin,
                     extra_values=extra_values,
