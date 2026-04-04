@@ -142,6 +142,16 @@ See [CLAUDE.md](CLAUDE.md) for detailed development guidelines.
 - **pandas** - Data analysis
 - **SQLite** - Workflow tracking (built-in)
 
+### Setting up Barfoot
+Download OpenMPI 4.1.8, and then
+```
+./configure \
+    --prefix=$HOME/opt/openmpi-4.1.8 \
+    --with-pmix=internal \
+    --with-libevent=internal \
+    --with-hwloc=internal
+```
+
 ## Documentation
 
 - **[CLAUDE.md](CLAUDE.md)** - Project instructions and architecture
