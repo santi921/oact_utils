@@ -1459,8 +1459,8 @@ def submit_batch_parsl(
     print(f"\nSubmitting {len(jobs_to_submit)} jobs to Parsl...")
     futures = []
     task_map_path = Path(parsl_config.run_dir).resolve() / "parsl_task_map.tsv"
-    task_map_path.write_text("task_id\tjob_id\tjob_dir\n")
-    print(f"Writing Parsl task mapping to {task_map_path}")
+    task_map_rows = ["task_id\tjob_id\tjob_dir\n"]
+    print(f"Recording Parsl task mapping to {task_map_path}")
 
     for job in jobs_to_submit:
         job_dir_name = render_job_dir_pattern(
@@ -1478,9 +1478,11 @@ def submit_batch_parsl(
             mpirun_path=mpirun_path,
             timeout_seconds=timeout_seconds,
         )
-        with open(task_map_path, "a") as fh:
-            fh.write(f"{future.tid}\t{job.id}\t{job_dir_abs}\n")
+        task_map_rows.append(f"{future.tid}\t{job.id}\t{job_dir_abs}\n")
         futures.append((job.id, str(job_dir_abs), future))
+
+    with open(task_map_path, "w", buffering=1024 * 1024) as fh:
+        fh.writelines(task_map_rows)
 
     # Monitor futures concurrently (CRITICAL: use as_completed, not sequential loop)
     print("\nMonitoring job execution...")
