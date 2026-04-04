@@ -26,6 +26,7 @@ ORCA_PATH="/path/to/orca"          #(update -- must be absolute path to ORCA bin
 BATCH_SIZE=500          # number of jobs to dispatch at once (update)
 MAX_WORKERS=4              # workers per node (update)
 CORES_PER_WORKER=20        # cores per worker (update)
+CPUS_PER_NODE=""          # optional: reserve more scheduler cores/node than active workers use
 CONDA_ENV="py10mpi" # (update)
 CONDA_BASE="/usr/WS1/vargas58/miniconda3"
 LD_LIBRARY_PATH_OVERRIDE=""  # (optional) set to override LD_LIBRARY_PATH in job scripts
@@ -63,6 +64,7 @@ python -m oact_utilities.workflows.submit_jobs \
     --batch-size "${BATCH_SIZE}" \
     --max-workers "${MAX_WORKERS}" \
     --cores-per-worker "${CORES_PER_WORKER}" \
+    ${CPUS_PER_NODE:+--cpus-per-node "${CPUS_PER_NODE}"} \
     --conda-env "${CONDA_ENV}" \
     --conda-base "${CONDA_BASE}" \
     ${LD_LIBRARY_PATH_OVERRIDE:+--ld-library-path "${LD_LIBRARY_PATH_OVERRIDE}"} \

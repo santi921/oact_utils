@@ -23,8 +23,10 @@ ROOT_DIR="/path/to/job_output_dir"
 ORCA_PATH="/path/to/orca"
 
 BATCH_SIZE=500
-MAX_WORKERS=12
-CORES_PER_WORKER=16
+# Reserve full nodes but intentionally leave some cores idle for memory headroom.
+MAX_WORKERS=8
+CORES_PER_WORKER=8
+CPUS_PER_NODE=192
 CONDA_ENV="py10mpi"
 CONDA_BASE="/usr/WS1/vargas58/miniconda3"
 LD_LIBRARY_PATH_OVERRIDE=""
@@ -61,6 +63,7 @@ python -m oact_utilities.workflows.submit_jobs \
     --batch-size "${BATCH_SIZE}" \
     --max-workers "${MAX_WORKERS}" \
     --cores-per-worker "${CORES_PER_WORKER}" \
+    --cpus-per-node "${CPUS_PER_NODE}" \
     --queue "${QUEUE}" \
     --account "${ACCOUNT}" \
     --conda-env "${CONDA_ENV}" \

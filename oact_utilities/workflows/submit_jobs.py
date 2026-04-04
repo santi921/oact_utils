@@ -921,6 +921,7 @@ def build_parsl_config_flux(
 def build_parsl_config_slurm(
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    cpus_per_node: int | None = None,
     nodes_per_block: int = 1,
     max_blocks: int = 10,
     init_blocks: int = 2,
@@ -948,6 +949,11 @@ def build_parsl_config_slurm(
     Args:
         max_workers: Maximum concurrent workers per node.
         cores_per_worker: CPU cores per worker (must match ORCA nprocs).
+        cpus_per_node: Scheduler CPU cores requested per node. When omitted,
+            defaults to ``max_workers * cores_per_worker`` for the
+            single-node path. For multi-node Slurm, exclusive allocations
+            already reserve whole nodes; when this is set explicitly, an
+            ``--ntasks-per-node`` request is added to the batch allocation.
         nodes_per_block: Nodes per SLURM block. >1 enables multi-node
             blocks with SrunLauncher.  Total capacity is
             ``max_blocks * nodes_per_block * max_workers``.
@@ -991,6 +997,14 @@ def build_parsl_config_slurm(
         mpirun_path=mpirun_path,
     )
 
+    active_cores_per_node = max_workers * cores_per_worker
+    requested_cpus_per_node = cpus_per_node or active_cores_per_node
+    if requested_cpus_per_node < active_cores_per_node:
+        raise ValueError(
+            "cpus_per_node must be >= max_workers * cores_per_worker "
+            f"({active_cores_per_node})"
+        )
+
     # Launcher and scheduler_options differ for single-node vs multi-node.
     if nodes_per_block > 1:
         from parsl.launchers import SrunLauncher
@@ -998,17 +1012,24 @@ def build_parsl_config_slurm(
         # SrunLauncher: srun starts 1 Parsl worker manager per node.
         # The worker manager forks max_workers processes internally.
         launcher = SrunLauncher()
-        # No extra scheduler_options needed -- exclusive=True on the
-        # provider already adds --exclusive to the SBATCH script.
-        scheduler_options = ""
+        # exclusive=True reserves whole nodes by default. When an explicit
+        # CPU-per-node override is requested, add a matching ntasks-per-node
+        # request to the batch allocation while keeping the srun launcher.
+        if cpus_per_node is not None:
+            scheduler_options = (
+                f"#SBATCH --ntasks-per-node={requested_cpus_per_node}\n"
+                f"#SBATCH --cpus-per-task=1\n"
+            )
+        else:
+            scheduler_options = ""
     else:
         from parsl.launchers import SimpleLauncher
 
         # SimpleLauncher: no srun, specify total tasks per node directly.
         launcher = SimpleLauncher()
-        ntasks = cores_per_worker * max_workers
         scheduler_options = (
-            f"#SBATCH --ntasks-per-node={ntasks}\n" f"#SBATCH --cpus-per-task=1\n"
+            f"#SBATCH --ntasks-per-node={requested_cpus_per_node}\n"
+            f"#SBATCH --cpus-per-task=1\n"
         )
 
     provider = SlurmProvider(
@@ -1044,6 +1065,7 @@ def build_parsl_config_slurm(
 def build_parsl_config_pbspro(
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    cpus_per_node: int | None = None,
     nodes_per_block: int = 1,
     max_blocks: int = 10,
     init_blocks: int = 2,
@@ -1063,13 +1085,17 @@ def build_parsl_config_pbspro(
     Each block is a PBS job with ``nodes_per_block`` nodes, and each
     node runs ``max_workers`` ORCA workers concurrently.
 
-    The per-node PBS resource request is derived from the worker layout:
-    ``ncpus = max_workers * cores_per_worker`` and
-    ``select_options = "mpiprocs=<ncpus>"``.
+    By default, the per-node PBS resource request is derived from the worker
+    layout: ``ncpus = max_workers * cores_per_worker`` and
+    ``select_options = "mpiprocs=<ncpus>"``. ``cpus_per_node`` can be set
+    larger than that derived value to reserve a full node while intentionally
+    leaving some cores idle for memory headroom.
 
     Args:
         max_workers: Maximum concurrent workers per node.
         cores_per_worker: CPU cores per worker (must match ORCA nprocs).
+        cpus_per_node: Scheduler CPU cores reserved per node. When omitted,
+            defaults to ``max_workers * cores_per_worker``.
         nodes_per_block: Nodes per PBS block.
         max_blocks: Maximum number of PBS blocks to provision.
         init_blocks: Number of blocks to request at startup.
@@ -1121,13 +1147,20 @@ def build_parsl_config_pbspro(
 
         launcher = SimpleLauncher()
 
-    cpus_per_node = max_workers * cores_per_worker
+    active_cores_per_node = max_workers * cores_per_worker
+    requested_cpus_per_node = cpus_per_node or active_cores_per_node
+    if requested_cpus_per_node < active_cores_per_node:
+        raise ValueError(
+            "cpus_per_node must be >= max_workers * cores_per_worker "
+            f"({active_cores_per_node})"
+        )
+
     provider = PBSProProvider(
         queue=queue,
         account=account,
         nodes_per_block=nodes_per_block,
-        cpus_per_node=cpus_per_node,
-        select_options=f"mpiprocs={cpus_per_node}",
+        cpus_per_node=requested_cpus_per_node,
+        select_options=f"mpiprocs={requested_cpus_per_node}",
         init_blocks=init_blocks,
         min_blocks=min_blocks,
         max_blocks=max_blocks,
@@ -1158,6 +1191,7 @@ def submit_batch_parsl(
     num_jobs: int,
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    cpus_per_node: int | None = None,
     scheduler: str = "flux",
     job_dir_pattern: str = "job_{orig_index}",
     orca_config: OrcaConfig | None = None,
@@ -1188,6 +1222,9 @@ def submit_batch_parsl(
         num_jobs: Total number of jobs to submit
         max_workers: Maximum number of concurrent workers
         cores_per_worker: CPU cores per worker
+        cpus_per_node: Scheduler CPU cores reserved/requested per node. When
+            omitted, defaults to ``max_workers * cores_per_worker`` where the
+            scheduler-specific builder needs an explicit per-node CPU shape.
         scheduler: Parsl provider backend ("flux" for LocalProvider,
             "slurm" for SlurmProvider multi-node, "pbspro" for
             PBSProProvider multi-node).
@@ -1202,13 +1239,12 @@ def submit_batch_parsl(
         max_fail_count: Skip jobs with fail_count >= this value
         timeout_seconds: Job timeout in seconds (default: 72000 = 20 hours)
         randomize: Randomize job selection order (default: True)
-        nodes_per_block: (SLURM) Nodes per SLURM block. >1 enables
-            multi-node blocks with SrunLauncher.
-        max_blocks: (SLURM) Maximum SLURM blocks to provision.
-        init_blocks: (SLURM) Blocks to request at startup.
-        min_blocks: (SLURM) Minimum blocks to keep alive.
-        walltime_hours: (SLURM) Walltime per block allocation in hours.
-        queue: (PBS Pro) Queue name.
+        nodes_per_block: Nodes per scheduler block for scale-out Parsl.
+        max_blocks: Maximum scheduler blocks to provision.
+        init_blocks: Blocks to request at startup.
+        min_blocks: Minimum blocks to keep alive.
+        walltime_hours: Walltime per block allocation in hours.
+        queue: Queue/partition name for supported schedulers.
         qos: (SLURM) SLURM QOS.
         account: Scheduler account/allocation.
 
@@ -1329,13 +1365,25 @@ def submit_batch_parsl(
             f"nodes/block x {max_workers} workers/node "
             f"= {total_workers} max concurrent jobs"
         )
-        print(
-            f"Each worker: {cores_per_worker} cores, "
-            f"job timeout: {timeout_seconds}s"
-        )
+        requested_cpus = cpus_per_node or (max_workers * cores_per_worker)
+        if cpus_per_node is not None:
+            print(
+                f"Each SLURM node requests {requested_cpus} scheduler cores, "
+                f"active worker cores per node: {max_workers * cores_per_worker}, "
+                f"each worker: {cores_per_worker} cores, "
+                f"job timeout: {timeout_seconds}s"
+            )
+        else:
+            print(
+                f"Each SLURM node uses exclusive allocation, "
+                f"active worker cores per node: {max_workers * cores_per_worker}, "
+                f"each worker: {cores_per_worker} cores, "
+                f"job timeout: {timeout_seconds}s"
+            )
         parsl_config = build_parsl_config_slurm(
             max_workers=max_workers,
             cores_per_worker=cores_per_worker,
+            cpus_per_node=cpus_per_node,
             nodes_per_block=nodes_per_block,
             max_blocks=max_blocks,
             init_blocks=init_blocks,
@@ -1358,13 +1406,15 @@ def submit_batch_parsl(
             f"= {total_workers} max concurrent jobs"
         )
         print(
-            f"Each PBS node: {max_workers * cores_per_worker} ncpus/mpiprocs, "
+            f"Each PBS node reserves {cpus_per_node or (max_workers * cores_per_worker)} "
+            f"ncpus/mpiprocs, active worker cores per node: {max_workers * cores_per_worker}, "
             f"each worker: {cores_per_worker} cores, "
             f"job timeout: {timeout_seconds}s"
         )
         parsl_config = build_parsl_config_pbspro(
             max_workers=max_workers,
             cores_per_worker=cores_per_worker,
+            cpus_per_node=cpus_per_node,
             nodes_per_block=nodes_per_block,
             max_blocks=max_blocks,
             init_blocks=init_blocks,
@@ -1878,6 +1928,14 @@ def main():
         help="Walltime per scheduler block allocation in hours (default: 2)",
     )
     scaleout_parsl_group.add_argument(
+        "--cpus-per-node",
+        type=int,
+        default=None,
+        help="Scheduler CPU cores reserved per node in Parsl scale-out mode. "
+        "Defaults to max_workers * cores_per_worker. Useful on systems that "
+        "require full-node requests while intentionally leaving some cores idle.",
+    )
+    scaleout_parsl_group.add_argument(
         "--qos",
         default="frontier",
         help="SLURM QOS (default: frontier)",
@@ -1998,6 +2056,14 @@ def main():
         )
     if args.scheduler == "pbspro" and not args.use_parsl:
         parser.error("--scheduler pbspro is currently only supported with --use-parsl")
+    if (
+        args.scheduler in {"slurm", "pbspro"}
+        and args.cpus_per_node is not None
+        and args.cpus_per_node < args.max_workers * args.cores_per_worker
+    ):
+        parser.error(
+            "--cpus-per-node must be >= max_workers * cores_per_worker in Slurm/PBS Pro mode"
+        )
 
     # Validate optimizer-specific args
     if args.optimizer == "orca" and args.max_opt_steps is not None:
@@ -2062,6 +2128,7 @@ def main():
             max_fail_count=args.max_fail_count,
             timeout_seconds=args.job_timeout,
             randomize=True,
+            cpus_per_node=args.cpus_per_node,
             nodes_per_block=args.nodes_per_block,
             max_blocks=args.max_blocks,
             init_blocks=args.init_blocks,

@@ -647,6 +647,20 @@ class TestBuildParslConfigSlurm:
         assert "--ntasks-per-node=64" in provider.scheduler_options
         assert "--cpus-per-task=1" in provider.scheduler_options
 
+    def test_single_node_scheduler_options_can_reserve_more_than_active_cores(self):
+        """Single-node Slurm can reserve more scheduler cores than active worker cores."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(
+            max_workers=8,
+            cores_per_worker=8,
+            cpus_per_node=192,
+            nodes_per_block=1,
+        )
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node=192" in provider.scheduler_options
+        assert "--cpus-per-task=1" in provider.scheduler_options
+
     def test_multi_node_scheduler_options_empty(self):
         """Multi-node mode has no extra scheduler_options (exclusive=True handles it)."""
         from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
@@ -655,6 +669,32 @@ class TestBuildParslConfigSlurm:
         provider = config.executors[0].provider
         assert "--ntasks-per-node" not in provider.scheduler_options
         assert provider.exclusive is True
+
+    def test_multi_node_scheduler_options_include_explicit_cpus_per_node(self):
+        """Multi-node Slurm adds ntasks-per-node when an explicit override is requested."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(
+            max_workers=8,
+            cores_per_worker=8,
+            cpus_per_node=192,
+            nodes_per_block=10,
+        )
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node=192" in provider.scheduler_options
+        assert "--cpus-per-task=1" in provider.scheduler_options
+        assert provider.exclusive is True
+
+    def test_slurm_cpu_shape_rejects_undersized_override(self):
+        """Reserved Slurm cores cannot be smaller than active worker cores."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        with pytest.raises(ValueError, match="cpus_per_node must be >="):
+            build_parsl_config_slurm(
+                max_workers=12,
+                cores_per_worker=16,
+                cpus_per_node=128,
+            )
 
     def test_cpu_affinity_block(self):
         """HighThroughputExecutor has cpu_affinity='block'."""
@@ -777,6 +817,31 @@ class TestBuildParslConfigPbsPro:
         assert provider.cpus_per_node == 192
         assert provider.select_options == "mpiprocs=192"
 
+    def test_pbs_cpu_shape_can_reserve_more_than_active_worker_cores(self):
+        """PBS can reserve a full node while workers intentionally leave cores idle."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro(
+            max_workers=8,
+            cores_per_worker=8,
+            cpus_per_node=192,
+            nodes_per_block=39,
+        )
+        provider = config.executors[0].provider
+        assert provider.cpus_per_node == 192
+        assert provider.select_options == "mpiprocs=192"
+
+    def test_pbs_cpu_shape_rejects_undersized_override(self):
+        """Reserved PBS cores cannot be smaller than active worker cores."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        with pytest.raises(ValueError, match="cpus_per_node must be >="):
+            build_parsl_config_pbspro(
+                max_workers=12,
+                cores_per_worker=16,
+                cpus_per_node=128,
+            )
+
     def test_monitoring_db_written_to_runinfo(self):
         """Monitoring is enabled with a per-run database inside run_dir."""
         from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
@@ -874,3 +939,57 @@ class TestMultiNodeCLIValidation:
         )
         assert result.returncode != 0
         assert "currently only supported with --use-parsl" in result.stderr
+
+    def test_pbspro_rejects_cpus_per_node_below_active_worker_cores(self):
+        """PBS full-node override must not undersize the active worker layout."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--scheduler",
+                "pbspro",
+                "--max-workers",
+                "12",
+                "--cores-per-worker",
+                "16",
+                "--cpus-per-node",
+                "128",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "must be >= max_workers * cores_per_worker" in result.stderr
+
+    def test_slurm_rejects_cpus_per_node_below_active_worker_cores(self):
+        """Slurm full-node override must not undersize the active worker layout."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--scheduler",
+                "slurm",
+                "--max-workers",
+                "12",
+                "--cores-per-worker",
+                "16",
+                "--cpus-per-node",
+                "128",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "must be >= max_workers * cores_per_worker" in result.stderr
