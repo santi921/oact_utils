@@ -968,6 +968,7 @@ def build_parsl_config_flux(
     ld_library_path: str | None = None,
     orca_path: str | None = None,
     mpirun_path: str | None = None,
+    enable_monitoring: bool = True,
 ):
     """Build Parsl Config for Flux single-node execution.
 
@@ -987,6 +988,8 @@ def build_parsl_config_flux(
         mpirun_path: Absolute path to the desired mpirun executable. When
             provided, its parent directory is prepended to PATH on worker
             processes ahead of the ORCA bin directory.
+        enable_monitoring: If True, attach a MonitoringHub that writes
+            resource usage to monitoring.db under the run directory.
 
     Returns:
         Parsl Config object.
@@ -1024,7 +1027,11 @@ def build_parsl_config_flux(
     )
 
     run_dir = _build_parsl_run_dir()
-    monitoring = _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+    monitoring = (
+        _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+        if enable_monitoring
+        else None
+    )
 
     return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
 
@@ -1045,6 +1052,7 @@ def build_parsl_config_slurm(
     ld_library_path: str | None = None,
     orca_path: str | None = None,
     mpirun_path: str | None = None,
+    enable_monitoring: bool = True,
 ):
     """Build Parsl Config for SLURM multi-node execution.
 
@@ -1085,6 +1093,8 @@ def build_parsl_config_slurm(
         mpirun_path: Absolute path to the desired mpirun executable. When
             provided, its parent directory is prepended to PATH on worker
             nodes ahead of the ORCA bin directory.
+        enable_monitoring: If True, attach a MonitoringHub that writes
+            resource usage to monitoring.db under the run directory.
 
     Returns:
         Parsl Config object.
@@ -1168,7 +1178,11 @@ def build_parsl_config_slurm(
     )
 
     run_dir = _build_parsl_run_dir()
-    monitoring = _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+    monitoring = (
+        _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+        if enable_monitoring
+        else None
+    )
 
     return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
 
@@ -1189,6 +1203,7 @@ def build_parsl_config_pbspro(
     ld_library_path: str | None = None,
     orca_path: str | None = None,
     mpirun_path: str | None = None,
+    enable_monitoring: bool = True,
 ):
     """Build Parsl Config for PBS Pro / OpenPBS multi-node execution.
 
@@ -1224,6 +1239,8 @@ def build_parsl_config_pbspro(
         mpirun_path: Absolute path to the desired mpirun executable. When
             provided, its parent directory is prepended to PATH on worker
             nodes ahead of the ORCA bin directory.
+        enable_monitoring: If True, attach a MonitoringHub that writes
+            resource usage to monitoring.db under the run directory.
 
     Returns:
         Parsl Config object.
@@ -1297,7 +1314,11 @@ def build_parsl_config_pbspro(
         provider=provider,
     )
 
-    monitoring = _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+    monitoring = (
+        _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+        if enable_monitoring
+        else None
+    )
 
     return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
 
@@ -1330,6 +1351,7 @@ def submit_batch_parsl(
     queue: str = "pbatch",
     qos: str = "frontier",
     account: str = "ODEFN5169CYFZ",
+    enable_monitoring: bool = True,
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -1365,6 +1387,9 @@ def submit_batch_parsl(
         queue: Queue/partition name for supported schedulers.
         qos: (SLURM) SLURM QOS.
         account: (SLURM) SLURM account/allocation.
+        enable_monitoring: If True, attach Parsl MonitoringHub (writes
+            monitoring.db). Disable on systems where the monitoring hub
+            port or SQLAlchemy dependency causes issues.
 
     Returns:
         List of submitted job IDs
@@ -1537,6 +1562,7 @@ def submit_batch_parsl(
             ld_library_path=ld_library_path,
             orca_path=config.get("orca_path"),
             mpirun_path=mpirun_path,
+            enable_monitoring=enable_monitoring,
         )
     elif scheduler.lower() == "pbspro":
         total_nodes = max_blocks * nodes_per_block
@@ -1568,6 +1594,7 @@ def submit_batch_parsl(
             ld_library_path=ld_library_path,
             orca_path=config.get("orca_path"),
             mpirun_path=mpirun_path,
+            enable_monitoring=enable_monitoring,
         )
     else:
         print("\nBuilding Parsl config (Flux single-node)...")
@@ -1579,6 +1606,7 @@ def submit_batch_parsl(
             ld_library_path=ld_library_path,
             orca_path=config.get("orca_path"),
             mpirun_path=mpirun_path,
+            enable_monitoring=enable_monitoring,
         )
 
     # Initialize Parsl
@@ -2131,6 +2159,13 @@ def main():
         default=72000,
         help="Job timeout in seconds for Parsl mode (default: 72000 = 20 hours)",
     )
+    parsl_group.add_argument(
+        "--no-parsl-monitoring",
+        action="store_true",
+        default=False,
+        help="Disable Parsl MonitoringHub (skip monitoring.db). Useful on systems "
+        "where the monitoring hub port or SQLAlchemy dependency causes issues.",
+    )
 
     # Scale-out Parsl options (--use-parsl --scheduler slurm|pbspro)
     scaleout_parsl_group = parser.add_argument_group(
@@ -2390,6 +2425,7 @@ def main():
             walltime_hours=args.walltime_hours,
             qos=args.qos,
             account=args.account,
+            enable_monitoring=not args.no_parsl_monitoring,
         )
     else:
         # Traditional mode: one job script per job
