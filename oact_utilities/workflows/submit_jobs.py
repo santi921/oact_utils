@@ -513,9 +513,11 @@ def _skip_finished_on_disk(
         if job.job_dir and Path(job.job_dir).is_dir():
             job_dir = job.job_dir
         else:
-            pattern = job_dir_pattern.replace(
-                "{orig_index}", str(job.orig_index)
-            ).replace("{id}", str(job.id))
+            pattern = render_job_dir_pattern(
+                job_dir_pattern,
+                orig_index=job.orig_index,
+                job_id=job.id,
+            )
             candidate = root_dir / pattern
             if candidate.is_dir():
                 job_dir = str(candidate)
@@ -903,8 +905,10 @@ def _build_parsl_worker_init(
     if ld_lib is None:
         if scheduler == "flux":
             ld_lib = DEFAULT_LD_LIBRARY_PATHS.get("flux", "")
-        else:
+        elif scheduler in {"slurm", "pbspro"}:
             ld_lib = f"{conda_base}/envs/{conda_env}/lib"
+        else:
+            raise ValueError(f"Unknown scheduler: {scheduler!r}")
 
     orca_bin_dir = (
         os.path.dirname(orca_path) if orca_path and os.path.isabs(orca_path) else None
@@ -962,6 +966,7 @@ def build_parsl_config_flux(
     conda_env: str = "py10mpi",
     conda_base: str = "/usr/WS1/vargas58/miniconda3",
     ld_library_path: str | None = None,
+    orca_path: str | None = None,
     mpirun_path: str | None = None,
 ):
     """Build Parsl Config for Flux single-node execution.
@@ -970,14 +975,21 @@ def build_parsl_config_flux(
     This configuration runs all workers on the local node.
 
     Args:
-        max_workers: Maximum number of concurrent workers
-        cores_per_worker: CPU cores per worker
-        conda_env: Conda environment name
-        conda_base: Conda base path
-        ld_library_path: Override LD_LIBRARY_PATH
+        max_workers: Maximum number of concurrent workers.
+        cores_per_worker: CPU cores per worker.
+        conda_env: Conda environment name.
+        conda_base: Conda base path.
+        ld_library_path: Override LD_LIBRARY_PATH.
+        orca_path: Absolute path to ORCA executable. When provided and
+            absolute, its parent directory is prepended to PATH on worker
+            processes so that ORCA's bundled MPI helpers are found before
+            any conda-provided mpirun.
+        mpirun_path: Absolute path to the desired mpirun executable. When
+            provided, its parent directory is prepended to PATH on worker
+            processes ahead of the ORCA bin directory.
 
     Returns:
-        Parsl Config object
+        Parsl Config object.
     """
     if not PARSL_AVAILABLE:
         raise ImportError(
@@ -994,6 +1006,7 @@ def build_parsl_config_flux(
         conda_env=conda_env,
         conda_base=conda_base,
         ld_library_path=ld_library_path,
+        orca_path=orca_path,
         mpirun_path=mpirun_path,
     )
 
@@ -1069,6 +1082,9 @@ def build_parsl_config_slurm(
             nodes so that ORCA's bundled MPI helpers are found before any
             conda-provided mpirun (prevents intermittent MPI bootstrap
             failures on SLURM systems).
+        mpirun_path: Absolute path to the desired mpirun executable. When
+            provided, its parent directory is prepended to PATH on worker
+            nodes ahead of the ORCA bin directory.
 
     Returns:
         Parsl Config object.
@@ -1231,6 +1247,17 @@ def build_parsl_config_pbspro(
         mpirun_path=mpirun_path,
     )
 
+    # Validate before any side-effectful construction (matches SLURM builder order).
+    active_cores_per_node = max_workers * cores_per_worker
+    requested_cpus_per_node = cpus_per_node or active_cores_per_node
+    if requested_cpus_per_node < active_cores_per_node:
+        raise ValueError(
+            "cpus_per_node must be >= max_workers * cores_per_worker "
+            f"({active_cores_per_node})"
+        )
+
+    # run_dir is built before the launcher because PbsdshLauncher needs a
+    # filesystem path for its per-node helper scripts.
     run_dir = _build_parsl_run_dir()
 
     if nodes_per_block > 1:
@@ -1242,14 +1269,9 @@ def build_parsl_config_pbspro(
 
         launcher = SimpleLauncher()
 
-    active_cores_per_node = max_workers * cores_per_worker
-    requested_cpus_per_node = cpus_per_node or active_cores_per_node
-    if requested_cpus_per_node < active_cores_per_node:
-        raise ValueError(
-            "cpus_per_node must be >= max_workers * cores_per_worker "
-            f"({active_cores_per_node})"
-        )
-
+    # Note: PBSProProvider has no 'exclusive' keyword (unlike SlurmProvider).
+    # Whole-node exclusivity is achieved via the select statement:
+    # select=N:ncpus=<requested_cpus_per_node>:mpiprocs=<requested_cpus_per_node>.
     provider = PBSProProvider(
         queue=queue,
         account=account,
@@ -1513,7 +1535,7 @@ def submit_batch_parsl(
             conda_env=conda_env,
             conda_base=conda_base,
             ld_library_path=ld_library_path,
-            orca_path=orca_config.get("orca_path") if orca_config else None,
+            orca_path=config.get("orca_path"),
             mpirun_path=mpirun_path,
         )
     elif scheduler.lower() == "pbspro":
@@ -1544,7 +1566,7 @@ def submit_batch_parsl(
             conda_env=conda_env,
             conda_base=conda_base,
             ld_library_path=ld_library_path,
-            orca_path=orca_config.get("orca_path") if orca_config else None,
+            orca_path=config.get("orca_path"),
             mpirun_path=mpirun_path,
         )
     else:
@@ -1555,6 +1577,8 @@ def submit_batch_parsl(
             conda_env=conda_env,
             conda_base=conda_base,
             ld_library_path=ld_library_path,
+            orca_path=config.get("orca_path"),
+            mpirun_path=mpirun_path,
         )
 
     # Initialize Parsl
@@ -1655,12 +1679,6 @@ def submit_batch_parsl(
 
     # Create future->(job_id, job_dir) mapping for concurrent completion
     futures_map = {future: (job_id, job_dir) for job_id, job_dir, future in futures}
-    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
-
-    def _handle_sigterm(_signum, _frame):
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     try:
         # as_completed() yields futures as they finish (concurrent, not sequential!)
@@ -1761,8 +1779,10 @@ def submit_batch_parsl(
         print("\n\nGraceful shutdown requested...")
 
     finally:
+        # Restore original handler first so a second SIGTERM during cleanup
+        # does not raise KeyboardInterrupt mid-finally and abandon dfk.cleanup().
         try:
-            signal.signal(signal.SIGTERM, previous_sigterm_handler)
+            signal.signal(signal.SIGTERM, _original_sigterm)
         except Exception:
             pass
 
@@ -1794,9 +1814,6 @@ def submit_batch_parsl(
                     except Exception:
                         pass
             print(f"Reset {len(orphaned_ids)} in-flight jobs back to TO_RUN")
-
-        # Restore original SIGTERM handler
-        signal.signal(signal.SIGTERM, _original_sigterm)
 
         # Cleanup Parsl -- running workers are terminated by dfk.cleanup().
         # Their job IDs are already classified as orphans and reset above.

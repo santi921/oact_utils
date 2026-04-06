@@ -129,7 +129,14 @@ class ArchitectorWorkflow:
             try:
                 conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
                 conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA journal_mode=DELETE")
+                row = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+                if row and row[0].lower() != "delete":
+                    warnings.warn(
+                        f"Failed to switch {self.db_path} to DELETE journal mode "
+                        f"(current mode: {row[0]}). Another process may hold "
+                        "the database open in WAL mode.",
+                        stacklevel=2,
+                    )
                 break
             except sqlite3.OperationalError as e:
                 if conn is not None:
@@ -242,7 +249,11 @@ class ArchitectorWorkflow:
         """
         if max_retries is None:
             max_retries = self.max_retries
-        is_write = query.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+        is_write = (
+            query.lstrip()
+            .upper()
+            .startswith(("INSERT", "UPDATE", "DELETE", "REPLACE", "ALTER"))
+        )
         for attempt in range(max_retries):
             try:
                 cur = self.conn.cursor()
@@ -515,6 +526,7 @@ class ArchitectorWorkflow:
         increment_fail_count: bool = False,
         error_message: str | None = None,
         worker_id: object = _SENTINEL,
+        only_if_status: JobStatus | None = None,
     ):
         """Update status for multiple jobs at once.
 
@@ -525,6 +537,9 @@ class ArchitectorWorkflow:
             error_message: If provided, set error_message for all jobs.
             worker_id: If provided, set worker_id for all jobs. Pass None to
                 clear it. Omit (default sentinel) to leave unchanged.
+            only_if_status: If provided, only update jobs currently in this
+                status. Use this when claiming jobs to prevent two concurrent
+                workers from double-assigning the same job.
         """
         if not job_ids:
             return
@@ -544,8 +559,12 @@ class ArchitectorWorkflow:
             params.append(worker_id)
 
         placeholders = ",".join("?" * len(job_ids))
-        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id IN ({placeholders})"
-        self._execute_with_retry(query, tuple(params + job_ids))
+        where = f"id IN ({placeholders})"
+        if only_if_status is not None:
+            where += " AND status = ?"
+        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE {where}"
+        extra = [only_if_status.value] if only_if_status is not None else []
+        self._execute_with_retry(query, tuple(params + job_ids + extra))
         self._commit_with_retry()
 
     def update_status_bulk_multi(
@@ -606,7 +625,12 @@ class ArchitectorWorkflow:
             worker_id: Optional scheduler job ID to associate with these jobs
                 (e.g., SLURM_JOB_ID or FLUX_JOB_ID). Used for crash recovery.
         """
-        self.update_status_bulk(job_ids, JobStatus.RUNNING, worker_id=worker_id)
+        self.update_status_bulk(
+            job_ids,
+            JobStatus.RUNNING,
+            worker_id=worker_id,
+            only_if_status=JobStatus.TO_RUN,
+        )
 
     def reset_failed_jobs(
         self, max_fail_count: int | None = None, include_timeout: bool = False
