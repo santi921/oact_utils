@@ -22,10 +22,12 @@
 DB_PATH="/path/to/workflow.db"  #(update USE ACTINIDES DB)
 ROOT_DIR="/path/to/job_output_dir" #(update)
 ORCA_PATH="/path/to/orca"          #(update -- must be absolute path to ORCA binary)
+JOB_PREFIX=""                     # optional stable prefix reused across coordinator requeues
 
 BATCH_SIZE=500          # number of jobs to dispatch at once (update)
 MAX_WORKERS=4              # workers per node (update)
 CORES_PER_WORKER=20        # cores per worker (update)
+CPUS_PER_NODE=""          # optional: reserve more scheduler cores/node than active workers use
 CONDA_ENV="py10mpi" # (update)
 CONDA_BASE="/usr/WS1/vargas58/miniconda3"
 LD_LIBRARY_PATH_OVERRIDE=""  # (optional) set to override LD_LIBRARY_PATH in job scripts
@@ -60,9 +62,11 @@ python -m oact_utilities.workflows.submit_jobs \
     "${ROOT_DIR}" \
     --use-parsl \
     --scheduler slurm \
+    ${JOB_PREFIX:+--job-prefix "${JOB_PREFIX}"} \
     --batch-size "${BATCH_SIZE}" \
     --max-workers "${MAX_WORKERS}" \
     --cores-per-worker "${CORES_PER_WORKER}" \
+    ${CPUS_PER_NODE:+--cpus-per-node "${CPUS_PER_NODE}"} \
     --conda-env "${CONDA_ENV}" \
     --conda-base "${CONDA_BASE}" \
     ${LD_LIBRARY_PATH_OVERRIDE:+--ld-library-path "${LD_LIBRARY_PATH_OVERRIDE}"} \

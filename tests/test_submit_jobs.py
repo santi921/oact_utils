@@ -1,5 +1,6 @@
 """Tests for submit_jobs module."""
 
+import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -15,6 +16,8 @@ from oact_utilities.workflows.submit_jobs import (
     write_flux_job_file,
     write_slurm_job_file,
 )
+
+PARSL_INSTALLED = importlib.util.find_spec("parsl") is not None
 
 
 @pytest.fixture
@@ -114,6 +117,38 @@ class TestPrepareJobDirectory:
         )
 
         assert job_dir.name == "calc_1_42"
+
+    def test_hostname_placeholder_in_job_dir_pattern(
+        self, mock_job_record, tmp_path, orca_config_with_path, monkeypatch
+    ):
+        """Custom job directory patterns may include the coordinator hostname."""
+        monkeypatch.setattr(
+            "oact_utilities.workflows.job_dir_patterns.get_job_dir_hostname",
+            lambda: "coord01",
+        )
+        job_dir = prepare_job_directory(
+            mock_job_record,
+            tmp_path,
+            job_dir_pattern="{hostname}_calc_{id}_{orig_index}",
+            orca_config=orca_config_with_path,
+        )
+
+        assert job_dir.name == "coord01_calc_1_42"
+
+    def test_apply_job_dir_prefix(self):
+        """Stable run prefixes prepend cleanly to the base job directory pattern."""
+        from oact_utilities.workflows.job_dir_patterns import apply_job_dir_prefix
+
+        assert apply_job_dir_prefix("job_{orig_index}", "campaignA") == (
+            "campaignA_job_{orig_index}"
+        )
+
+    def test_apply_job_dir_prefix_rejects_invalid_chars(self):
+        """Run prefixes reject path-like or unsafe characters."""
+        from oact_utilities.workflows.job_dir_patterns import apply_job_dir_prefix
+
+        with pytest.raises(ValueError, match="job_prefix may contain only"):
+            apply_job_dir_prefix("job_{orig_index}", "../campaign")
 
     def test_default_orca_config_applied(
         self, mock_job_record, tmp_path, orca_config_with_path
@@ -641,6 +676,20 @@ class TestBuildParslConfigSlurm:
         assert "--ntasks-per-node=64" in provider.scheduler_options
         assert "--cpus-per-task=1" in provider.scheduler_options
 
+    def test_single_node_scheduler_options_can_reserve_more_than_active_cores(self):
+        """Single-node Slurm can reserve more scheduler cores than active worker cores."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(
+            max_workers=8,
+            cores_per_worker=8,
+            cpus_per_node=192,
+            nodes_per_block=1,
+        )
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node=192" in provider.scheduler_options
+        assert "--cpus-per-task=1" in provider.scheduler_options
+
     def test_multi_node_scheduler_options_empty(self):
         """Multi-node mode has no extra scheduler_options (exclusive=True handles it)."""
         from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
@@ -649,6 +698,32 @@ class TestBuildParslConfigSlurm:
         provider = config.executors[0].provider
         assert "--ntasks-per-node" not in provider.scheduler_options
         assert provider.exclusive is True
+
+    def test_multi_node_scheduler_options_include_explicit_cpus_per_node(self):
+        """Multi-node Slurm adds ntasks-per-node when an explicit override is requested."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(
+            max_workers=8,
+            cores_per_worker=8,
+            cpus_per_node=192,
+            nodes_per_block=10,
+        )
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node=192" in provider.scheduler_options
+        assert "--cpus-per-task=1" in provider.scheduler_options
+        assert provider.exclusive is True
+
+    def test_slurm_cpu_shape_rejects_undersized_override(self):
+        """Reserved Slurm cores cannot be smaller than active worker cores."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        with pytest.raises(ValueError, match="cpus_per_node must be >="):
+            build_parsl_config_slurm(
+                max_workers=12,
+                cores_per_worker=16,
+                cpus_per_node=128,
+            )
 
     def test_cpu_affinity_block(self):
         """HighThroughputExecutor has cpu_affinity='block'."""
@@ -665,22 +740,129 @@ class TestBuildParslConfigSlurm:
         config = build_parsl_config_slurm()
         assert config.run_dir.startswith("runinfo/run_")
 
-    def test_worker_init_prepends_orca_bin_dir_for_absolute_path(self):
+    def test_worker_init_prepends_orca_bin_dir_for_absolute_path(self, monkeypatch):
         """Absolute orca_path causes its parent dir to be prepended to PATH in worker_init."""
+        monkeypatch.setattr(
+            "oact_utilities.workflows.submit_jobs.shutil.which",
+            lambda exe: None,
+        )
         from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
 
         config = build_parsl_config_slurm(orca_path="/opt/orca/bin/orca")
         provider = config.executors[0].provider
         assert "export PATH=/opt/orca/bin:" in provider.worker_init
 
-    def test_worker_init_no_path_export_for_non_absolute_orca_path(self):
+    def test_worker_init_no_path_export_for_non_absolute_orca_path(self, monkeypatch):
         """No PATH export when orca_path is None or a bare executable name."""
+        monkeypatch.setattr(
+            "oact_utilities.workflows.submit_jobs.shutil.which",
+            lambda exe: None,
+        )
         from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
 
         for val in [None, "orca"]:
             config = build_parsl_config_slurm(orca_path=val)
             provider = config.executors[0].provider
             assert "export PATH=" not in provider.worker_init
+
+
+@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
+class TestBuildParslConfigPbsPro:
+    """Tests for build_parsl_config_pbspro function."""
+
+    def test_single_node_uses_simple_launcher(self):
+        """nodes_per_block=1 uses SimpleLauncher."""
+        from parsl.launchers import SimpleLauncher
+
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro(nodes_per_block=1)
+        provider = config.executors[0].provider
+        assert isinstance(provider.launcher, SimpleLauncher)
+
+    def test_multi_node_uses_pbsdsh_launcher(self):
+        """nodes_per_block > 1 uses a pbsdsh-based launcher, not mpiexec."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro(nodes_per_block=4)
+        provider = config.executors[0].provider
+        assert provider.launcher.__class__.__name__ == "PbsdshLauncher"
+        wrapped = provider.launcher("echo hi", tasks_per_node=1, nodes_per_block=4)
+        assert "awk '!seen[$1]++ {print NR-1}'" in wrapped
+        assert 'pbsdsh -n "$NODE_INDEX"' in wrapped
+        assert "mpiexec" not in wrapped
+
+    def test_nodes_per_block_passed_to_provider(self):
+        """nodes_per_block value is forwarded to PBSProProvider."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro(nodes_per_block=39)
+        provider = config.executors[0].provider
+        assert provider.nodes_per_block == 39
+
+    def test_pbs_cpu_shape_derived_from_worker_layout(self):
+        """ncpus and mpiprocs derive from max_workers * cores_per_worker."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro(
+            max_workers=12, cores_per_worker=16, nodes_per_block=39
+        )
+        provider = config.executors[0].provider
+        assert provider.cpus_per_node == 192
+        assert provider.select_options == "mpiprocs=192"
+
+    def test_pbs_cpu_shape_can_reserve_more_than_active_worker_cores(self):
+        """PBS can reserve a full node while workers intentionally leave cores idle."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro(
+            max_workers=8,
+            cores_per_worker=8,
+            cpus_per_node=192,
+            nodes_per_block=39,
+        )
+        provider = config.executors[0].provider
+        assert provider.cpus_per_node == 192
+        assert provider.select_options == "mpiprocs=192"
+
+    def test_pbs_cpu_shape_rejects_undersized_override(self):
+        """Reserved PBS cores cannot be smaller than active worker cores."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        with pytest.raises(ValueError, match="cpus_per_node must be >="):
+            build_parsl_config_pbspro(
+                max_workers=12,
+                cores_per_worker=16,
+                cpus_per_node=128,
+            )
+
+    def test_monitoring_db_written_to_runinfo(self):
+        """Monitoring is enabled with a per-run database inside run_dir."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro()
+        assert config.monitoring is not None
+        expected = f"sqlite:///{(Path(config.run_dir).resolve() / 'monitoring.db')}"
+        assert config.monitoring.logging_endpoint == expected
+
+    def test_executor_has_runtime_address(self):
+        """HTEX sets a runtime-resolved address for worker connectivity."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro()
+        executor = config.executors[0]
+        assert executor.address is not None
+
+    def test_executor_uses_python_module_launch_cmd(self):
+        """PBS HTEX launch uses absolute python -m, not a PATH-based console script."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro()
+        executor = config.executors[0]
+        assert " -m parsl.executors.high_throughput.process_worker_pool " in (
+            executor.launch_cmd
+        )
+        assert "process_worker_pool.py" not in executor.launch_cmd
 
 
 class TestMultiNodeCLIValidation:
@@ -707,7 +889,7 @@ class TestMultiNodeCLIValidation:
             text=True,
         )
         assert result.returncode != 0
-        assert "only supported with --scheduler slurm" in result.stderr
+        assert "only supported with --scheduler slurm or pbspro" in result.stderr
 
     def test_nodes_per_block_less_than_one_errors(self):
         """--nodes-per-block 0 should error."""
@@ -731,6 +913,80 @@ class TestMultiNodeCLIValidation:
         )
         assert result.returncode != 0
         assert "must be >= 1" in result.stderr
+
+    def test_pbspro_requires_parsl_mode(self):
+        """PBS Pro support is currently only available through Parsl mode."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--scheduler",
+                "pbspro",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "currently only supported with --use-parsl" in result.stderr
+
+    def test_pbspro_rejects_cpus_per_node_below_active_worker_cores(self):
+        """PBS full-node override must not undersize the active worker layout."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--scheduler",
+                "pbspro",
+                "--max-workers",
+                "12",
+                "--cores-per-worker",
+                "16",
+                "--cpus-per-node",
+                "128",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "must be >= max_workers * cores_per_worker" in result.stderr
+
+    def test_slurm_rejects_cpus_per_node_below_active_worker_cores(self):
+        """Slurm full-node override must not undersize the active worker layout."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--scheduler",
+                "slurm",
+                "--max-workers",
+                "12",
+                "--cores-per-worker",
+                "16",
+                "--cpus-per-node",
+                "128",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "must be >= max_workers * cores_per_worker" in result.stderr
 
 
 # --- Pre-submission disk check tests ---
