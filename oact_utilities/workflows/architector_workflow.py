@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..utils.architector import create_workflow_db
+from ..utils.architector import create_workflow_db, parse_xyz_elements
 
 
 class JobStatus(str, Enum):
@@ -787,6 +787,170 @@ def create_workflow(
 
     workflow = ArchitectorWorkflow(db_path_ret)
     return db_path_ret, workflow
+
+
+def create_split_workflows(
+    csv_path: str | Path,
+    db_dir: str | Path,
+    db_name: str,
+    split_names: list[str],
+    fractions: list[float] | None = None,
+    by_natoms: list[int] | None = None,
+    by_column: str | None = None,
+    by_values: list[str] | None = None,
+    geometry_column: str = "aligned_csd_core",
+    charge_column: str | None = "charge",
+    spin_column: str | None = "uhf",
+    batch_size: int = 10000,
+    extra_columns: dict[str, str] | None = None,
+    seed: int = 42,
+) -> list[tuple[Path, ArchitectorWorkflow]]:
+    """Create multiple workflow DBs from a single CSV by splitting rows across named shards.
+
+    Reads the CSV once, assigns each row to a shard, then writes one fully-independent
+    SQLite workflow DB per shard. Each child DB can be submitted to a different HPC
+    cluster or handed to a collaborator.
+
+    Args:
+        csv_path: Path to the architector CSV file.
+        db_dir: Directory where child DBs will be written.
+        db_name: Base name for child DBs. Output files are named
+            ``{db_dir}/{db_name}_{split_name}.db``.
+        split_names: Names for each shard (e.g. ``["tuo", "dod"]``). Determines
+            the number of shards.
+        fractions: Per-shard fractions for random splitting (must sum to 1.0 and
+            have the same length as ``split_names``). If neither ``fractions``,
+            ``by_natoms``, nor ``by_column`` is given, rows are split equally at
+            random.
+        by_natoms: Atom-count boundaries for size-based splitting. Must have
+            ``len(split_names) - 1`` values. Example: ``[60, 100]`` with
+            ``split_names=["small","medium","large"]`` routes natoms < 60 to
+            "small", 60-99 to "medium", and >= 100 to "large".
+        by_column: CSV column name to split on (e.g. ``"metal"``). Must be used
+            together with ``by_values``.
+        by_values: Values for ``by_column`` routing. Must have
+            ``len(split_names) - 1`` entries; rows not matching any value go to
+            the last shard.
+        geometry_column: CSV column containing XYZ geometry strings.
+        charge_column: CSV column containing molecular charges.
+        spin_column: CSV column containing spin multiplicity (2S+1).
+        batch_size: Rows per batch when writing each child DB.
+        extra_columns: Extra CSV columns to store in each DB, e.g.
+            ``{"metal": "TEXT"}``.
+        seed: Random seed for reproducible shuffling (used by random/weighted
+            split strategies).
+
+    Returns:
+        List of ``(db_path, ArchitectorWorkflow)`` tuples, one per shard, in the
+        same order as ``split_names``.
+
+    Raises:
+        ValueError: On invalid argument combinations or constraint violations.
+        FileNotFoundError: If ``csv_path`` does not exist.
+    """
+    import numpy as np
+
+    n_shards = len(split_names)
+    if n_shards < 2:
+        raise ValueError("split_names must contain at least 2 entries.")
+
+    n_strategies = sum(
+        [fractions is not None, by_natoms is not None, by_column is not None]
+    )
+    if n_strategies > 1:
+        raise ValueError(
+            "Specify at most one split strategy: fractions, by_natoms, or by_column."
+        )
+
+    db_dir = Path(db_dir)
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    print(f"Reading {csv_path} ...")
+    df = pd.read_csv(csv_path)
+    n = len(df)
+
+    if by_natoms is not None:
+        if len(by_natoms) != n_shards - 1:
+            raise ValueError(
+                f"by_natoms must have len(split_names) - 1 = {n_shards - 1} "
+                f"boundary value(s), got {len(by_natoms)}."
+            )
+        natoms_arr = (
+            df[geometry_column]
+            .apply(lambda x: len(parse_xyz_elements(str(x))) if not pd.isna(x) else 0)
+            .to_numpy()
+        )
+        shards = np.full(n, n_shards - 1, dtype=int)
+        prev = 0
+        for shard_i, boundary in enumerate(by_natoms):
+            mask = (natoms_arr >= prev) & (natoms_arr < boundary)
+            shards[mask] = shard_i
+            prev = boundary
+        # rows with natoms >= last boundary already default to n_shards - 1
+        df = df.copy()
+        df["_shard"] = shards
+
+    elif by_column is not None:
+        if by_values is None:
+            raise ValueError("by_column requires by_values.")
+        if len(by_values) != n_shards - 1:
+            raise ValueError(
+                f"by_values must have len(split_names) - 1 = {n_shards - 1} "
+                f"entry/entries (remainder goes to last shard), got {len(by_values)}."
+            )
+        col_str = df[by_column].astype(str)
+        shards = np.full(n, n_shards - 1, dtype=int)
+        for shard_i, val in enumerate(by_values):
+            shards[col_str == str(val)] = shard_i
+        df = df.copy()
+        df["_shard"] = shards
+
+    else:
+        # Random split (equal or weighted by fractions)
+        if fractions is None:
+            fractions = [1.0 / n_shards] * n_shards
+        if len(fractions) != n_shards:
+            raise ValueError(
+                f"fractions must have the same length as split_names ({n_shards}), "
+                f"got {len(fractions)}."
+            )
+        total_frac = sum(fractions)
+        if abs(total_frac - 1.0) > 1e-6:
+            raise ValueError(f"fractions must sum to 1.0, got {total_frac:.6f}.")
+        counts = [int(round(f * n)) for f in fractions]
+        counts[-1] += n - sum(counts)  # absorb rounding error into last shard
+
+        rng = np.random.default_rng(seed)
+        shuffled = rng.permutation(n)
+        shards = np.empty(n, dtype=int)
+        offset = 0
+        for shard_i, count in enumerate(counts):
+            shards[shuffled[offset : offset + count]] = shard_i
+            offset += count
+        df = df.copy()
+        df["_shard"] = shards
+
+    results: list[tuple[Path, ArchitectorWorkflow]] = []
+    for shard_i, name in enumerate(split_names):
+        shard_df = df[df["_shard"] == shard_i].drop(columns=["_shard"])
+        db_path = db_dir / f"{db_name}_{name}.db"
+        create_workflow_db(
+            csv_path=shard_df,
+            db_path=db_path,
+            geometry_column=geometry_column,
+            charge_column=charge_column,
+            spin_column=spin_column,
+            batch_size=batch_size,
+            extra_columns=extra_columns,
+        )
+        workflow = ArchitectorWorkflow(db_path)
+        results.append((db_path, workflow))
+
+    return results
 
 
 def update_job_status(

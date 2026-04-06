@@ -487,7 +487,7 @@ def chunk_architector_csv(
 
 
 def create_workflow_db(
-    csv_path: str | Path,
+    csv_path: str | Path | pd.DataFrame,
     db_path: str | Path,
     geometry_column: str = "aligned_csd_core",
     charge_column: str | None = "charge",
@@ -496,13 +496,18 @@ def create_workflow_db(
     debug: bool = False,
     extra_columns: dict[str, str] | None = None,
 ) -> Path:
-    """Create a workflow database directly from an architector CSV.
+    """Create a workflow database directly from an architector CSV or DataFrame.
 
-    This function reads structures from a CSV file and populates a SQLite
-    database for workflow tracking. No chunking is performed.
+    This function reads structures from a CSV file (or a pre-loaded DataFrame)
+    and populates a SQLite database for workflow tracking. No chunking is
+    performed on the output side.
 
     Args:
-        csv_path: Path to the architector CSV file.
+        csv_path: Path to the architector CSV file, or a pandas DataFrame.
+            When a DataFrame is provided the file existence check is skipped and
+            rows are iterated directly in batches of ``batch_size``. The
+            DataFrame index is used as ``orig_index`` so callers must preserve
+            the original CSV row positions before passing in a subset.
         db_path: Path to the SQLite database file to create.
         geometry_column: Name of column containing XYZ geometry strings.
         charge_column: Name of column containing molecular charges (optional).
@@ -515,11 +520,19 @@ def create_workflow_db(
     Returns:
         Path to the created database.
     """
-    csv_path = Path(csv_path)
-    db_path = Path(db_path)
+    # Accept either a file path or a pre-loaded DataFrame (used by
+    # create_split_workflows to avoid writing temp CSV files).
+    if isinstance(csv_path, pd.DataFrame):
+        df_input: pd.DataFrame | None = csv_path
+        csv_label = "<DataFrame>"
+    else:
+        df_input = None
+        csv_path = Path(csv_path)
+        csv_label = str(csv_path)
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
-    if not csv_path.exists():
-        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+    db_path = Path(db_path)
 
     # Initialize database with extra columns if provided
     conn = _init_db(db_path, extra_columns=extra_columns)
@@ -530,7 +543,7 @@ def create_workflow_db(
     try:
         if debug:
             print(f"Creating workflow database at: {db_path}")
-            print(f"Reading CSV from: {csv_path}")
+            print(f"Reading CSV from: {csv_label}")
             print(f"Using geometry column: {geometry_column}")
             if charge_column:
                 print(f"Using charge column: {charge_column}")
@@ -540,7 +553,15 @@ def create_workflow_db(
                 print(f"Extra columns to store: {list(extra_columns.keys())}")
             print(f"Processing in batches of {batch_size} rows")
 
-        for ind, chunk in enumerate(pd.read_csv(csv_path, chunksize=batch_size)):
+        if df_input is not None:
+            chunk_iter: Any = (
+                df_input.iloc[i : i + batch_size]
+                for i in range(0, max(len(df_input), 1), batch_size)
+            )
+        else:
+            chunk_iter = pd.read_csv(csv_path, chunksize=batch_size)
+
+        for ind, chunk in enumerate(chunk_iter):
             if debug:
                 # break at chunk 1
                 # print(f"Processing chunk {ind} with {len(chunk)} rows")
