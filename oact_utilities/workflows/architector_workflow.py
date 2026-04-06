@@ -220,17 +220,14 @@ class ArchitectorWorkflow:
     def _is_retryable(e: sqlite3.OperationalError) -> bool:
         """Check if an OperationalError is a transient lock/busy error."""
         msg = str(e).lower()
-        return any(
-            token in msg
-            for token in ("lock", "busy", "locking protocol", "database is locked")
-        )
+        return any(token in msg for token in ("lock", "busy"))
 
     def _execute_with_retry(
         self,
         query: str,
         params: tuple = (),
         max_retries: int | None = None,
-    ):
+    ) -> sqlite3.Cursor:
         """Execute a query with retry logic for handling database locks.
 
         Uses exponential backoff with jitter to handle concurrent access

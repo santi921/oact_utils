@@ -1590,11 +1590,7 @@ def submit_batch_parsl(
         print(f"Failed to initialize Parsl: {e}")
         print("Check your conda environment and ORCA installation")
         # Reset claimed jobs back to TO_RUN since we can't run them
-        for jid in submitted_ids:
-            try:
-                workflow.update_status(jid, JobStatus.TO_RUN, worker_id=None)
-            except Exception:
-                pass
+        workflow.update_status_bulk(submitted_ids, JobStatus.TO_RUN, worker_id=None)
         print(f"Reset {len(submitted_ids)} claimed jobs back to TO_RUN")
         return []
 
@@ -1890,27 +1886,17 @@ def submit_batch(
             scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
         )
 
-    # Get jobs ready to run
-    # include_geometry=True so prepare_job_directory can write the .inp file
-    ready_jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
+    jobs_to_submit = filter_jobs_for_submission(
+        workflow,
+        num_jobs=batch_size,
+        max_fail_count=max_fail_count,
+        randomize=randomize,
+    )
 
-    # Filter out jobs that have failed too many times
-    if max_fail_count is not None:
-        original_count = len(ready_jobs)
-        ready_jobs = [j for j in ready_jobs if j.fail_count < max_fail_count]
-        skipped = original_count - len(ready_jobs)
-        if skipped > 0:
-            print(f"Skipping {skipped} jobs that have failed {max_fail_count}+ times")
-
-    if not ready_jobs:
+    if not jobs_to_submit:
         print("No ready jobs to submit")
         return []
 
-    # Limit to batch size
-    if randomize:
-        jobs_to_submit = random.sample(ready_jobs, min(batch_size, len(ready_jobs)))
-    else:
-        jobs_to_submit = ready_jobs[:batch_size]
     print(f"Preparing {len(jobs_to_submit)} jobs for submission...")
 
     # Filter out jobs with .do_not_rerun.json marker files
