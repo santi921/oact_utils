@@ -1040,6 +1040,7 @@ def build_parsl_config_slurm(
         walltime=f"{walltime_hours:02d}:00:00",
         worker_init=worker_init,
         scheduler_options=scheduler_options,
+        cmd_timeout=None,
         exclusive=True,
         launcher=launcher,
         parallelism=1.0,
@@ -1163,6 +1164,7 @@ def build_parsl_config_pbspro(
         min_blocks=min_blocks,
         max_blocks=max_blocks,
         walltime=f"{walltime_hours:02d}:00:00",
+        cmd_timeout=None,
         worker_init=worker_init,
         launcher=launcher,
         parallelism=1.0,
@@ -1257,7 +1259,7 @@ def submit_batch_parsl(
         return []
 
     from concurrent.futures import as_completed
-
+    import signal
     import parsl
 
     root_dir = Path(root_dir)
@@ -1493,6 +1495,12 @@ def submit_batch_parsl(
 
     # Create future->(job_id, job_dir) mapping for concurrent completion
     futures_map = {future: (job_id, job_dir) for job_id, job_dir, future in futures}
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+    def _handle_sigterm(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     try:
         # as_completed() yields futures as they finish (concurrent, not sequential!)
@@ -1569,6 +1577,11 @@ def submit_batch_parsl(
         print("\n\nGraceful shutdown requested...")
 
     finally:
+        try:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
+        except Exception:
+            pass
+
         # Reset any jobs that are still RUNNING back to READY so they can be
         # re-submitted in the next batch (e.g. after Ctrl+C or crash).
         resolved_ids = set(completed_ids) | set(failed_ids)
