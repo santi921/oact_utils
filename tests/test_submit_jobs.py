@@ -634,6 +634,28 @@ class TestDefaultOrcaPaths:
         assert "slurm" in DEFAULT_ORCA_PATHS
 
 
+@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
+class TestBuildParslConfigFlux:
+    """Tests for build_parsl_config_flux function."""
+
+    def test_monitoring_enabled_by_default(self):
+        """MonitoringHub is attached by default."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_flux
+
+        config = build_parsl_config_flux()
+        assert config.monitoring is not None
+        expected = f"sqlite:///{(Path(config.run_dir).resolve() / 'monitoring.db')}"
+        assert config.monitoring.logging_endpoint == expected
+
+    def test_monitoring_disabled_when_flag_false(self):
+        """enable_monitoring=False omits MonitoringHub from Config."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_flux
+
+        config = build_parsl_config_flux(enable_monitoring=False)
+        assert config.monitoring is None
+
+
+@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
 class TestBuildParslConfigSlurm:
     """Tests for build_parsl_config_slurm function."""
 
@@ -765,6 +787,22 @@ class TestBuildParslConfigSlurm:
             provider = config.executors[0].provider
             assert "export PATH=" not in provider.worker_init
 
+    def test_monitoring_enabled_by_default(self):
+        """MonitoringHub is attached by default."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm()
+        assert config.monitoring is not None
+        expected = f"sqlite:///{(Path(config.run_dir).resolve() / 'monitoring.db')}"
+        assert config.monitoring.logging_endpoint == expected
+
+    def test_monitoring_disabled_when_flag_false(self):
+        """enable_monitoring=False omits MonitoringHub from Config."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(enable_monitoring=False)
+        assert config.monitoring is None
+
 
 @pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
 class TestBuildParslConfigPbsPro:
@@ -844,6 +882,13 @@ class TestBuildParslConfigPbsPro:
         assert config.monitoring is not None
         expected = f"sqlite:///{(Path(config.run_dir).resolve() / 'monitoring.db')}"
         assert config.monitoring.logging_endpoint == expected
+
+    def test_monitoring_disabled_when_flag_false(self):
+        """enable_monitoring=False omits MonitoringHub from Config."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro(enable_monitoring=False)
+        assert config.monitoring is None
 
     def test_executor_has_runtime_address(self):
         """HTEX sets a runtime-resolved address for worker connectivity."""

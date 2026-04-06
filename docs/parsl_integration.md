@@ -76,6 +76,7 @@ python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
     --cores-per-worker 16 \            # Cores per worker
     --job-timeout 7200 \               # Per-job timeout (seconds)
     --conda-base /path/to/miniconda3   # Conda path for workers
+    --no-parsl-monitoring              # Disable monitoring.db (optional)
 ```
 
 ### 2. Documentation Updates
@@ -165,6 +166,30 @@ For a 64-core node:
 - **Timeout**: Per-job timeout tracked, status set to TIMEOUT
 - **Import check**: Parsl features disabled if package not installed
 - **Cleanup**: Parsl `dfk.cleanup()` called in finally block
+
+### Parsl MonitoringHub (monitoring.db)
+
+By default, Parsl writes resource usage (CPU, memory, task status) to a SQLite database at `runinfo/run_<pid>_<ts>/monitoring.db`. This is Parsl's internal monitoring, separate from the workflow database.
+
+**Disable with `--no-parsl-monitoring`:**
+
+```bash
+python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
+    --use-parsl --max-workers 4 --no-parsl-monitoring
+```
+
+Or programmatically:
+
+```python
+config = build_parsl_config_flux(max_workers=4, enable_monitoring=False)
+```
+
+**When to disable:**
+- The MonitoringHub binds a network port (default 55055). On some systems this port may be blocked or in use.
+- MonitoringHub requires `sqlalchemy` and `typeguard`. If these are missing or incompatible, startup will fail.
+- For lightweight runs where the extra `monitoring.db` overhead is not needed.
+
+The workflow database (`workflow.db`) is unaffected by this setting -- job status, metrics, and error messages are always tracked there regardless.
 
 ### Crash Recovery and Graceful Shutdown
 
