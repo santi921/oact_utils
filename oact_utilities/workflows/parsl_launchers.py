@@ -24,12 +24,12 @@ class PbsdshLauncher(Launcher):
     def __call__(self, command: str, tasks_per_node: int, nodes_per_block: int) -> str:
         debug_num = int(self.debug)
 
-        return """set -e
+        return f"""set -e
 export CORES=$(getconf _NPROCESSORS_ONLN)
-[[ "{debug}" == "1" ]] && echo "Found cores : $CORES"
-[[ "{debug}" == "1" ]] && echo "Found nodes : {nodes_per_block}"
+[[ "{debug_num}" == "1" ]] && echo "Found cores : $CORES"
+[[ "{debug_num}" == "1" ]] && echo "Found nodes : {nodes_per_block}"
 TASKS_PER_NODE={tasks_per_node}
-HELPER_DIR="{helper_dir}"
+HELPER_DIR="{self.helper_dir}"
 mkdir -p "$HELPER_DIR"
 
 PARSL_PBSDH_CMD="$HELPER_DIR/cmd_$JOBNAME.sh"
@@ -64,7 +64,7 @@ else
     NODE_INDICES="0"
 fi
 
-[[ "{debug}" == "1" ]] && echo "Using PBS vnode indices: $NODE_INDICES"
+[[ "{debug_num}" == "1" ]] && echo "Using PBS vnode indices: $NODE_INDICES"
 PIDS=""
 for NODE_INDEX in $NODE_INDICES; do
     pbsdsh -n "$NODE_INDEX" -- /bin/bash "$PARSL_PBSDH_WRAPPER" "$PARSL_PBSDH_CMD" "$TASKS_PER_NODE" &
@@ -76,12 +76,6 @@ for PID in $PIDS; do
     wait "$PID" || FAIL=1
 done
 
-[[ "{debug}" == "1" ]] && echo "All workers done"
+[[ "{debug_num}" == "1" ]] && echo "All workers done"
 exit "$FAIL"
-""".format(
-            command=command,
-            tasks_per_node=tasks_per_node,
-            nodes_per_block=nodes_per_block,
-            helper_dir=self.helper_dir,
-            debug=debug_num,
-        )
+"""

@@ -261,5 +261,10 @@ parsl.*
 *.db-wal
 *.md
 
+# Local-only docs directories (plans, solutions, todos)
+docs/plans/
+docs/solutions/
+docs/todos/
+
 # also ignore .py if they are in data directory
 data/*.py

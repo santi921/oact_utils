@@ -230,6 +230,10 @@ ORCA_BLOCKS_DK3 = [
     "%output Print[P_ReducedOrbPopMO_L] 1 Print[P_ReducedOrbPopMO_M] 1 Print[P_BondOrder_L] 1 Print[P_BondOrder_M] 1 Print[P_Fockian] 1 Print[P_OrbEn] 2 Print[ P_Hirshfeld ] 1 end",
 ]
 
+# PM3 semiempirical -- for fast debug runs only, no Gaussian basis.
+# No %scf, %elprop, or %output blocks are needed or valid for NDDO methods.
+ORCA_SIMPLE_INPUT_PM3: list[str] = ["NoUseSym"]
+
 NBO_FLAGS = '%nbo NBOKEYLIST = "$NBO NPA NBO E2PERT 0.1 $END" end'  # SV - turn off??
 
 # Mapping from user-facing opt level names to ORCA simple-input keywords.
@@ -463,6 +467,18 @@ def get_orca_blocks(
                 orcablocks[1] = (
                     "%scf \n  Convergence Medium\n  maxiter 500\n  THRESH 1e-12\n  TCUT 1e-13\n  DIISMaxEq   7\n  Guess PModel\n Shift Shift 0.1 ErrOff 0.1 end\nend"
                 )
+
+    elif simple_input == "pm3":
+        # PM3 uses parameterized NDDO integrals -- no Gaussian basis, no DFT post-processing.
+        # Return early before basis assembly, memory estimation, NBO, MBIS, and UKS logic.
+        simple = ORCA_SIMPLE_INPUT_PM3.copy()
+        simple.insert(0, job)
+        orcasimpleinput = " ".join(["PM3"] + simple)
+        orcablocks = [
+            "%pal\n nprocs " + str(cores) + "\nend",
+            "%maxcore 512",
+        ]
+        return orcasimpleinput, orcablocks
 
     # Replace DIIS with KDIIS in the simple input line if requested
     if diis_option == "KDIIS" and "DIIS" in simple:

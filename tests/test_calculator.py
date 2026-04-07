@@ -75,6 +75,11 @@ def _make_uo2(charge: int = 0) -> Atoms:
     return Atoms("UO2", positions=[[0, 0, 0], [0, 0, 1.8], [0, 0, -1.8]])
 
 
+def _make_water() -> Atoms:
+    """Helper: water molecule (H2O)."""
+    return Atoms("OH2", positions=[[0, 0, 0], [0, 0, 0.96], [0.93, 0, -0.24]])
+
+
 def test_actinide_singlet_gets_uks():
     """Actinide singlet (mult=1) should automatically get UKS + rotate block."""
     atoms = _make_uo2()
@@ -93,7 +98,7 @@ def test_actinide_non_singlet_no_uks():
 
 def test_non_actinide_singlet_no_uks():
     """Non-actinide singlet should NOT get UKS."""
-    h2o = Atoms("OH2", positions=[[0, 0, 0], [0, 0, 0.96], [0.93, 0, -0.24]])
+    h2o = _make_water()
     simple, blocks = get_orca_blocks(h2o, mult=1, charge=0)
     assert "UKS" not in simple
     assert not any("rotate" in b for b in blocks)
@@ -164,6 +169,8 @@ def test_opt_false_ignores_level():
     h2 = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]])
     simple, _ = get_orca_blocks(h2, opt=False, opt_level="tight")
     assert "Opt" not in simple
+
+
 # Double-UKS prevention (ks_method + actinide singlet auto-detection)
 # ---------------------------------------------------------------------------
 
@@ -198,6 +205,39 @@ def test_ks_method_appended_to_simple_input():
     assert "UKS" in simple
 
     # Non-actinide with explicit ROKS
-    h2o = Atoms("OH2", positions=[[0, 0, 0], [0, 0, 0.96], [0.93, 0, -0.24]])
+    h2o = _make_water()
     simple, _ = get_orca_blocks(h2o, mult=3, charge=0, ks_method="roks")
     assert "ROKS" in simple
+
+
+# ---------------------------------------------------------------------------
+# PM3 template
+# ---------------------------------------------------------------------------
+
+
+class TestPm3Template:
+    def test_pm3_and_engrad_in_simple(self):
+        """PM3 and EnGrad must appear in the simple input string."""
+        simple, _ = get_orca_blocks(_make_water(), mult=1, charge=0, simple_input="pm3")
+        assert "PM3" in simple
+        assert "EnGrad" in simple
+
+    def test_no_gaussian_basis_in_simple(self):
+        """No Gaussian basis keyword should appear for PM3."""
+        simple, _ = get_orca_blocks(_make_water(), mult=1, charge=0, simple_input="pm3")
+        assert "def2" not in simple.lower()
+
+    def test_no_basis_or_dft_blocks(self):
+        """No %basis, NewGTO, %scf, %elprop, or %output blocks for PM3."""
+        _, blocks = get_orca_blocks(_make_water(), mult=1, charge=0, simple_input="pm3")
+        joined = " ".join(blocks).lower()
+        assert "newgto" not in joined
+        assert "%basis" not in joined
+        assert "%scf" not in joined
+        assert "%elprop" not in joined
+        assert "%output" not in joined
+
+    def test_pal_block_present(self):
+        """The %pal nprocs block must still be present for PM3."""
+        _, blocks = get_orca_blocks(_make_water(), mult=1, charge=0, simple_input="pm3")
+        assert any("nprocs" in b for b in blocks)
