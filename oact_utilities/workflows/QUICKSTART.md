@@ -116,6 +116,29 @@ Max Forces: mean=0.00123, median=0.00098
 SCF Steps:  mean=12.3, median=11
 ```
 
+### Online monitoring with W&B (optional)
+
+Stream campaign progress to [Weights & Biases](https://wandb.ai) so the team can watch live without SSH access:
+
+```bash
+# Install once
+pip install wandb && wandb login
+
+# Add --wandb-project to submit_jobs (Parsl mode only)
+python -m oact_utilities.workflows.submit_jobs \
+    workflow.db jobs/ \
+    --use-parsl --max-workers 4 \
+    --wandb-project actinide-campaign
+
+# Add --wandb-project to dashboard scans (any mode)
+python -m oact_utilities.workflows.dashboard \
+    workflow.db --update jobs/ --extract-metrics \
+    --wandb-project actinide-campaign \
+    --wandb-run-id <run-id>  # reuse the same W&B run
+```
+
+W&B is optional -- if not installed or not configured, everything else works normally.
+
 ## Extracting and Managing Metrics
 
 The dashboard can extract computational metrics from ORCA output files and store them in the database. This is a separate step from status updates because parsing output files is slower than checking job completion.

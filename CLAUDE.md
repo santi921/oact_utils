@@ -124,6 +124,7 @@ oact_utilities/
 - **Sella**: Geometry optimization
 - **pandas**: Data analysis
 - **Parsl >= 2024.1**: Concurrent job execution on HPC nodes (optional, graceful fallback)
+- **wandb**: Online campaign monitoring via Weights & Biases (optional, graceful fallback). Install with `pip install wandb`. Enabled via `--wandb-project` on `submit_jobs` (Parsl mode only) and `dashboard`.
 - **tqdm >= 4.0**: Progress bars for dashboard operations
 - **periodictable**: Element data and actinide detection
 
@@ -285,6 +286,10 @@ python -m oact_utilities.workflows.submit_jobs <db> <root_dir> [options]
 --use-parsl                  --max-workers 4
 --cores-per-worker 16        --job-timeout 7200
 
+# W&B online monitoring (Parsl mode only, optional)
+--wandb-project PROJECT      --wandb-run-name NAME
+--wandb-run-id ID
+
 # ORCA config
 --functional wB97M-V         --simple-input {omol,x2c,dk3,omol_base}
 --actinide-basis ma-def-TZVP --non-actinide-basis def2-TZVPD
@@ -340,6 +345,11 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --workers N                  # Parallel workers for metrics extraction
 --profile                    # Profile metrics extraction bottlenecks
 --hours-cutoff H             # Hours before job is considered timed out (default: 24)
+
+# W&B online monitoring (optional, requires pip install wandb)
+--wandb-project PROJECT      # W&B project name (enables logging)
+--wandb-run-name NAME        # W&B run display name (default: db filename stem)
+--wandb-run-id ID            # Resume an existing W&B run (share run with submit_jobs)
 ```
 
 ### 3b. Job Directory Cleanup
