@@ -29,6 +29,12 @@ from .job_dir_patterns import (
     apply_job_dir_prefix,
     render_job_dir_pattern,
 )
+from .wandb_logger import (
+    WANDB_AVAILABLE,
+    finish_wandb_run,
+    init_wandb_run,
+    log_job_result,
+)
 
 try:
     from parsl import python_app
@@ -1352,6 +1358,7 @@ def submit_batch_parsl(
     qos: str = "frontier",
     account: str = "ODEFN5169CYFZ",
     enable_monitoring: bool = True,
+    wandb_run: object | None = None,
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -1390,6 +1397,9 @@ def submit_batch_parsl(
         enable_monitoring: If True, attach Parsl MonitoringHub (writes
             monitoring.db). Disable on systems where the monitoring hub
             port or SQLAlchemy dependency causes issues.
+        wandb_run: Optional W&B run object from ``init_wandb_run()``. When
+            provided, each job completion/failure/timeout is logged in
+            real-time. Pass ``None`` (default) to disable W&B logging.
 
     Returns:
         List of submitted job IDs
@@ -1754,6 +1764,7 @@ def submit_batch_parsl(
                     print(
                         f" Job {job_id} completed ({len(completed_ids)}/{len(futures)} done)"
                     )
+                    log_job_result(wandb_run, job_id, "completed", metrics_dict)
                 elif result["status"] == "timeout":
                     pending_updates.append(
                         {
@@ -1764,6 +1775,7 @@ def submit_batch_parsl(
                     )
                     failed_ids.append(job_id)
                     print(f"Job {job_id} timeout")
+                    log_job_result(wandb_run, job_id, "timeout")
                 else:
                     pending_updates.append(
                         {
@@ -1776,6 +1788,7 @@ def submit_batch_parsl(
                     failed_ids.append(job_id)
                     error_msg = result.get("error", "Unknown error")[:100]
                     print(f"Job {job_id} failed: {error_msg}")
+                    log_job_result(wandb_run, job_id, "failed")
 
             except Exception as e:
                 pending_updates.append(
@@ -1788,6 +1801,7 @@ def submit_batch_parsl(
                 )
                 failed_ids.append(job_id)
                 print(f"Job {job_id} exception: {str(e)[:100]}")
+                log_job_result(wandb_run, job_id, "failed")
 
             # Flush batch when it reaches _BATCH_COMMIT_SIZE
             if len(pending_updates) >= _BATCH_COMMIT_SIZE:
@@ -1853,6 +1867,8 @@ def submit_batch_parsl(
             parsl.clear()
         except Exception:
             pass
+
+        finish_wandb_run(wandb_run)
 
     print("\nSubmission complete:")
     print(f"  Completed: {len(completed_ids)}")
@@ -2167,6 +2183,24 @@ def main():
         "where the monitoring hub port or SQLAlchemy dependency causes issues.",
     )
 
+    # W&B options (--use-parsl only)
+    wandb_group = parser.add_argument_group("W&B Options (--use-parsl)")
+    wandb_group.add_argument(
+        "--wandb-project",
+        default=None,
+        help="W&B project name. Enables real-time job logging to Weights & Biases.",
+    )
+    wandb_group.add_argument(
+        "--wandb-run-name",
+        default=None,
+        help="W&B run display name (default: db filename stem).",
+    )
+    wandb_group.add_argument(
+        "--wandb-run-id",
+        default=None,
+        help="W&B run ID to resume an existing run across multiple batches.",
+    )
+
     # Scale-out Parsl options (--use-parsl --scheduler slurm|pbspro)
     scaleout_parsl_group = parser.add_argument_group(
         "Scale-Out Parsl Options (--use-parsl --scheduler slurm|pbspro)"
@@ -2399,6 +2433,21 @@ def main():
 
     # Submit based on mode
     if args.use_parsl:
+        # Initialize W&B run if requested
+        wandb_run = None
+        if args.wandb_project:
+            if not WANDB_AVAILABLE:
+                print(
+                    "Warning: wandb not installed; --wandb-project ignored. "
+                    "Install with: pip install wandb"
+                )
+            else:
+                wandb_run = init_wandb_run(
+                    project=args.wandb_project,
+                    run_name=args.wandb_run_name or Path(args.db_path).stem,
+                    run_id=args.wandb_run_id,
+                )
+
         # Parsl mode: concurrent execution (single-node or multi-node)
         submitted_ids = submit_batch_parsl(
             workflow=workflow,
@@ -2426,6 +2475,7 @@ def main():
             qos=args.qos,
             account=args.account,
             enable_monitoring=not args.no_parsl_monitoring,
+            wandb_run=wandb_run,
         )
     else:
         # Traditional mode: one job script per job
