@@ -7,6 +7,12 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from oact_utilities.workflows.wandb_logger import (
+    finish_wandb_run,
+    init_wandb_run,
+    log_job_result,
+)
+
 
 class TestInitWandbRun:
     """Tests for init_wandb_run."""
@@ -17,7 +23,6 @@ class TestInitWandbRun:
         with patch("oact_utilities.workflows.wandb_logger.WANDB_AVAILABLE", True):
             with patch("oact_utilities.workflows.wandb_logger.wandb") as mock_wandb:
                 mock_wandb.init.return_value = mock_run
-                from oact_utilities.workflows.wandb_logger import init_wandb_run
 
                 result = init_wandb_run(
                     project="test-project",
@@ -36,8 +41,6 @@ class TestInitWandbRun:
     def test_returns_none_when_wandb_unavailable(self):
         """init_wandb_run returns None when WANDB_AVAILABLE is False."""
         with patch("oact_utilities.workflows.wandb_logger.WANDB_AVAILABLE", False):
-            from oact_utilities.workflows.wandb_logger import init_wandb_run
-
             result = init_wandb_run(project="test-project")
 
         assert result is None
@@ -47,7 +50,6 @@ class TestInitWandbRun:
         with patch("oact_utilities.workflows.wandb_logger.WANDB_AVAILABLE", True):
             with patch("oact_utilities.workflows.wandb_logger.wandb") as mock_wandb:
                 mock_wandb.init.side_effect = RuntimeError("network error")
-                from oact_utilities.workflows.wandb_logger import init_wandb_run
 
                 result = init_wandb_run(project="test-project")
 
@@ -63,7 +65,6 @@ class TestLogJobResult:
     def test_logs_completed_job_with_metrics(self):
         """Completed job: logs progress/completed=1 and all non-None metric keys."""
         mock_run = MagicMock()
-        from oact_utilities.workflows.wandb_logger import log_job_result
 
         log_job_result(
             mock_run,
@@ -90,7 +91,6 @@ class TestLogJobResult:
     def test_logs_only_progress_key_when_metrics_is_none(self):
         """metrics=None: only progress/{status} is logged, no metrics/ keys."""
         mock_run = MagicMock()
-        from oact_utilities.workflows.wandb_logger import log_job_result
 
         log_job_result(mock_run, job_id=43, status="failed", metrics=None)
 
@@ -101,7 +101,6 @@ class TestLogJobResult:
     def test_skips_none_metric_values(self):
         """Metric values that are None are excluded from the payload."""
         mock_run = MagicMock()
-        from oact_utilities.workflows.wandb_logger import log_job_result
 
         log_job_result(
             mock_run,
@@ -117,8 +116,6 @@ class TestLogJobResult:
 
     def test_noop_when_run_is_none(self):
         """log_job_result is a no-op when run=None."""
-        from oact_utilities.workflows.wandb_logger import log_job_result
-
         # Should not raise
         log_job_result(None, job_id=1, status="completed", metrics={"max_forces": 0.1})
 
@@ -126,7 +123,6 @@ class TestLogJobResult:
         """If run.log raises, the exception is caught and a warning is printed."""
         mock_run = MagicMock()
         mock_run.log.side_effect = ConnectionError("timeout")
-        from oact_utilities.workflows.wandb_logger import log_job_result
 
         # Should not raise
         log_job_result(mock_run, job_id=99, status="completed")
@@ -142,7 +138,6 @@ class TestFinishWandbRun:
     def test_calls_run_finish(self):
         """finish_wandb_run calls run.finish()."""
         mock_run = MagicMock()
-        from oact_utilities.workflows.wandb_logger import finish_wandb_run
 
         finish_wandb_run(mock_run)
 
@@ -150,7 +145,5 @@ class TestFinishWandbRun:
 
     def test_noop_when_run_is_none(self):
         """finish_wandb_run is a no-op when run=None."""
-        from oact_utilities.workflows.wandb_logger import finish_wandb_run
-
         # Should not raise
         finish_wandb_run(None)

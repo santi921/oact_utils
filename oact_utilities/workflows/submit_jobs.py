@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Literal, TypedDict
+from typing import Any, Callable, Literal, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
 from ..core.orca.sella_runner import write_sella_runner_shim
@@ -31,7 +31,7 @@ from .job_dir_patterns import (
 )
 from .wandb_logger import (
     WANDB_AVAILABLE,
-    _add_wandb_args,
+    add_wandb_args,
     finish_wandb_run,
     init_wandb_run,
     log_job_result,
@@ -1359,7 +1359,7 @@ def submit_batch_parsl(
     qos: str = "frontier",
     account: str = "ODEFN5169CYFZ",
     enable_monitoring: bool = True,
-    wandb_run: object | None = None,
+    wandb_run: Any | None = None,
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -2185,7 +2185,7 @@ def main():
     )
 
     # W&B options (--use-parsl only)
-    _add_wandb_args(parser)
+    add_wandb_args(parser)
 
     # Scale-out Parsl options (--use-parsl --scheduler slurm|pbspro)
     scaleout_parsl_group = parser.add_argument_group(
@@ -2416,6 +2416,10 @@ def main():
     except FileNotFoundError:
         print(f"Error: Database not found at {args.db_path}")
         sys.exit(1)
+
+    # Validate W&B options are only used with Parsl mode
+    if args.wandb_project and not args.use_parsl:
+        parser.error("--wandb-project requires --use-parsl")
 
     # Submit based on mode
     if args.use_parsl:

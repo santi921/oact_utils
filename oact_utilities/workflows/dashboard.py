@@ -21,8 +21,8 @@ from .job_dir_patterns import (
 )
 from .wandb_logger import (
     WANDB_AVAILABLE,
-    _add_wandb_args,
-    _compute_metrics_stats,
+    add_wandb_args,
+    compute_metrics_stats,
     finish_wandb_run,
     init_wandb_run,
     log_campaign_snapshot,
@@ -1618,7 +1618,7 @@ def main():
         help="Profile metrics extraction to identify bottlenecks (I/O, parsing, DB)",
     )
 
-    _add_wandb_args(parser)
+    add_wandb_args(parser)
 
     args = parser.parse_args()
 
@@ -1684,7 +1684,7 @@ def main():
     if wandb_run is not None:
         _counts = workflow.count_by_status()
         _total = sum(_counts.values())
-        _stats = _compute_metrics_stats(workflow)
+        _stats = compute_metrics_stats(workflow)
         log_campaign_snapshot(wandb_run, _counts, _total, _stats)
 
     # Reset failed jobs if requested
