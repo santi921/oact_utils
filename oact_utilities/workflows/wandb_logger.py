@@ -19,11 +19,35 @@ Usage (V1 -- Parsl submission loop)::
         log_job_result(run, job_id=43, status="failed")
     finally:
         finish_wandb_run(run)
+
+Usage (V2 -- dashboard --update scan)::
+
+    from oact_utilities.workflows.wandb_logger import (
+        _add_wandb_args,
+        _compute_metrics_stats,
+        finish_wandb_run,
+        init_wandb_run,
+        log_campaign_snapshot,
+    )
+
+    # In argparse setup:
+    _add_wandb_args(parser)
+
+    # In main(), after update_all_statuses():
+    run = init_wandb_run(project=args.wandb_project, run_name=args.wandb_run_name)
+    counts = workflow.count_by_status()
+    stats = _compute_metrics_stats(workflow)
+    log_campaign_snapshot(run, counts, total=sum(counts.values()), metrics_stats=stats)
+    finish_wandb_run(run)
 """
 
 from __future__ import annotations
 
-from typing import Any
+import argparse
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .architector_workflow import ArchitectorWorkflow
 
 try:
     import wandb
@@ -111,3 +135,135 @@ def finish_wandb_run(run: Any) -> None:
         run.finish()
     except Exception:
         pass
+
+
+def _compute_metrics_stats(workflow: ArchitectorWorkflow) -> dict[str, Any] | None:
+    """Query aggregate metrics stats for completed jobs.
+
+    Extracted from ``print_metrics_summary`` so both the print function and
+    W&B logging share the same SQL query without duplication.
+
+    Args:
+        workflow: Open ``ArchitectorWorkflow`` instance.
+
+    Returns:
+        Dict with mean/median/min/max for forces, energy, SCF steps, wall time,
+        and cores; or ``None`` if no completed jobs have metrics yet.
+    """
+    cur = workflow._execute_with_retry(
+        """
+        SELECT max_forces, scf_steps, wall_time, n_cores, final_energy
+        FROM structures
+        WHERE status = 'completed' AND max_forces IS NOT NULL
+        """
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return None
+
+    import statistics
+
+    def _stats(values: list[float]) -> dict[str, float]:
+        return {
+            "mean": statistics.mean(values),
+            "median": statistics.median(values),
+            "min": min(values),
+            "max": max(values),
+        }
+
+    forces = [r[0] for r in rows if r[0] is not None]
+    scf = [r[1] for r in rows if r[1] is not None]
+    wall = [r[2] for r in rows if r[2] is not None]
+    cores = [r[3] for r in rows if r[3] is not None]
+    energy = [r[4] for r in rows if r[4] is not None]
+
+    result: dict[str, Any] = {}
+    if forces:
+        result["max_forces_mean"] = statistics.mean(forces)
+        result["max_forces_median"] = statistics.median(forces)
+    if scf:
+        result["scf_steps_mean"] = statistics.mean(scf)
+    if wall:
+        wstats = _stats(wall)
+        result["wall_time_mean"] = wstats["mean"]
+        result["wall_time_total_hours"] = sum(wall) / 3600
+    if cores and wall:
+        valid_pairs = [
+            (r[2], r[3]) for r in rows if r[2] is not None and r[3] is not None
+        ]
+        result["core_hours_total"] = sum(w * c for w, c in valid_pairs) / 3600
+    if energy:
+        result["final_energy_mean"] = statistics.mean(energy)
+        result["final_energy_min"] = min(energy)
+        result["final_energy_max"] = max(energy)
+    result["n_jobs_with_metrics"] = len(forces)
+    return result
+
+
+def log_campaign_snapshot(
+    run: Any,
+    counts: dict,
+    total: int,
+    metrics_stats: dict[str, Any] | None = None,
+) -> None:
+    """Log aggregate campaign status and optional metrics summary to W&B.
+
+    Safe to call with ``run=None`` or when individual metric values are ``None``.
+
+    Args:
+        run: W&B run object returned by ``init_wandb_run``, or ``None``.
+        counts: Dict mapping ``JobStatus`` -> count (from ``workflow.count_by_status()``).
+        total: Total job count (``sum(counts.values())``).
+        metrics_stats: Optional dict from ``_compute_metrics_stats()``.
+    """
+    if run is None:
+        return
+    try:
+        from .architector_workflow import JobStatus
+
+        completed = counts.get(JobStatus.COMPLETED, 0)
+        payload: dict[str, Any] = {
+            "campaign/completed": completed,
+            "campaign/failed": counts.get(JobStatus.FAILED, 0),
+            "campaign/to_run": counts.get(JobStatus.TO_RUN, 0),
+            "campaign/running": counts.get(JobStatus.RUNNING, 0),
+            "campaign/timeout": counts.get(JobStatus.TIMEOUT, 0),
+            "campaign/progress_pct": 100 * completed / total if total > 0 else 0,
+        }
+        if metrics_stats:
+            for k, v in metrics_stats.items():
+                if v is not None:
+                    payload[f"metrics/{k}"] = v
+        run.log(payload)
+    except Exception as e:
+        print(f"Warning: W&B log failed: {e}")
+
+
+def _add_wandb_args(parser: argparse.ArgumentParser) -> None:
+    """Add W&B CLI arguments to an argparse parser.
+
+    Shared by ``submit_jobs.main()`` and ``dashboard.main()`` to keep the
+    argument names and help text consistent.
+
+    Args:
+        parser: The argparse parser (or argument group parent) to add args to.
+    """
+    group = parser.add_argument_group("W&B Options")
+    group.add_argument(
+        "--wandb-project",
+        default=None,
+        metavar="PROJECT",
+        help="W&B project name (enables W&B logging when provided)",
+    )
+    group.add_argument(
+        "--wandb-run-name",
+        default=None,
+        metavar="NAME",
+        help="W&B run display name (default: database filename stem)",
+    )
+    group.add_argument(
+        "--wandb-run-id",
+        default=None,
+        metavar="ID",
+        help="W&B run ID to resume an existing run across multiple invocations",
+    )

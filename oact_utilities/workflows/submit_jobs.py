@@ -31,6 +31,7 @@ from .job_dir_patterns import (
 )
 from .wandb_logger import (
     WANDB_AVAILABLE,
+    _add_wandb_args,
     finish_wandb_run,
     init_wandb_run,
     log_job_result,
@@ -2184,22 +2185,7 @@ def main():
     )
 
     # W&B options (--use-parsl only)
-    wandb_group = parser.add_argument_group("W&B Options (--use-parsl)")
-    wandb_group.add_argument(
-        "--wandb-project",
-        default=None,
-        help="W&B project name. Enables real-time job logging to Weights & Biases.",
-    )
-    wandb_group.add_argument(
-        "--wandb-run-name",
-        default=None,
-        help="W&B run display name (default: db filename stem).",
-    )
-    wandb_group.add_argument(
-        "--wandb-run-id",
-        default=None,
-        help="W&B run ID to resume an existing run across multiple batches.",
-    )
+    _add_wandb_args(parser)
 
     # Scale-out Parsl options (--use-parsl --scheduler slurm|pbspro)
     scaleout_parsl_group = parser.add_argument_group(

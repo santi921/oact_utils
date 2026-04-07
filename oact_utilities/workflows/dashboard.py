@@ -19,6 +19,14 @@ from .job_dir_patterns import (
     apply_job_dir_prefix,
     render_job_dir_pattern,
 )
+from .wandb_logger import (
+    WANDB_AVAILABLE,
+    _add_wandb_args,
+    _compute_metrics_stats,
+    finish_wandb_run,
+    init_wandb_run,
+    log_campaign_snapshot,
+)
 
 
 def print_header(text: str, width: int = 80):
@@ -1610,6 +1618,8 @@ def main():
         help="Profile metrics extraction to identify bottlenecks (I/O, parsing, DB)",
     )
 
+    _add_wandb_args(parser)
+
     args = parser.parse_args()
 
     try:
@@ -1625,6 +1635,20 @@ def main():
     except FileNotFoundError:
         print(f"Error: Database not found at {args.db_path}")
         sys.exit(1)
+
+    # Initialize W&B run if requested
+    wandb_run = None
+    if args.wandb_project:
+        if not WANDB_AVAILABLE:
+            print(
+                "Warning: wandb not installed; --wandb-project ignored. pip install wandb"
+            )
+        else:
+            wandb_run = init_wandb_run(
+                project=args.wandb_project,
+                run_name=args.wandb_run_name or Path(args.db_path).stem,
+                run_id=args.wandb_run_id,
+            )
 
     # Update statuses if requested
     if args.update:
@@ -1655,6 +1679,13 @@ def main():
                 max_jobs=args.debug,
                 profile=args.profile,
             )
+
+    # Log campaign snapshot to W&B if a run is active
+    if wandb_run is not None:
+        _counts = workflow.count_by_status()
+        _total = sum(_counts.values())
+        _stats = _compute_metrics_stats(workflow)
+        log_campaign_snapshot(wandb_run, _counts, _total, _stats)
 
     # Reset failed jobs if requested
     if args.reset_failed:
@@ -1782,6 +1813,7 @@ def main():
         else:
             print(f"\nNo jobs have failed {args.show_chronic_failures}+ times.")
 
+    finish_wandb_run(wandb_run)
     workflow.close()
 
 
