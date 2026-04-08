@@ -132,12 +132,12 @@ oact_utilities/
 
 Five configurable templates defined in `core/orca/calc.py`:
 
-| Template         | Use Case                  | Key Settings                                                                         |
-| ---------------- | ------------------------- | ------------------------------------------------------------------------------------ |
-| `omol` (default) | Standard DFT              | RIJCOSX, def2/J, DIIS, NormalConv, DEFGRID3, ALLPOP                                 |
-| `omol_base`      | Difficult SCF convergence | Simplified SCF (MaxIter=600), MediumConv, fewer convergence tweaks                  |
-| `x2c`            | Relativistic (actinides)  | DLU-X2C, RIJCOSX, AutoAux                                                            |
-| `dk3`            | Heavy relativistic        | DKH (Douglas-Kroll-Hess), SARC/J                                                    |
+| Template         | Use Case                  | Key Settings                                                                          |
+| ---------------- | ------------------------- | ------------------------------------------------------------------------------------- |
+| `omol` (default) | Standard DFT              | RIJCOSX, def2/J, DIIS, NormalConv, DEFGRID3, ALLPOP                                   |
+| `omol_base`      | Difficult SCF convergence | Simplified SCF (MaxIter=600), MediumConv, fewer convergence tweaks                    |
+| `x2c`            | Relativistic (actinides)  | DLU-X2C, RIJCOSX, AutoAux                                                             |
+| `dk3`            | Heavy relativistic        | DKH (Douglas-Kroll-Hess), SARC/J                                                      |
 | `pm3`            | Debug / fast CI runs      | PM3 semiempirical, no Gaussian basis, under 1s on small organics; no actinide support |
 
 All templates now include `Print[ P_Hirshfeld ] 1` in the `%output` block for Hirshfeld population analysis by default.
@@ -477,12 +477,6 @@ When working on database-heavy code or dashboard operations:
 
 See `docs/solutions/performance-issues/` for detailed writeups.
 
-## Security Notes
-
-- `_validate_file_path()` in `analysis.py` prevents directory traversal attacks
-- `validate_extra_columns()` in `architector.py` validates column names (alphanumeric + underscore only) to prevent SQL injection
-- `validate_charge_spin_conservation()` and `validate_spin_multiplicity()` validate physical properties
-
 ## Documentation Index
 
 - `oact_utilities/workflows/README.md` - Comprehensive workflow documentation
@@ -503,5 +497,46 @@ See `docs/solutions/performance-issues/` for detailed writeups.
 - SCF parsing: always use `SCF CONVERGED AFTER X CYCLES` pattern, NOT `SCF ITERATIONS` header
 - Status checking: content-based checks MUST run before file-age timeout heuristic
 - Spin format: CSV input already contains spin multiplicity (2S+1) — do NOT convert from unpaired electrons internally. `create_workflow_db` reads spin values as-is and validates via `validate_spin_multiplicity()`
-- Don't use emojis and emdashes anywhere
--
+
+## Agent Instructions
+
+- Research the codebase before editing. Never change code you haven't read. Also don't make changes to code without asking first.
+- No sycophantic openers or closing fluff.
+- Do not re-read files already read unless file may have changed.
+- Read the file before modifying it. Never edit blind.
+- No em dashes, smart quotes, or decorative Unicode symbols.
+- Plain hyphens and straight quotes only.
+- User instructions always override this file.
+
+###
+
+    Coding
+
+- Test your code before declaring done.
+- Be concise in output but thorough in reasoning.
+- No inline prose. Use comments sparingly - only where logic is unclear.
+- No abstractions for single-use operations.
+- Three similar lines is better than a premature abstraction.
+- No error handling for scenarios that cannot happen.
+- Code output must be copy-paste safe.
+- No compliments on the code before or after the review.
+- State the bug. Show the fix. Stop.
+- Never speculate about a bug without reading the relevant code first.
+- State what you found, where, and the fix. One pass.
+- If bug cause is unclear: say so. Do not guess. We can iterate on finding the right cause.
+
+###
+
+    Analysis
+
+- Reporting: Lead with the finding. Context and methodology after.
+- Reporting: Summary first (3 bullets max).
+- Reporting: Supporting data second.
+- Reporting: Caveats and limitations last.
+- Formatting: Safe for copy-paste into spreadsheets and documents.
+- Formatting: Tables use plain pipe characters.
+- Formatting: Numbers must include units. Never ambiguous values.
+- Distinguish clearly between what the data shows and what is inferred.
+- Label inferences explicitly: "Based on the trend..." not stated as fact.
+- Never fabricate data points, statistics, or citations.
+- If confidence is low: state it explicitly with a reason.
