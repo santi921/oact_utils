@@ -14,9 +14,11 @@ from oact_utilities.utils.analysis import (
     parse_generator_data,
 )
 
-# orca_direct_example has an orca.out symlink -> AmO_orca_atom95.out so that
-# find_orca_output_file() can locate it without renaming the fixture file.
-ORCA_DIRECT = Path(__file__).parent / "files" / "orca_direct_example"
+# no_traj/logs is a UO2 geometry optimization step with ALLPOP analysis
+# (Mulliken, Loewdin, Mayer charges/bond orders, gradients).
+# find_orca_output_file() only recognises orca.out/output.out, so the fixture
+# symlinks logs -> orca.out inside tmp_path.
+NO_TRAJ_LOGS = Path(__file__).parent / "files" / "no_traj" / "logs"
 
 pytestmark = pytest.mark.skipif(
     not GENERATOR_AVAILABLE,
@@ -27,7 +29,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture()
 def job_dir(tmp_path: Path) -> Path:
     """Temp job directory with orca.out symlink pointing to the real fixture."""
-    (tmp_path / "orca.out").symlink_to(ORCA_DIRECT / "orca.out")
+    (tmp_path / "orca.out").symlink_to(NO_TRAJ_LOGS)
     return tmp_path
 
 
@@ -71,11 +73,60 @@ class TestParseGeneratorData:
     def test_contains_energy(self, job_dir: Path):
         parsed = json.loads(parse_generator_data(job_dir))
         assert "final_energy_eh" in parsed
-        assert abs(parsed["final_energy_eh"] - (-593.311813112262)) < 1e-6
+        assert abs(parsed["final_energy_eh"] - (-626.605298577892)) < 1e-6
 
     def test_scf_converged(self, job_dir: Path):
         parsed = json.loads(parse_generator_data(job_dir))
         assert parsed.get("scf_converged") is True
+
+    def test_homo_lumo(self, job_dir: Path):
+        parsed = json.loads(parse_generator_data(job_dir))
+        assert abs(parsed["homo_eh"] - (-0.976831)) < 1e-6
+        assert abs(parsed["lumo_eh"] - (-0.554888)) < 1e-6
+        assert abs(parsed["homo_lumo_gap_eh"] - 0.42194299999999996) < 1e-6
+
+    def test_mulliken_charges(self, job_dir: Path):
+        parsed = json.loads(parse_generator_data(job_dir))
+        assert "mulliken_charges" in parsed
+        charges = parsed["mulliken_charges"]
+        assert "1_U" in charges
+        assert abs(charges["1_U"] - 2.391968) < 1e-5
+        assert abs(charges["2_O"] - (-0.195975)) < 1e-5
+        assert abs(charges["3_O"] - (-0.195994)) < 1e-5
+
+    def test_loewdin_charges(self, job_dir: Path):
+        parsed = json.loads(parse_generator_data(job_dir))
+        assert "loewdin_charges" in parsed
+        charges = parsed["loewdin_charges"]
+        assert abs(charges["1_U"] - 2.437017) < 1e-5
+        assert abs(charges["2_O"] - (-0.218521)) < 1e-5
+
+    def test_mayer_bond_orders(self, job_dir: Path):
+        parsed = json.loads(parse_generator_data(job_dir))
+        assert "mayer_bond_orders" in parsed
+        bonds = parsed["mayer_bond_orders"]
+        assert "1_U_to_2_O" in bonds
+        assert abs(bonds["1_U_to_2_O"] - 2.3437) < 1e-4
+        assert abs(bonds["1_U_to_3_O"] - 2.3437) < 1e-4
+
+    def test_gradient(self, job_dir: Path):
+        parsed = json.loads(parse_generator_data(job_dir))
+        assert "gradient" in parsed
+        assert "gradient_norm" in parsed
+        assert "gradient_max" in parsed
+        assert abs(parsed["gradient_max"] - 0.000137424) < 1e-9
+        assert abs(parsed["gradient_norm"] - 0.0001896753) < 1e-9
+
+    def test_warnings_present(self, job_dir: Path):
+        parsed = json.loads(parse_generator_data(job_dir))
+        assert "warnings" in parsed
+        assert len(parsed["warnings"]) == 5
+
+    def test_energy_components(self, job_dir: Path):
+        parsed = json.loads(parse_generator_data(job_dir))
+        ec = parsed["energy_components"]
+        assert abs(ec["nuclear_repulsion_eh"] - 171.580507691624) < 1e-6
+        assert abs(ec["electronic_energy_eh"] - (-798.363186173683)) < 1e-6
 
     def test_cache_written(self, job_dir: Path):
         parse_generator_data(job_dir)
@@ -114,11 +165,6 @@ class TestParseGeneratorData:
         """generator_data column is added to existing DBs via _ensure_schema."""
         import sqlite3
 
-        csv_path = tmp_path / "test.csv"
-        csv_path.write_text(
-            "charge,spin,geometry\n"
-            "0,1,2\nO 0.0 0.0 0.0\nH 0.0 0.0 1.0\nH 0.0 1.0 0.0\n"
-        )
         db_path = tmp_path / "workflow.db"
 
         # Create DB the old way (without generator_data column)
@@ -145,7 +191,7 @@ class TestParseGeneratorData:
         )
         conn.execute(
             "INSERT INTO structures (orig_index, elements, natoms, status, charge, spin) "
-            "VALUES (0, 'O;H;H', 3, 'to_run', 0, 1)"
+            "VALUES (0, 'U;O;O', 3, 'to_run', 0, 1)"
         )
         conn.commit()
         conn.close()
