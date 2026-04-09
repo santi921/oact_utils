@@ -283,7 +283,11 @@ def _extract_metrics_from_dir(
     """
     import time
 
-    from ..utils.analysis import parse_job_metrics
+    from ..utils.analysis import (
+        GENERATOR_AVAILABLE,
+        parse_generator_data,
+        parse_job_metrics,
+    )
 
     t0 = time.perf_counter()
 
@@ -305,7 +309,13 @@ def _extract_metrics_from_dir(
             "error": None,
             "timing_warning": None,
             "_cache_hit": cache_hit,
+            "generator_data": None,
         }
+
+        if GENERATOR_AVAILABLE:
+            result["generator_data"] = parse_generator_data(
+                job_dir, recompute=recompute
+            )
 
         if profile:
             result["_profile"] = {
@@ -737,16 +747,23 @@ def backfill_metrics(
 
     limit_clause = f" LIMIT {int(max_jobs)}" if max_jobs is not None else ""
 
+    from ..utils.analysis import GENERATOR_AVAILABLE
+
     if recompute:
         cur = workflow._execute_with_retry(
             f"SELECT id, orig_index FROM structures WHERE status = 'completed'{limit_clause}"
         )
     else:
+        # Include jobs missing standard metrics OR (when available) missing qtaim data.
+        if GENERATOR_AVAILABLE:
+            missing_clause = "max_forces IS NULL OR generator_data IS NULL"
+        else:
+            missing_clause = "max_forces IS NULL"
         cur = workflow._execute_with_retry(
             f"""
             SELECT id, orig_index
             FROM structures
-            WHERE status = 'completed' AND max_forces IS NULL{limit_clause}
+            WHERE status = 'completed' AND ({missing_clause}){limit_clause}
             """
         )
     rows = cur.fetchall()

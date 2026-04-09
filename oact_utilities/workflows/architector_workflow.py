@@ -56,6 +56,7 @@ class JobRecord:
     n_cores: int | None = None
     optimizer: str | None = None
     worker_id: str | None = None
+    generator_data: str | None = None
 
 
 class ArchitectorWorkflow:
@@ -189,6 +190,7 @@ class ArchitectorWorkflow:
         migrations = {
             "optimizer": "ALTER TABLE structures ADD COLUMN optimizer TEXT DEFAULT NULL",
             "worker_id": "ALTER TABLE structures ADD COLUMN worker_id TEXT DEFAULT NULL",
+            "generator_data": "ALTER TABLE structures ADD COLUMN generator_data TEXT DEFAULT NULL",
         }
         for col_name, alter_sql in migrations.items():
             if col_name not in existing_cols:
@@ -347,6 +349,7 @@ class ArchitectorWorkflow:
             n_cores=r["n_cores"] if "n_cores" in keys else None,
             optimizer=r["optimizer"] if "optimizer" in keys else None,
             worker_id=r["worker_id"] if "worker_id" in keys else None,
+            generator_data=r["generator_data"] if "generator_data" in keys else None,
         )
 
     def get_jobs_by_status(
@@ -432,6 +435,7 @@ class ArchitectorWorkflow:
         error_message: str | None = None,
         wall_time: float | None = None,
         n_cores: int | None = None,
+        generator_data: str | None = None,
     ):
         """Update job metrics (forces, SCF steps, etc).
 
@@ -444,6 +448,7 @@ class ArchitectorWorkflow:
             error_message: Error message if job failed.
             wall_time: Total wall time in seconds.
             n_cores: Number of CPU cores used.
+            generator_data: JSON string from qtaim_generator parse_orca_output.
         """
         updates = []
         values = []
@@ -469,6 +474,9 @@ class ArchitectorWorkflow:
         if n_cores is not None:
             updates.append("n_cores = ?")
             values.append(n_cores)
+        if generator_data is not None:
+            updates.append("generator_data = ?")
+            values.append(generator_data)
 
         if updates:
             updates.append("updated_at = CURRENT_TIMESTAMP")
@@ -503,6 +511,7 @@ class ArchitectorWorkflow:
                 "error_message",
                 "wall_time",
                 "n_cores",
+                "generator_data",
             ):
                 if metrics.get(col) is not None:
                     updates.append(f"{col} = ?")
