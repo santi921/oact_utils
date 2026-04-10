@@ -37,6 +37,7 @@ Usage (V2 -- dashboard --update scan)::
     run = init_wandb_run(project=args.wandb_project, run_name=args.wandb_run_name)
     counts = workflow.count_by_status()
     stats = compute_metrics_stats(workflow)
+    # campaign/* -> run.summary (latest snapshot); metrics/* -> run.log (time-series)
     log_campaign_snapshot(run, counts, total=sum(counts.values()), metrics_stats=stats)
     finish_wandb_run(run)
 """
@@ -44,6 +45,7 @@ Usage (V2 -- dashboard --update scan)::
 from __future__ import annotations
 
 import argparse
+import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -78,12 +80,17 @@ def init_wandb_run(
     if not WANDB_AVAILABLE:
         return None
     try:
-        return wandb.init(
+        run = wandb.init(
             project=project,
             name=run_name,
             id=run_id,
             resume="allow",
         )
+        # Use wall-clock time as x-axis for all time-series metrics
+        run.define_metric("_timestamp")
+        run.define_metric("metrics/*", step_metric="_timestamp")
+        run.define_metric("progress/*", step_metric="_timestamp")
+        return run
     except Exception as e:
         print(f"Warning: W&B init failed: {e}. Continuing without logging.")
         return None
@@ -113,7 +120,10 @@ def log_job_result(
     if run is None:
         return
     try:
-        payload: dict[str, Any] = {f"progress/{status}": 1}
+        payload: dict[str, Any] = {
+            "_timestamp": time.time(),
+            f"progress/{status}": 1,
+        }
         if metrics:
             for k, v in metrics.items():
                 if v is not None:
@@ -216,19 +226,26 @@ def log_campaign_snapshot(
         from .architector_workflow import JobStatus
 
         completed = counts.get(JobStatus.COMPLETED, 0)
-        payload: dict[str, Any] = {
-            "campaign/completed": completed,
-            "campaign/failed": counts.get(JobStatus.FAILED, 0),
-            "campaign/to_run": counts.get(JobStatus.TO_RUN, 0),
-            "campaign/running": counts.get(JobStatus.RUNNING, 0),
-            "campaign/timeout": counts.get(JobStatus.TIMEOUT, 0),
-            "campaign/progress_pct": 100 * completed / total if total > 0 else 0,
-        }
+
+        # Campaign status -> summary panel (latest snapshot, not a time-series chart)
+        run.summary.update(
+            {
+                "campaign/completed": completed,
+                "campaign/failed": counts.get(JobStatus.FAILED, 0),
+                "campaign/to_run": counts.get(JobStatus.TO_RUN, 0),
+                "campaign/running": counts.get(JobStatus.RUNNING, 0),
+                "campaign/timeout": counts.get(JobStatus.TIMEOUT, 0),
+                "campaign/progress_pct": 100 * completed / total if total > 0 else 0,
+            }
+        )
+
+        # Aggregate metrics -> time-series charts (only when data is available)
         if metrics_stats:
+            payload: dict[str, Any] = {"_timestamp": time.time()}
             for k, v in metrics_stats.items():
                 if v is not None:
                     payload[f"metrics/{k}"] = v
-        run.log(payload)
+            run.log(payload)
     except Exception as e:
         print(f"Warning: W&B log failed: {e}")
 
