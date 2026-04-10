@@ -269,3 +269,6 @@ docs/todos/
 
 # also ignore .py if they are in data directory
 data/*.py
+# ignore everything in data except /data/basis_sets/
+data/*
+!data/basis_sets/
