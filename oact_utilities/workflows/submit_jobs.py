@@ -20,7 +20,12 @@ from typing import Any, Callable, Literal, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
 from ..core.orca.sella_runner import write_sella_runner_shim
-from ..utils.analysis import find_timings_and_cores, parse_job_metrics
+from ..utils.analysis import (
+    GENERATOR_AVAILABLE,
+    find_timings_and_cores,
+    parse_generator_data,
+    parse_job_metrics,
+)
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
@@ -1753,6 +1758,15 @@ def submit_batch_parsl(
                                 "wall_time": wall_time,
                                 "n_cores": n_cores_val,
                             }
+                            if GENERATOR_AVAILABLE:
+                                try:
+                                    gen_data = parse_generator_data(job_dir)
+                                    if gen_data is not None:
+                                        metrics_dict["generator_data"] = gen_data
+                                except Exception as e:
+                                    print(
+                                        f"  Warning: generator parsing failed for job {job_id}: {e}"
+                                    )
                     except Exception as e:
                         print(
                             f"  Warning: metrics extraction failed for job {job_id}: {e}"

@@ -409,17 +409,18 @@ def _parallel_extract_metrics(
             if result.get("error") is None:
                 if result.get("_cache_hit"):
                     cache_hits += 1
-                success_metrics.append(
-                    {
-                        "job_id": job_id,
-                        "job_dir": str(job_dir),
-                        "max_forces": result["max_forces"],
-                        "scf_steps": result["scf_steps"],
-                        "final_energy": result["final_energy"],
-                        "wall_time": result["wall_time"],
-                        "n_cores": result["n_cores"],
-                    }
-                )
+                metrics_entry = {
+                    "job_id": job_id,
+                    "job_dir": str(job_dir),
+                    "max_forces": result["max_forces"],
+                    "scf_steps": result["scf_steps"],
+                    "final_energy": result["final_energy"],
+                    "wall_time": result["wall_time"],
+                    "n_cores": result["n_cores"],
+                }
+                if result.get("generator_data") is not None:
+                    metrics_entry["generator_data"] = result["generator_data"]
+                success_metrics.append(metrics_entry)
                 if profile and "_profile" in result:
                     profile_data.append((job_id, result["_profile"]))
                 if verbose:
