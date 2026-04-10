@@ -2,13 +2,14 @@
 
 Reads a completed SP workflow DB, scans a directory for the actual SP job
 folders (which may have moved from stored job_dir paths), validates seed
-files, copies orca.engrad and orca.gbw to a staging directory, and writes
-a new Sella opt workflow DB with sp_engrad_path and sp_gbw_path columns.
+files, copies orca.engrad, orca.gbw, and orca.out to a seed directory,
+and writes a new Sella opt workflow DB with job_dir pre-set to each seed
+folder.
 
-Note: sp_engrad_path and sp_gbw_path are not part of _LIGHT_COLS in
-ArchitectorWorkflow and have no corresponding fields on JobRecord. Code
-that consumes this DB (e.g. submit_jobs.py) must read these columns via
-raw SQL or extend _LIGHT_COLS / JobRecord at integration time.
+submit_jobs.py then writes orca.inp, sella_config.json, and run_sella.py
+into those existing seed folders (no new directory created). At runtime,
+run_sella_optimization auto-detects the existing orca.engrad and pre-seeds
+the ASE calculator results cache, skipping the redundant step-0 EnGrad call.
 
 Usage:
     python -m oact_utilities.workflows.prepare_seeded_sella_db \\
@@ -22,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import random
 import re
 import shutil
 import sqlite3
@@ -69,7 +71,7 @@ def scan_for_job_dir(scan_dir: Path, orig_index: int) -> Path | None:
 
 
 def validate_seed_files(job_dir: Path) -> tuple[bool, str]:
-    """Check that orca.engrad is parseable and orca.gbw exists.
+    """Check that orca.engrad is parseable, orca.gbw exists, and orca.out exists.
 
     Args:
         job_dir: Path to the SP job directory.
@@ -79,10 +81,13 @@ def validate_seed_files(job_dir: Path) -> tuple[bool, str]:
     """
     engrad = job_dir / "orca.engrad"
     gbw = job_dir / "orca.gbw"
+    out = job_dir / "orca.out"
     if not engrad.exists():
         return False, "missing orca.engrad"
     if not gbw.exists():
         return False, "missing orca.gbw"
+    if not out.exists():
+        return False, "missing orca.out"
     try:
         result = get_engrad(str(engrad))
         if not result.get("gradient_Eh_per_bohr"):
@@ -119,6 +124,8 @@ def prepare_seeded_sella_db(
     out_db: Path,
     seed_dir: Path,
     execute: bool = False,
+    fraction: float | None = None,
+    random_seed: int = 42,
 ) -> None:
     """Scan SP jobs, validate seed files, copy them, and write a new Sella DB.
 
@@ -128,6 +135,8 @@ def prepare_seeded_sella_db(
         out_db: Path for the output Sella opt workflow database.
         seed_dir: Directory to copy seed files into.
         execute: If False (default), dry-run only - no files or DB written.
+        fraction: If set, randomly sample this fraction of completed rows (0.0-1.0).
+        random_seed: Random seed for reproducible sampling (default: 42).
     """
     mode = "EXECUTE" if execute else "DRY RUN"
     print(f"[{mode}] prepare_seeded_sella_db")
@@ -148,6 +157,12 @@ def prepare_seeded_sella_db(
     ]
     conn_sp.close()
     print(f"Loaded {len(rows)} completed rows from SP DB")
+
+    if fraction is not None:
+        rng = random.Random(random_seed)
+        k = max(1, round(len(rows) * fraction))
+        rows = rng.sample(rows, k)
+        print(f"Sampled {len(rows)} rows ({fraction:.0%}, seed={random_seed})")
 
     n_found = 0
     n_missing = 0
@@ -179,23 +194,19 @@ def prepare_seeded_sella_db(
 
         n_found += 1
         dst_folder = seed_dir / f"orig_index_{orig_index}"
-        engrad_dst = dst_folder / "orca.engrad"
-        gbw_dst = dst_folder / "orca.gbw"
 
         print(f"  [OK] orig_index={orig_index} ({job_dir.name}) -> {dst_folder}")
 
         if execute:
             dst_folder.mkdir(parents=True, exist_ok=True)
-            _safe_copy(job_dir / "orca.engrad", engrad_dst, job_dir)
-            _safe_copy(job_dir / "orca.gbw", gbw_dst, job_dir)
+            _safe_copy(job_dir / "orca.engrad", dst_folder / "orca.engrad", job_dir)
+            _safe_copy(job_dir / "orca.gbw", dst_folder / "orca.gbw", job_dir)
+            _safe_copy(job_dir / "orca.out", dst_folder / "orca.out", job_dir)
 
         validated.append(
             {
                 "row": row,
-                "sp_engrad_path": (
-                    str(engrad_dst.resolve()) if execute else str(engrad_dst)
-                ),
-                "sp_gbw_path": str(gbw_dst.resolve()) if execute else str(gbw_dst),
+                "job_dir": str(dst_folder.resolve()) if execute else str(dst_folder),
             }
         )
 
@@ -213,8 +224,7 @@ def prepare_seeded_sella_db(
         print("No valid jobs to write. Output DB not created.")
         return
 
-    extra_columns = {"sp_engrad_path": "TEXT", "sp_gbw_path": "TEXT"}
-    conn_out = _init_db(out_db, extra_columns=extra_columns)
+    conn_out = _init_db(out_db)
 
     for entry in validated:
         row = entry["row"]
@@ -227,10 +237,7 @@ def prepare_seeded_sella_db(
             status="to_run",
             charge=row["charge"],
             spin=row["spin"],
-            extra_values={
-                "sp_engrad_path": entry["sp_engrad_path"],
-                "sp_gbw_path": entry["sp_gbw_path"],
-            },
+            job_dir=entry["job_dir"],
         )
 
     conn_out.commit()
@@ -267,8 +274,28 @@ def main() -> None:
         default=False,
         help="Actually copy files and write DB (default: dry run)",
     )
+    parser.add_argument(
+        "--fraction",
+        type=float,
+        default=None,
+        metavar="F",
+        help="Randomly sample this fraction of completed rows, e.g. 0.1 for 10%%",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=42,
+        metavar="N",
+        help="Random seed for reproducible sampling (default: 42)",
+    )
     args = parser.parse_args()
 
+    if args.fraction is not None and not (0.0 < args.fraction <= 1.0):
+        print(
+            f"Error: --fraction must be between 0 and 1, got {args.fraction}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if not args.sp_db.exists():
         print(f"Error: SP database not found: {args.sp_db}", file=sys.stderr)
         sys.exit(1)
@@ -283,7 +310,13 @@ def main() -> None:
         )
 
     prepare_seeded_sella_db(
-        args.sp_db, args.sp_scan_dir, args.out_db, args.seed_dir, args.execute
+        args.sp_db,
+        args.sp_scan_dir,
+        args.out_db,
+        args.seed_dir,
+        args.execute,
+        fraction=args.fraction,
+        random_seed=args.random_seed,
     )
 
 

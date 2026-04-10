@@ -123,24 +123,28 @@ def prepare_job_directory(
     Returns:
         Path to the created job directory.
     """
-    # Use limited, explicit placeholder replacement to avoid format string issues.
-    # Supported placeholders: {orig_index}, {id}. Any other braces are rejected.
-    pattern = job_dir_pattern
+    if job_record.job_dir:
+        job_dir = Path(job_record.job_dir)
+    else:
+        # Use limited, explicit placeholder replacement to avoid format string issues.
+        # Supported placeholders: {orig_index}, {id}. Any other braces are rejected.
+        pattern = job_dir_pattern
 
-    allowed_placeholders = ("{orig_index}", "{id}")
-    temp_pattern = pattern
-    for placeholder in allowed_placeholders:
-        temp_pattern = temp_pattern.replace(placeholder, "")
-    if "{" in temp_pattern or "}" in temp_pattern:
-        raise ValueError(
-            f"Unsupported placeholder or stray brace in job_dir_pattern: {job_dir_pattern!r}"
-        )
+        allowed_placeholders = ("{orig_index}", "{id}")
+        temp_pattern = pattern
+        for placeholder in allowed_placeholders:
+            temp_pattern = temp_pattern.replace(placeholder, "")
+        if "{" in temp_pattern or "}" in temp_pattern:
+            raise ValueError(
+                f"Unsupported placeholder or stray brace in job_dir_pattern: {job_dir_pattern!r}"
+            )
 
-    job_dir_name = pattern.replace("{orig_index}", str(job_record.orig_index)).replace(
-        "{id}", str(job_record.id)
-    )
+        job_dir_name = pattern.replace(
+            "{orig_index}", str(job_record.orig_index)
+        ).replace("{id}", str(job_record.id))
 
-    job_dir = root_dir / job_dir_name
+        job_dir = root_dir / job_dir_name
+
     job_dir.mkdir(parents=True, exist_ok=True)
 
     # Merge with defaults
