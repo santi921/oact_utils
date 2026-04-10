@@ -466,7 +466,7 @@ def create_dissociation_db(
                 elements=row["elements"],
                 natoms=row["natoms"],
                 geometry=row["geometry"],
-                status="ready",
+                status="to_run",
                 charge=row["charge"],
                 spin=row["spin"],
             )

@@ -82,6 +82,7 @@ oact_utilities/
 │   ├── hpc.py                  # HPC job file writers (Flux, SLURM)
 │   ├── jobs.py                 # Job launching utilities
 │   ├── status.py               # Job termination/completion checking, failure reason parsing
+│   ├── scheduler.py            # Scheduler liveness checks for crash recovery (SLURM/Flux)
 │   ├── an66.py                 # Actinide-66 compound utilities
 │   ├── baselines.py            # Baseline calculation helpers
 │   └── table_summary.py        # Data table utilities
@@ -128,14 +129,15 @@ oact_utilities/
 
 ## ORCA Templates
 
-Four configurable templates defined in `core/orca/calc.py`:
+Five configurable templates defined in `core/orca/calc.py`:
 
-| Template         | Use Case                  | Key Settings                                                       |
-| ---------------- | ------------------------- | ------------------------------------------------------------------ |
-| `omol` (default) | Standard DFT              | RIJCOSX, def2/J, DIIS, NormalConv, DEFGRID3, ALLPOP                |
-| `omol_base`      | Difficult SCF convergence | Simplified SCF (MaxIter=600), MediumConv, fewer convergence tweaks |
-| `x2c`            | Relativistic (actinides)  | DLU-X2C, RIJCOSX, AutoAux                                          |
-| `dk3`            | Heavy relativistic        | DKH (Douglas-Kroll-Hess), SARC/J                                   |
+| Template         | Use Case                  | Key Settings                                                                         |
+| ---------------- | ------------------------- | ------------------------------------------------------------------------------------ |
+| `omol` (default) | Standard DFT              | RIJCOSX, def2/J, DIIS, NormalConv, DEFGRID3, ALLPOP                                 |
+| `omol_base`      | Difficult SCF convergence | Simplified SCF (MaxIter=600), MediumConv, fewer convergence tweaks                  |
+| `x2c`            | Relativistic (actinides)  | DLU-X2C, RIJCOSX, AutoAux                                                            |
+| `dk3`            | Heavy relativistic        | DKH (Douglas-Kroll-Hess), SARC/J                                                    |
+| `pm3`            | Debug / fast CI runs      | PM3 semiempirical, no Gaussian basis, under 1s on small organics; no actinide support |
 
 All templates now include `Print[ P_Hirshfeld ] 1` in the `%output` block for Hirshfeld population analysis by default.
 
@@ -203,6 +205,7 @@ SQLite table `structures` with WAL mode for concurrent access:
 | `n_cores`       | INTEGER    | CPU cores used                                                                                    |
 | `error_message` | TEXT       | Error message if failed                                                                           |
 | `fail_count`    | INTEGER    | Retry counter (incremented on reset)                                                              |
+| `worker_id`     | TEXT       | Scheduler job ID owning this molecule (SLURM/Flux ID), used for crash recovery                    |
 
 **Performance notes:** Always use `include_geometry=False` or `_LIGHT_COLS` when you don't need XYZ coordinates. Push `LIMIT` into SQL, never slice in Python.
 
@@ -214,9 +217,9 @@ TO_RUN → RUNNING → COMPLETED
                   → TIMEOUT → (reset) → TO_RUN
 ```
 
-- **TO_RUN**: Ready for submission (new standard status)
-- **READY**: Legacy alias for TO_RUN (backwards compatibility)
-- **RUNNING**: Submitted and executing on HPC
+- **TO_RUN**: Ready for submission
+- **READY**: Legacy alias, auto-migrated to TO_RUN on database open
+- **RUNNING**: Submitted and executing on HPC (has `worker_id` set to scheduler job ID)
 - **COMPLETED**: Successfully finished (verified by content check)
 - **FAILED**: Crashed or error detected
 - **TIMEOUT**: No updates for 6+ hours (configurable via `hours_cutoff`)
@@ -324,8 +327,13 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --reset-failed               # Reset failed -> TO_RUN (increments fail_count)
 --reset-timeout              # Reset timeout -> TO_RUN (increments fail_count)
 --reset-missing <job_dir>    # Reset jobs with missing directories -> TO_RUN
+--fix-unlinked <job_dir>     # Repair NULL job_dir: auto-link directories or reset to TO_RUN
 --include-timeout-in-reset   # Reset both failed and timeout
 --max-retries N              # Only reset jobs with fail_count < N
+
+# Crash recovery
+--recover-orphans            # Detect jobs orphaned by dead scheduler allocations
+--scheduler {slurm,flux}     # Scheduler type (required with --recover-orphans)
 
 # Performance
 --debug N                    # Limit to N jobs for testing
@@ -437,6 +445,7 @@ Tests live in `tests/` with test data in `tests/files/`. When adding new functio
 - `test_io.py` - I/O utilities
 - `test_status.py` - Status checking and timeout detection
 - `test_clean.py` - Job directory cleanup (patterns, purge, submit guard)
+- `test_fix_unlinked.py` - Fix unlinked jobs (auto-link, reset, status revalidation)
 - `test_workflow.py` - Workflow DB operations
 - `test_workflow_parsers.py` - Parsers with real ORCA data
 - `test_submit_jobs.py` - Job submission

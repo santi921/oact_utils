@@ -2,6 +2,5 @@ ase
 pandas
 sella==2.3.5
 periodictable==2.0.2
-quests[gpu]
-parsl
+parsl[monitoring,visualization]==2026.03.09
 spyrmsd

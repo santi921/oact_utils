@@ -21,20 +21,25 @@
 # ---- Configuration (edit these) ----
 DB_PATH="/path/to/workflow.db"  #(update USE ACTINIDES DB)
 ROOT_DIR="/path/to/job_output_dir" #(update)
+ORCA_PATH="/path/to/orca"          #(update -- must be absolute path to ORCA binary)
+JOB_PREFIX=""                     # optional stable prefix reused across coordinator requeues
 
 BATCH_SIZE=500          # number of jobs to dispatch at once (update)
 MAX_WORKERS=4              # workers per node (update)
 CORES_PER_WORKER=20        # cores per worker (update)
+CPUS_PER_NODE=""          # optional: reserve more scheduler cores/node than active workers use
 CONDA_ENV="py10mpi" # (update)
 CONDA_BASE="/usr/WS1/vargas58/miniconda3"
+LD_LIBRARY_PATH_OVERRIDE=""  # (optional) set to override LD_LIBRARY_PATH in job scripts
 JOB_TIMEOUT=432000          # 5 days per job
 MAX_FAIL_COUNT=3
 
 # SLURM scale-out settings
-MAX_BLOCKS=10              # max SLURM nodes Parsl can provision
-INIT_BLOCKS=2              # nodes requested at startup
-MIN_BLOCKS=1               # minimum nodes to keep alive
-WALLTIME_HOURS=120          # walltime per worker node allocation (update)
+NODES_PER_BLOCK=1          # nodes per SLURM block (>1 enables multi-node with SrunLauncher)
+MAX_BLOCKS=10              # max SLURM blocks Parsl can provision
+INIT_BLOCKS=2              # blocks requested at startup
+MIN_BLOCKS=1               # minimum blocks to keep alive
+WALLTIME_HOURS=120          # walltime per block allocation (update)
 QOS="frontier"
 ACCOUNT="ODEFN5169CYFZ"
 
@@ -57,13 +62,17 @@ python -m oact_utilities.workflows.submit_jobs \
     "${ROOT_DIR}" \
     --use-parsl \
     --scheduler slurm \
+    ${JOB_PREFIX:+--job-prefix "${JOB_PREFIX}"} \
     --batch-size "${BATCH_SIZE}" \
     --max-workers "${MAX_WORKERS}" \
     --cores-per-worker "${CORES_PER_WORKER}" \
+    ${CPUS_PER_NODE:+--cpus-per-node "${CPUS_PER_NODE}"} \
     --conda-env "${CONDA_ENV}" \
     --conda-base "${CONDA_BASE}" \
+    ${LD_LIBRARY_PATH_OVERRIDE:+--ld-library-path "${LD_LIBRARY_PATH_OVERRIDE}"} \
     --job-timeout "${JOB_TIMEOUT}" \
     --max-fail-count "${MAX_FAIL_COUNT}" \
+    --nodes-per-block "${NODES_PER_BLOCK}" \
     --max-blocks "${MAX_BLOCKS}" \
     --init-blocks "${INIT_BLOCKS}" \
     --min-blocks "${MIN_BLOCKS}" \
@@ -76,5 +85,6 @@ python -m oact_utilities.workflows.submit_jobs \
     --actinide-ecp "${ACTINIDE_ECP}" \
     --non-actinide-basis "${NON_ACTINIDE_BASIS}" \
     --scf-maxiter "${SCF_MAXITER}" \
-    --ks-method uks
+    --ks-method uks \
+    --orca-path "${ORCA_PATH}"
     #--dry-run # Uncomment to do a dry run (Parsl will spin up and prepare directories but not actually submit jobs)

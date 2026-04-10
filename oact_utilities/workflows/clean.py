@@ -46,6 +46,7 @@ _EXCLUSION_SET = frozenset(
         "orca.engrad.gz",
         "orca.xyz",
         "orca_metrics.json",
+        "generator_metrics.json",
         "orca.property.txt",
         "orca.property.txt.gz",
         "orca.gbw",
@@ -232,17 +233,6 @@ def _write_marker_file(job_dir: Path, metadata: dict[str, str | int | None]) -> 
 
 
 # ---------------------------------------------------------------------------
-# rmtree error handler
-# ---------------------------------------------------------------------------
-
-
-def _rmtree_error_handler(func: object, path: str, exc_info: object) -> None:
-    """Error handler for shutil.rmtree -- log and continue."""
-    # We intentionally swallow the error so the rest of the cleanup proceeds.
-    pass
-
-
-# ---------------------------------------------------------------------------
 # Per-job workers
 # ---------------------------------------------------------------------------
 
@@ -254,10 +244,16 @@ def _process_job(
     execute: bool,
     hours_cutoff: int,
     optimizer: str | None,
+    skip_revalidation: bool = False,
 ) -> tuple[list[tuple[Path, int, bool]], int, list[str]]:
-    """Scan one completed job directory for cleanup targets.
+    """Scan a job directory for cleanup targets.
 
     Pure I/O worker -- no DB access, no shared mutable state.
+
+    Args:
+        skip_revalidation: If True, skip the on-disk completion check.
+            Used when cleaning failed/to_run jobs where we know the job
+            is not completed but still want to remove scratch files.
 
     Returns:
         (matched_files, bytes_freed, errors)
@@ -269,20 +265,21 @@ def _process_job(
     bytes_freed = 0
     errors: list[str] = []
 
-    # Revalidate job completion on disk
-    try:
-        status = check_job_termination(
-            str(job_dir), hours_cutoff=hours_cutoff, optimizer=optimizer
-        )
-    except Exception as e:
-        errors.append(f"{job_dir}: revalidation error: {e}")
-        return matched, bytes_freed, errors
+    # Revalidate job completion on disk (skip for non-completed jobs)
+    if not skip_revalidation:
+        try:
+            status = check_job_termination(
+                str(job_dir), hours_cutoff=hours_cutoff, optimizer=optimizer
+            )
+        except Exception as e:
+            errors.append(f"{job_dir}: revalidation error: {e}")
+            return matched, bytes_freed, errors
 
-    if status != 1:
-        errors.append(
-            f"{job_dir}: revalidation returned {status} (expected 1=completed), skipping"
-        )
-        return matched, bytes_freed, errors
+        if status != 1:
+            errors.append(
+                f"{job_dir}: revalidation returned {status} (expected 1=completed), skipping"
+            )
+            return matched, bytes_freed, errors
 
     # Scan direct children of job directory
     try:
@@ -294,10 +291,6 @@ def _process_job(
     for entry in entries:
         is_dir = entry.is_dir()
         if not _match_cleanup_patterns(entry.name, is_dir, categories):
-            continue
-
-        # For directories, verify they are direct children and match safe pattern
-        if is_dir and not _ORCA_TMP_DIR_RE.match(entry.name):
             continue
 
         try:
@@ -313,7 +306,10 @@ def _process_job(
         if execute:
             try:
                 if is_dir:
-                    shutil.rmtree(str(entry), onerror=_rmtree_error_handler)
+                    if entry.is_symlink():
+                        entry.unlink()  # Remove symlink, don't follow it
+                    else:
+                        shutil.rmtree(str(entry), ignore_errors=True)
                 else:
                     entry.unlink()
                 bytes_freed += size
@@ -346,16 +342,15 @@ def _purge_failed_job(
         errors.append(f"{job_dir}: directory not found, skipping purge")
         return matched, bytes_freed, errors
 
-    # TOCTOU re-check: confirm job is still failed in DB
+    # TOCTOU re-check: confirm job is still failed in DB.
+    # Uses a short-lived read-only connection with DELETE mode (never WAL)
+    # to avoid poisoning the DB with stale -wal/-shm files on Lustre/VAST.
     try:
-        conn = sqlite3.connect(str(db_path), timeout=5.0)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError:
+        with sqlite3.connect(str(db_path), timeout=5.0) as conn:
             conn.execute("PRAGMA journal_mode=DELETE")
-        cur = conn.execute("SELECT status FROM structures WHERE id = ?", (job_id,))
-        row = cur.fetchone()
-        conn.close()
+            conn.execute("PRAGMA busy_timeout=5000")
+            cur = conn.execute("SELECT status FROM structures WHERE id = ?", (job_id,))
+            row = cur.fetchone()
     except Exception as e:
         errors.append(f"{job_dir}: TOCTOU DB check failed: {e}, skipping purge")
         return matched, bytes_freed, errors
@@ -396,11 +391,18 @@ def _purge_failed_job(
 
     if execute:
         # Write marker first, then delete everything else
-        _write_marker_file(job_dir, metadata)
+        try:
+            _write_marker_file(job_dir, metadata)
+        except (OSError, PermissionError) as e:
+            errors.append(f"{job_dir}: marker write failed: {e}, skipping purge")
+            return matched, bytes_freed, errors
         for entry, size, is_dir in matched:
             try:
                 if is_dir:
-                    shutil.rmtree(str(entry), onerror=_rmtree_error_handler)
+                    if entry.is_symlink():
+                        entry.unlink()  # Remove symlink, don't follow it
+                    else:
+                        shutil.rmtree(str(entry), ignore_errors=True)
                 else:
                     entry.unlink()
                 bytes_freed += size
@@ -425,6 +427,7 @@ def clean_job_directories(
     hours_cutoff: int = 24,
     limit: int | None = None,
     verbose: bool = False,
+    include_failed: bool = False,
 ) -> None:
     """Orchestrate cleanup of job directories.
 
@@ -438,6 +441,8 @@ def clean_job_directories(
         hours_cutoff: Hours before revalidation considers a job timed out.
         limit: If set, process at most this many jobs.
         verbose: If True, show per-file listings.
+        include_failed: If True, also clean scratch files from failed,
+            timeout, and to_run jobs (not just completed).
     """
     mode_label = "EXECUTING" if execute else "DRY RUN"
     print(f"\n{'=' * 60}")
@@ -447,6 +452,8 @@ def clean_job_directories(
     print(f"  Root dir:   {root_dir}")
     if categories:
         print(f"  Categories: {', '.join(sorted(categories))}")
+    if include_failed:
+        print("  Include failed/timeout/to_run: yes")
     if purge_failed:
         print("  Purge failed: yes")
     print(f"  Workers:    {workers}")
@@ -463,16 +470,33 @@ def clean_job_directories(
         clean_job_count = 0
 
         if categories:
-            completed_jobs = wf.get_jobs_by_status(
-                JobStatus.COMPLETED,
-                limit=limit,
-                include_geometry=False,
-            )
-            print(f"Found {len(completed_jobs)} completed jobs")
+            if include_failed:
+                statuses = [
+                    JobStatus.COMPLETED,
+                    JobStatus.FAILED,
+                    JobStatus.TIMEOUT,
+                    JobStatus.TO_RUN,
+                ]
+                clean_jobs = wf.get_jobs_by_status(
+                    statuses,
+                    limit=limit,
+                    include_geometry=False,
+                )
+                print(
+                    f"Found {len(clean_jobs)} jobs "
+                    f"(completed + failed + timeout + to_run)"
+                )
+            else:
+                clean_jobs = wf.get_jobs_by_status(
+                    JobStatus.COMPLETED,
+                    limit=limit,
+                    include_geometry=False,
+                )
+                print(f"Found {len(clean_jobs)} completed jobs")
 
-            # Build work items
-            work_items: list[tuple[Path, str | None]] = []
-            for job in completed_jobs:
+            # Build work items: (path, optimizer, skip_revalidation)
+            work_items: list[tuple[Path, str | None, bool]] = []
+            for job in clean_jobs:
                 if job.job_dir is None:
                     total_errors.append(f"job id={job.id}: NULL job_dir, skipping")
                     continue
@@ -484,18 +508,17 @@ def clean_job_directories(
                     continue
                 if not resolved.is_dir():
                     continue
-                work_items.append((resolved, job.optimizer))
+                # Skip revalidation for non-completed jobs -- we already
+                # know they are failed/timeout/to_run from the DB query.
+                skip_reval = job.status != JobStatus.COMPLETED
+                work_items.append((resolved, job.optimizer, skip_reval))
 
             print(f"Processing {len(work_items)} job directories...")
 
             # Parallel scan/delete
-            iterator = range(len(work_items))
-            if tqdm is not None:
-                iterator = tqdm(iterator, desc="Scanning", unit="job")
-
             futures = {}
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                for idx, (job_dir, optimizer) in enumerate(work_items):
+                for idx, (job_dir, optimizer, skip_reval) in enumerate(work_items):
                     fut = pool.submit(
                         _process_job,
                         job_dir,
@@ -504,14 +527,19 @@ def clean_job_directories(
                         execute,
                         hours_cutoff,
                         optimizer,
+                        skip_revalidation=skip_reval,
                     )
                     futures[fut] = idx
 
-                completed_count = 0
-                for fut in as_completed(futures):
-                    completed_count += 1
-                    if tqdm is not None:
-                        pass  # tqdm updates via iterator
+                completed_iter = as_completed(futures)
+                if tqdm is not None:
+                    completed_iter = tqdm(
+                        completed_iter,
+                        total=len(futures),
+                        desc="Cleaning",
+                        unit="job",
+                    )
+                for fut in completed_iter:
                     matched, freed, errs = fut.result()
                     if matched:
                         total_matched += len(matched)
@@ -671,6 +699,11 @@ def main() -> None:
         action="store_true",
         help="Purge failed job directories (write .do_not_rerun.json marker, delete contents)",
     )
+    action.add_argument(
+        "--include-failed",
+        action="store_true",
+        help="Also clean scratch files from failed, timeout, and to_run jobs (not just completed)",
+    )
 
     # Execution control
     parser.add_argument(
@@ -745,6 +778,7 @@ def main() -> None:
         hours_cutoff=args.hours_cutoff,
         limit=args.debug,
         verbose=args.verbose,
+        include_failed=args.include_failed,
     )
 
 

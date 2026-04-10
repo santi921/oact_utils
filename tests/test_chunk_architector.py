@@ -62,7 +62,7 @@ He 0.0 0.0 0.0
     assert count == 3
     cur.execute("SELECT DISTINCT(status) FROM structures")
     statuses = {r[0] for r in cur.fetchall()}
-    assert statuses == {"ready"}
+    assert statuses == {"to_run"}
     conn.close()
 
 

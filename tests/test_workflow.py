@@ -57,7 +57,7 @@ def test_create_workflow(sample_csv, tmp_path):
     assert db_path_ret.exists()
 
     # Check that jobs were created
-    jobs = workflow.get_jobs_by_status(JobStatus.READY)
+    jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN)
     assert len(jobs) == 2
 
     # Check job details
@@ -88,7 +88,7 @@ def test_workflow_status_updates(tmp_path):
         elements="H;H",
         natoms=2,
         geometry="H 0 0 0\nH 0 0 0.74",
-        status="ready",
+        status="to_run",
     )
     _insert_row(
         conn,
@@ -96,7 +96,7 @@ def test_workflow_status_updates(tmp_path):
         elements="O;H;H",
         natoms=3,
         geometry="O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0",
-        status="ready",
+        status="to_run",
     )
     conn.commit()
     conn.close()
@@ -104,14 +104,14 @@ def test_workflow_status_updates(tmp_path):
     # Test workflow
     with ArchitectorWorkflow(db_path) as workflow:
         # Check initial state
-        ready = workflow.get_jobs_by_status(JobStatus.READY)
+        ready = workflow.get_jobs_by_status(JobStatus.TO_RUN)
         assert len(ready) == 2
 
         # Update one job
         workflow.update_status(1, JobStatus.RUNNING)
 
         # Check updated state
-        ready = workflow.get_jobs_by_status(JobStatus.READY)
+        ready = workflow.get_jobs_by_status(JobStatus.TO_RUN)
         running = workflow.get_jobs_by_status(JobStatus.RUNNING)
         assert len(ready) == 1
         assert len(running) == 1
@@ -174,7 +174,7 @@ def test_count_by_status(tmp_path):
 
     for i in range(10):
         if i < 5:
-            status = "ready"
+            status = "to_run"
         elif i < 8:
             status = "running"
         elif i < 9:
@@ -196,7 +196,7 @@ def test_count_by_status(tmp_path):
     with ArchitectorWorkflow(db_path) as workflow:
         counts = workflow.count_by_status()
 
-        assert counts[JobStatus.READY] == 5
+        assert counts[JobStatus.TO_RUN] == 5
         assert counts[JobStatus.RUNNING] == 3
         assert counts[JobStatus.COMPLETED] == 1
         assert counts[JobStatus.FAILED] == 1
@@ -290,14 +290,14 @@ def test_to_run_status(tmp_path):
 
     conn = _init_db(db_path)
 
-    # Insert test rows with TO_RUN status
+    # Insert one row as legacy "ready" and one as "to_run"
     _insert_row(
         conn,
         orig_index=0,
         elements="H;H",
         natoms=2,
         geometry="H 0 0 0\nH 0 0 0.74",
-        status="to_run",
+        status="ready",
     )
     _insert_row(
         conn,
@@ -305,19 +305,19 @@ def test_to_run_status(tmp_path):
         elements="O;H;H",
         natoms=3,
         geometry="O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0",
-        status="ready",
+        status="to_run",
     )
     conn.commit()
     conn.close()
 
+    # Opening the DB triggers _ensure_schema() which migrates ready -> to_run
     with ArchitectorWorkflow(db_path) as workflow:
-        # Check TO_RUN jobs
         to_run = workflow.get_jobs_by_status(JobStatus.TO_RUN)
-        assert len(to_run) == 1
+        assert len(to_run) == 2  # Both rows are now to_run
 
-        # Check that we can get both TO_RUN and READY jobs
-        ready_jobs = workflow.get_jobs_by_status([JobStatus.TO_RUN, JobStatus.READY])
-        assert len(ready_jobs) == 2
+        # Verify no "ready" rows remain
+        ready = workflow.get_jobs_by_status(JobStatus.READY)
+        assert len(ready) == 0
 
 
 def test_reset_timeout_jobs(tmp_path):
@@ -848,7 +848,7 @@ def test_ensure_schema_adds_optimizer_column(tmp_path):
         elements="H;H",
         natoms=2,
         geometry="H 0 0 0\nH 0 0 0.74",
-        status="ready",
+        status="to_run",
     )
     conn.commit()
     conn.close()
@@ -860,3 +860,659 @@ def test_ensure_schema_adds_optimizer_column(tmp_path):
         row = cur.fetchone()
         assert row is not None
         assert row[0] is None  # Default should be NULL
+
+
+def test_worker_id_set_and_cleared(tmp_path):
+    """worker_id is set on mark_jobs_as_running and cleared on status change."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Mark as running with a worker_id
+        workflow.mark_jobs_as_running([1], worker_id="slurm_12345")
+        jobs = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(jobs) == 1
+        assert jobs[0].worker_id == "slurm_12345"
+
+        # Complete the job -- worker_id should be cleared
+        workflow.update_status(1, JobStatus.COMPLETED, worker_id=None)
+        jobs = workflow.get_jobs_by_status(JobStatus.COMPLETED)
+        assert len(jobs) == 1
+        assert jobs[0].worker_id is None
+
+
+def test_worker_id_bulk_reset(tmp_path):
+    """update_status_bulk clears worker_id for multiple jobs at once."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    for i in range(5):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="to_run",
+        )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        job_ids = [1, 2, 3, 4, 5]
+        workflow.mark_jobs_as_running(job_ids, worker_id="flux_abc123")
+
+        # Verify all have worker_id set
+        running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert all(j.worker_id == "flux_abc123" for j in running)
+
+        # Bulk reset orphans to TO_RUN, clearing worker_id
+        workflow.update_status_bulk([1, 2, 3], JobStatus.TO_RUN, worker_id=None)
+
+        to_run = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(to_run) == 3
+        assert all(j.worker_id is None for j in to_run)
+
+        # Remaining jobs still have worker_id
+        still_running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(still_running) == 2
+        assert all(j.worker_id == "flux_abc123" for j in still_running)
+
+
+def test_ensure_schema_migrates_worker_id(tmp_path):
+    """_ensure_schema adds worker_id column to old databases."""
+    import sqlite3
+
+    db_path = tmp_path / "old.db"
+    # Create a DB without worker_id column (simulating old schema)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE structures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orig_index INTEGER,
+            elements TEXT,
+            natoms INTEGER,
+            status TEXT,
+            charge INTEGER,
+            spin INTEGER,
+            geometry TEXT,
+            job_dir TEXT,
+            max_forces REAL,
+            scf_steps INTEGER,
+            final_energy REAL,
+            error_message TEXT,
+            fail_count INTEGER DEFAULT 0,
+            wall_time REAL,
+            n_cores INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+    )
+    conn.execute(
+        "INSERT INTO structures (orig_index, elements, natoms, status, geometry) "
+        "VALUES (0, 'H;H', 2, 'ready', 'H 0 0 0')"
+    )
+    conn.commit()
+    conn.close()
+
+    # Opening triggers _ensure_schema which adds worker_id and migrates ready->to_run
+    with ArchitectorWorkflow(db_path) as workflow:
+        jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(jobs) == 1
+        assert jobs[0].worker_id is None
+        assert jobs[0].status == JobStatus.TO_RUN
+
+        # Verify worker_id column works
+        workflow.mark_jobs_as_running([1], worker_id="test_123")
+        running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(running) == 1
+        assert running[0].worker_id == "test_123"
+
+
+def test_sigterm_handler_sets_flag_and_raises():
+    """SIGTERM handler sets the shutdown flag and raises KeyboardInterrupt.
+
+    The raise is necessary to break out of as_completed() which blocks
+    indefinitely when Parsl workers are dead (e.g., after flux cancel).
+    """
+    import signal
+
+    _shutdown_requested = False
+    _original = signal.getsignal(signal.SIGTERM)
+
+    def _handler(signum, frame):
+        nonlocal _shutdown_requested
+        _shutdown_requested = True
+        signal.signal(signal.SIGTERM, _original)
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, _handler)
+        with pytest.raises(KeyboardInterrupt):
+            os.kill(os.getpid(), signal.SIGTERM)
+        assert _shutdown_requested is True
+    finally:
+        signal.signal(signal.SIGTERM, _original)
+
+
+# --- Phase 3: Scheduler liveness checks and orphan recovery ---
+
+
+def test_get_active_scheduler_jobs_slurm_mock(monkeypatch):
+    """get_active_scheduler_jobs returns a set of job IDs for SLURM."""
+    from unittest.mock import MagicMock
+
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "12345\n12346\n12347\n"
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run", lambda *a, **kw: mock_result
+    )
+
+    active = get_active_scheduler_jobs("slurm")
+    assert active == {"12345", "12346", "12347"}
+
+
+def test_get_active_scheduler_jobs_flux_mock(monkeypatch):
+    """get_active_scheduler_jobs returns compact Flux IDs."""
+    from unittest.mock import MagicMock
+
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "f2xgUVYLJs27\nf2xgUVdyx8JK\n"
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run", lambda *a, **kw: mock_result
+    )
+
+    active = get_active_scheduler_jobs("flux")
+    assert active == {"f2xgUVYLJs27", "f2xgUVdyx8JK"}
+
+
+def test_get_active_scheduler_jobs_empty(monkeypatch):
+    """Empty scheduler queue returns empty set (not None)."""
+    from unittest.mock import MagicMock
+
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run", lambda *a, **kw: mock_result
+    )
+
+    active = get_active_scheduler_jobs("slurm")
+    assert active == set()
+    assert active is not None
+
+
+def test_get_active_scheduler_jobs_unreachable(monkeypatch):
+    """Unreachable scheduler returns None (conservative: skip recovery)."""
+    import subprocess as sp
+
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(sp.TimeoutExpired("squeue", 30)),
+    )
+
+    active = get_active_scheduler_jobs("slurm")
+    assert active is None
+
+
+def test_get_active_scheduler_jobs_command_not_found(monkeypatch):
+    """Missing scheduler command returns None."""
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("squeue")),
+    )
+
+    active = get_active_scheduler_jobs("slurm")
+    assert active is None
+
+
+def test_recover_orphaned_jobs_dead_scheduler(tmp_path, monkeypatch):
+    """Orphaned RUNNING jobs from a dead scheduler job are recovered."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    # Insert 3 jobs
+    for i in range(3):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="to_run",
+        )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Mark all as running under scheduler job "slurm_100"
+        workflow.mark_jobs_as_running([1, 2, 3], worker_id="slurm_100")
+
+        # Mock scheduler: slurm_100 is NOT in active set (it's dead)
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: set(),  # empty = nothing active
+        )
+
+        # Mock check_job_termination: job 1 completed, job 2 failed, job 3 inconclusive
+        def mock_check(job_dir, **kwargs):
+            if job_dir and "job_0" in str(job_dir):
+                return 1  # completed
+            elif job_dir and "job_1" in str(job_dir):
+                return -1  # failed
+            return 0  # inconclusive
+
+        monkeypatch.setattr(
+            "oact_utilities.workflows.dashboard.check_job_termination",
+            mock_check,
+        )
+
+        # Set job_dirs so the check function has something to work with
+        workflow.update_job_metrics(1, job_dir=str(tmp_path / "job_0"))
+        workflow.update_job_metrics(2, job_dir=str(tmp_path / "job_1"))
+        workflow.update_job_metrics(3, job_dir=str(tmp_path / "job_2"))
+
+        result = recover_orphaned_jobs(workflow, scheduler="slurm")
+
+        assert result["dead_jobs"] == 1
+        assert result["completed"] == 1
+        assert result["failed"] == 1
+        assert result["reset"] == 1
+        assert result["recovered"] == 3
+
+        # Verify final statuses
+        jobs = {j.id: j for j in workflow.get_jobs_by_status()}
+        assert jobs[1].status == JobStatus.COMPLETED
+        assert jobs[1].worker_id is None
+        assert jobs[2].status == JobStatus.FAILED
+        assert jobs[2].worker_id is None
+        assert jobs[3].status == JobStatus.TO_RUN
+        assert jobs[3].worker_id is None
+
+
+def test_recover_orphans_scheduler_unreachable(tmp_path, monkeypatch):
+    """When scheduler is unreachable, no jobs are modified (conservative)."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.mark_jobs_as_running([1], worker_id="slurm_100")
+
+        # Mock scheduler: returns None (unreachable)
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: None,
+        )
+
+        result = recover_orphaned_jobs(workflow, scheduler="slurm")
+
+        assert result["skipped"] == 1
+        assert result["recovered"] == 0
+
+        # Job should still be RUNNING (not modified)
+        jobs = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(jobs) == 1
+        assert jobs[0].worker_id == "slurm_100"
+
+
+def test_recover_orphans_all_active(tmp_path, monkeypatch):
+    """When all scheduler jobs are active, no orphans are detected."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.mark_jobs_as_running([1], worker_id="slurm_100")
+
+        # Mock scheduler: slurm_100 IS active
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: {"slurm_100"},
+        )
+
+        result = recover_orphaned_jobs(workflow, scheduler="slurm")
+
+        assert result["recovered"] == 0
+        assert result["dead_jobs"] == 0
+
+        # Job should still be RUNNING
+        jobs = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(jobs) == 1
+
+
+# --- Tests for DELETE journal mode (Change 1) ---
+
+
+def test_get_connection_uses_delete_journal_mode(tmp_path):
+    """_get_connection() always sets DELETE journal mode."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        cur = workflow.conn.execute("PRAGMA journal_mode")
+        mode = cur.fetchone()[0]
+        assert mode == "delete"
+
+
+def test_stale_wal_files_produce_warning(tmp_path):
+    """Stale .db-wal/.db-shm files trigger a warning on DB open."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    # Create stale WAL files
+    (tmp_path / "test.db-wal").write_text("stale")
+    (tmp_path / "test.db-shm").write_text("stale")
+
+    import warnings
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        workflow = ArchitectorWorkflow(db_path)
+        workflow.close()
+
+    assert len(w) == 1
+    assert "Stale WAL files" in str(w[0].message)
+
+
+# --- Tests for configurable retry budget (Change 3) ---
+
+
+def test_retry_budget_defaults(tmp_path):
+    """Default max_retries and retry_delay_cap are backward-compatible."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.max_retries == 5
+        assert workflow.retry_delay_cap == 5.0
+
+
+def test_retry_budget_custom_values(tmp_path):
+    """Custom max_retries and retry_delay_cap are stored."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(
+        db_path, timeout=15.0, max_retries=10, retry_delay_cap=10.0
+    ) as workflow:
+        assert workflow.max_retries == 10
+        assert workflow.retry_delay_cap == 10.0
+        assert workflow.timeout == 15.0
+
+
+def test_get_chronic_reset_counts_zeros(tmp_path):
+    """Returns (0, 0) when no jobs exceed either threshold."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    # Jobs with fail_count below threshold
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=0,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=3,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.get_chronic_reset_counts() == (0, 0)
+
+
+def test_get_chronic_reset_counts_low_band_only(tmp_path):
+    """Returns correct count when only the 5+ band is populated."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=6,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=7,
+    )
+    _insert_row(
+        conn,
+        orig_index=2,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=2,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.get_chronic_reset_counts() == (2, 0)
+
+
+def test_get_chronic_reset_counts_both_bands(tmp_path):
+    """Both thresholds populated; high count is a subset of low count."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=30,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=8,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        low, high = workflow.get_chronic_reset_counts()
+        assert low == 2
+        assert high == 1
+        assert low >= high
+
+
+def test_get_chronic_reset_counts_excludes_non_to_run(tmp_path):
+    """Jobs not in to_run status are excluded from counts."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    # High fail_count but not to_run
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="failed",
+        fail_count=10,
+    )
+    _insert_row(
+        conn,
+        orig_index=1,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="completed",
+        fail_count=30,
+    )
+    # to_run but below threshold
+    _insert_row(
+        conn,
+        orig_index=2,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+        fail_count=1,
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.get_chronic_reset_counts() == (0, 0)
+
+
+def test_get_chronic_reset_counts_null_fail_count(tmp_path):
+    """NULL fail_count is treated as 0 and excluded from counts."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.get_chronic_reset_counts() == (0, 0)

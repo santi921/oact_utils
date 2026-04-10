@@ -7,18 +7,35 @@ to HPC systems (Flux or SLURM). Jobs generate ORCA input files directly.
 from __future__ import annotations
 
 import argparse
+import inspect
+import os
 import random
+import shlex
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Callable, Literal, TypedDict
+from typing import Any, Callable, Literal, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
 from ..core.orca.sella_runner import write_sella_runner_shim
 from ..utils.analysis import find_timings_and_cores, parse_job_metrics
 from ..utils.architector import xyz_string_to_atoms
-from ..utils.status import pull_log_file
+from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .job_dir_patterns import (
+    DEFAULT_JOB_DIR_PATTERN,
+    apply_job_dir_prefix,
+    render_job_dir_pattern,
+)
+from .wandb_logger import (
+    WANDB_AVAILABLE,
+    add_wandb_args,
+    finish_wandb_run,
+    init_wandb_run,
+    log_job_result,
+)
 
 try:
     from parsl import python_app
@@ -35,7 +52,7 @@ class OrcaConfig(TypedDict, total=False):
 
     Attributes:
         functional: DFT functional (default: "wB97M-V").
-        simple_input: Input template (default: "omol"). Options: "omol", "omol_base", "x2c", "dk3".
+        simple_input: Input template (default: "omol"). Options: "omol", "omol_base", "x2c", "dk3", "pm3" (PM3 semiempirical, debug only -- no actinide support).
         actinide_basis: Basis set for actinides (default: "ma-def-TZVP").
         actinide_ecp: ECP for actinides (default: None).
         non_actinide_basis: Basis set for non-actinides (default: "def2-TZVPD").
@@ -98,11 +115,80 @@ DEFAULT_LD_LIBRARY_PATHS = {
     "slurm": "",
 }
 
+# Number of completed jobs to accumulate before flushing to DB.
+# Reduces per-job commits on Lustre (100-500ms each) by batching.
+_BATCH_COMMIT_SIZE = 10
+
+
+def _flush_pending_updates(
+    workflow: ArchitectorWorkflow,
+    pending: list[dict],
+) -> None:
+    """Flush accumulated job updates to the DB in a single transaction.
+
+    Each entry in *pending* is a dict with keys:
+        job_id (int), status (JobStatus),
+        error_message (str | None), increment_fail_count (bool),
+        metrics (dict | None -- keys: job_dir, max_forces, scf_steps,
+                 final_energy, wall_time, n_cores).
+
+    All updates share one BEGIN IMMEDIATE / COMMIT pair, cutting
+    commit overhead from O(N) to O(1) per batch.
+    """
+    if not pending:
+        return
+
+    for u in pending:
+        job_id = u["job_id"]
+
+        # -- status update --
+        set_clauses = [
+            "status = ?",
+            "worker_id = NULL",
+            "updated_at = CURRENT_TIMESTAMP",
+        ]
+        params: list = [u["status"].value]
+
+        if u.get("increment_fail_count"):
+            set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+
+        if u.get("error_message") is not None:
+            set_clauses.append("error_message = ?")
+            params.append(u["error_message"])
+
+        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
+        params.append(job_id)
+        workflow._execute_with_retry(query, tuple(params))
+
+        # -- metrics update (completed jobs only) --
+        metrics = u.get("metrics")
+        if metrics:
+            mcols: list[str] = []
+            mvals: list = []
+            for col in (
+                "job_dir",
+                "max_forces",
+                "scf_steps",
+                "final_energy",
+                "wall_time",
+                "n_cores",
+            ):
+                if metrics.get(col) is not None:
+                    mcols.append(f"{col} = ?")
+                    mvals.append(metrics[col])
+            if mcols:
+                mcols.append("updated_at = CURRENT_TIMESTAMP")
+                mquery = f"UPDATE structures SET {', '.join(mcols)} WHERE id = ?"
+                mvals.append(job_id)
+                workflow._execute_with_retry(mquery, tuple(mvals))
+
+    workflow._commit_with_retry()
+
 
 def prepare_job_directory(
     job_record,
     root_dir: Path,
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     orca_config: OrcaConfig | None = None,
     n_cores: int = 4,
     setup_func: Callable | None = None,
@@ -113,7 +199,8 @@ def prepare_job_directory(
     Args:
         job_record: JobRecord from the workflow database.
         root_dir: Root directory where job directories will be created.
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         orca_config: ORCA calculation configuration.
         n_cores: Number of CPU cores for ORCA.
         setup_func: Optional function to set up additional files. Called with
@@ -126,23 +213,11 @@ def prepare_job_directory(
     if job_record.job_dir:
         job_dir = Path(job_record.job_dir)
     else:
-        # Use limited, explicit placeholder replacement to avoid format string issues.
-        # Supported placeholders: {orig_index}, {id}. Any other braces are rejected.
-        pattern = job_dir_pattern
-
-        allowed_placeholders = ("{orig_index}", "{id}")
-        temp_pattern = pattern
-        for placeholder in allowed_placeholders:
-            temp_pattern = temp_pattern.replace(placeholder, "")
-        if "{" in temp_pattern or "}" in temp_pattern:
-            raise ValueError(
-                f"Unsupported placeholder or stray brace in job_dir_pattern: {job_dir_pattern!r}"
-            )
-
-        job_dir_name = pattern.replace(
-            "{orig_index}", str(job_record.orig_index)
-        ).replace("{id}", str(job_record.id))
-
+        job_dir_name = render_job_dir_pattern(
+            job_dir_pattern,
+            orig_index=job_record.orig_index,
+            job_id=job_record.id,
+        )
         job_dir = root_dir / job_dir_name
 
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -330,10 +405,12 @@ def write_slurm_job_file(
         "\n",
         "source ~/.bashrc\n",
         f"conda activate {conda_env}\n",
-        (
-            f"export LD_LIBRARY_PATH={ld_library_path}:$LD_LIBRARY_PATH\n"
-            if ld_library_path
-            else f"export LD_LIBRARY_PATH={DEFAULT_LD_LIBRARY_PATHS['slurm']}:$LD_LIBRARY_PATH\n"
+        *(
+            [
+                f"export LD_LIBRARY_PATH={ld_library_path or DEFAULT_LD_LIBRARY_PATHS['slurm']}:$LD_LIBRARY_PATH\n"
+            ]
+            if (ld_library_path or DEFAULT_LD_LIBRARY_PATHS["slurm"])
+            else []
         ),
         run_cmd,
     ]
@@ -361,7 +438,8 @@ def _filter_marker_jobs(
     Args:
         jobs: List of JobRecord objects to filter.
         root_dir: Root directory for job directories.
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         workflow: ArchitectorWorkflow instance for DB updates.
 
     Returns:
@@ -378,9 +456,11 @@ def _filter_marker_jobs(
             if marker_path.exists():
                 marker_found = True
         if not marker_found:
-            pattern = job_dir_pattern.replace(
-                "{orig_index}", str(job.orig_index)
-            ).replace("{id}", str(job.id))
+            pattern = render_job_dir_pattern(
+                job_dir_pattern,
+                orig_index=job.orig_index,
+                job_id=job.id,
+            )
             candidate = root_dir / pattern / ".do_not_rerun.json"
             if candidate.exists():
                 marker_found = True
@@ -398,6 +478,105 @@ def _filter_marker_jobs(
             error_message="Blocked by .do_not_rerun.json marker",
         )
         print(f"Skipped {len(skip_ids)} jobs due to .do_not_rerun.json marker")
+
+    return clean_jobs
+
+
+def _skip_finished_on_disk(
+    jobs: list,
+    root_dir: Path,
+    job_dir_pattern: str,
+    workflow: ArchitectorWorkflow,
+    hours_cutoff: float = 168,
+) -> list:
+    """Filter out jobs that already completed or failed on disk.
+
+    Checks each candidate job's output directory before submission. Jobs
+    found completed are auto-updated to COMPLETED in the DB. Jobs found
+    failed are auto-updated to FAILED. This prevents re-submitting jobs
+    whose results would be overwritten by prepare_job_directory().
+
+    Uses the same dual-lookup pattern as _filter_marker_jobs: tries
+    job.job_dir first, then falls back to constructing the path from
+    job_dir_pattern.
+
+    Args:
+        jobs: List of JobRecord objects to filter.
+        root_dir: Root directory for job directories.
+        job_dir_pattern: Pattern for job directory names.
+        workflow: ArchitectorWorkflow instance for DB updates.
+        hours_cutoff: Hours threshold for timeout detection in
+            check_job_termination. Defaults to 168 (1 week) to avoid
+            false timeout classifications on idle directories.
+
+    Returns:
+        Filtered list of jobs (without completed/failed ones).
+    """
+    completed_ids: list[int] = []
+    failed_ids: list[int] = []
+    failed_errors: dict[int, str] = {}
+    clean_jobs = []
+
+    for job in jobs:
+        # Resolve directory: try DB job_dir first, then pattern-based path
+        job_dir = None
+        if job.job_dir and Path(job.job_dir).is_dir():
+            job_dir = job.job_dir
+        else:
+            pattern = render_job_dir_pattern(
+                job_dir_pattern,
+                orig_index=job.orig_index,
+                job_id=job.id,
+            )
+            candidate = root_dir / pattern
+            if candidate.is_dir():
+                job_dir = str(candidate)
+
+        if not job_dir:
+            clean_jobs.append(job)
+            continue
+
+        status = check_job_termination(job_dir, hours_cutoff=hours_cutoff)
+
+        if status == 1:
+            completed_ids.append(job.id)
+        elif status == -1:
+            failed_ids.append(job.id)
+            try:
+                log_file = pull_log_file(job_dir)
+                reason = parse_failure_reason(log_file)
+                if reason:
+                    failed_errors[job.id] = reason
+            except (FileNotFoundError, OSError):
+                pass
+        else:
+            # 0 (running/unknown) or -2 (timeout): submit normally
+            clean_jobs.append(job)
+
+    # Batch DB updates
+    if completed_ids:
+        workflow.update_status_bulk(completed_ids, JobStatus.COMPLETED)
+        print(
+            f"Skipped {len(completed_ids)} jobs already completed on disk "
+            "(updated DB to COMPLETED)"
+        )
+
+    if failed_ids:
+        # Failed jobs need per-job error messages for the ones we extracted
+        for jid in failed_ids:
+            error_msg = failed_errors.get(
+                jid, "Failed on disk (detected at submission)"
+            )
+            workflow.update_status(
+                jid,
+                JobStatus.FAILED,
+                error_message=error_msg,
+                increment_fail_count=True,
+            )
+        print(
+            f"Skipped {len(failed_ids)} jobs already failed on disk "
+            "(updated DB to FAILED)"
+        )
 
     return clean_jobs
 
@@ -420,9 +599,7 @@ def filter_jobs_for_submission(
     """
     # Get ready jobs (DB is source of truth)
     # include_geometry=True so prepare_job_directory can write the .inp file
-    ready_jobs = workflow.get_jobs_by_status(
-        [JobStatus.TO_RUN, JobStatus.READY], include_geometry=True
-    )
+    ready_jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN, include_geometry=True)
 
     # Apply fail_count filter if specified
     if max_fail_count is not None:
@@ -530,6 +707,20 @@ if PARSL_AVAILABLE:
         # uses /dev/shm files whose names can collide.
         env["OMPI_MCA_btl"] = "self,tcp"
 
+        # Restrict ORCA's mpirun to the local node only.  In multi-node
+        # SLURM blocks, mpirun would otherwise read the SLURM hostfile and
+        # place processes on neighboring nodes where different ORCA instances
+        # are running -- silently corrupting results.  These env vars are
+        # set unconditionally: harmless on single-node / Flux, protective
+        # on multi-node SLURM.
+        # DO NOT REMOVE -- see docs/plans/2026-03-16-feat-multi-node-slurm-parsl-support-plan.md
+        import socket
+
+        local_hostname = os.environ.get("SLURMD_NODENAME", socket.gethostname())
+        env["OMPI_MCA_orte_default_hostfile"] = "/dev/null"
+        env["SLURM_NODELIST"] = local_hostname
+        env["SLURM_NNODES"] = "1"
+
         start_time = time.time()
 
         proc = None
@@ -589,6 +780,37 @@ if PARSL_AVAILABLE:
                             "error": "Sella status file not found after process exit",
                             "wall_time": elapsed,
                         }
+                else:
+                    # ORCA can exit 0 even when an MPI child process
+                    # (e.g. orca_leanscf_mpi) fails with "aborting the
+                    # run".  Verify the output file actually shows normal
+                    # termination before trusting the return code.
+                    from collections import deque
+
+                    out_path = job_dir_path / "orca.out"
+                    if out_path.exists():
+                        try:
+                            with open(out_path, errors="replace") as fh:
+                                tail = deque(fh, maxlen=10)
+                            has_normal = any(
+                                "ORCA TERMINATED NORMALLY" in ln for ln in tail
+                            )
+                            has_abort = any(
+                                "aborting the run" in ln or "Error" in ln for ln in tail
+                            )
+                            if not has_normal and has_abort:
+                                err_tail = "".join(tail).strip()[-300:]
+                                return {
+                                    "job_id": job_id,
+                                    "status": "failed",
+                                    "error": (
+                                        "ORCA exited 0 but output shows "
+                                        f"error: {err_tail}"
+                                    ),
+                                    "wall_time": elapsed,
+                                }
+                        except OSError:
+                            pass  # Fall through to completed
 
                 return {
                     "job_id": job_id,
@@ -629,12 +851,134 @@ if PARSL_AVAILABLE:
             pass
 
 
+def _build_parsl_run_dir() -> str:
+    """Create a unique Parsl run directory under ``runinfo/``."""
+    return f"runinfo/run_{os.getpid()}_{int(time.time())}"
+
+
+def _get_parsl_runtime_address() -> str:
+    """Resolve a runtime-reachable address for Parsl workers."""
+    from parsl.addresses import address_by_hostname
+
+    try:
+        return address_by_hostname()
+    except OSError:
+        # Fallback for environments where hostname is not resolvable (e.g. local dev)
+        return "127.0.0.1"
+
+
+def _get_monitoring_hub_class():
+    """Import MonitoringHub across Parsl versions."""
+    try:
+        from parsl.monitoring.monitoring import MonitoringHub
+    except ImportError:
+        from parsl.monitoring import MonitoringHub
+
+    return MonitoringHub
+
+
+def _build_parsl_monitoring(run_dir: str, hub_address: str):
+    """Create a MonitoringHub that writes to a per-run monitoring database."""
+    MonitoringHub = _get_monitoring_hub_class()
+
+    resolved_run_dir = Path(run_dir).resolve()
+    resolved_run_dir.mkdir(parents=True, exist_ok=True)
+
+    monitoring_db = resolved_run_dir / "monitoring.db"
+    kwargs = {
+        "hub_address": hub_address,
+        "monitoring_debug": False,
+        "resource_monitoring_interval": 10,
+        "logging_endpoint": f"sqlite:///{monitoring_db}",
+    }
+
+    # Older Parsl releases accept logdir explicitly; newer ones infer it
+    # via MonitoringHub.start(dfk_run_dir, config_run_dir) and reject the arg.
+    if "logdir" in inspect.signature(MonitoringHub).parameters:
+        kwargs["logdir"] = str(resolved_run_dir)
+
+    return MonitoringHub(
+        **kwargs,
+    )
+
+
+def _build_parsl_worker_init(
+    scheduler: str,
+    conda_env: str,
+    conda_base: str,
+    ld_library_path: str | None = None,
+    orca_path: str | None = None,
+    mpirun_path: str | None = None,
+) -> str:
+    """Build worker initialization commands for Parsl-launched workers."""
+    ld_lib = ld_library_path
+    if ld_lib is None:
+        if scheduler == "flux":
+            ld_lib = DEFAULT_LD_LIBRARY_PATHS.get("flux", "")
+        elif scheduler in {"slurm", "pbspro"}:
+            ld_lib = f"{conda_base}/envs/{conda_env}/lib"
+        else:
+            raise ValueError(f"Unknown scheduler: {scheduler!r}")
+
+    orca_bin_dir = (
+        os.path.dirname(orca_path) if orca_path and os.path.isabs(orca_path) else None
+    )
+    resolved_mpirun = mpirun_path or shutil.which("mpirun")
+    mpirun_bin_dir = (
+        os.path.dirname(resolved_mpirun)
+        if resolved_mpirun and os.path.isabs(resolved_mpirun)
+        else None
+    )
+    path_entries = [
+        entry for entry in [mpirun_bin_dir, orca_bin_dir] if entry is not None
+    ]
+    path_entries = list(dict.fromkeys(path_entries))
+    path_line = f"export PATH={':'.join(path_entries)}:$PATH\n" if path_entries else ""
+    ld_line = f"export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH\n" if ld_lib else ""
+
+    return (
+        "source ~/.bashrc\n"
+        f"conda activate {conda_env}\n"
+        f"{path_line}"
+        f"{ld_line}"
+        "export JAX_PLATFORMS=cpu\n"
+        "export OMP_NUM_THREADS=1\n"
+    )
+
+
+def _build_parsl_htex_launch_cmd(python_executable: str | None = None) -> str:
+    """Build an HTEX manager launch command using an absolute Python path.
+
+    Parsl's default HTEX launch command relies on the ``process_worker_pool.py``
+    console script being present on ``PATH``. That is brittle for OpenPBS
+    fanout via ``pbsdsh``, where child tasks may not inherit the full activated
+    PATH from the parent shell. Launching via ``python -m ...`` against the
+    coordinator's active interpreter is more robust.
+
+    The installed Parsl version is treated as the source of truth for launch
+    string placeholders. That avoids hard-coding parameter names such as
+    ``task_port`` that vary across Parsl releases.
+    """
+    from parsl.executors.high_throughput.executor import DEFAULT_LAUNCH_CMD
+
+    python_cmd = shlex.quote(python_executable or sys.executable)
+    entrypoint = f"{python_cmd} -m parsl.executors.high_throughput.process_worker_pool"
+
+    if "process_worker_pool.py" in DEFAULT_LAUNCH_CMD:
+        return DEFAULT_LAUNCH_CMD.replace("process_worker_pool.py", entrypoint, 1)
+
+    return f"{entrypoint} {DEFAULT_LAUNCH_CMD}"
+
+
 def build_parsl_config_flux(
     max_workers: int = 4,
     cores_per_worker: int = 16,
     conda_env: str = "py10mpi",
     conda_base: str = "/usr/WS1/vargas58/miniconda3",
     ld_library_path: str | None = None,
+    orca_path: str | None = None,
+    mpirun_path: str | None = None,
+    enable_monitoring: bool = True,
 ):
     """Build Parsl Config for Flux single-node execution.
 
@@ -642,14 +986,23 @@ def build_parsl_config_flux(
     This configuration runs all workers on the local node.
 
     Args:
-        max_workers: Maximum number of concurrent workers
-        cores_per_worker: CPU cores per worker
-        conda_env: Conda environment name
-        conda_base: Conda base path
-        ld_library_path: Override LD_LIBRARY_PATH
+        max_workers: Maximum number of concurrent workers.
+        cores_per_worker: CPU cores per worker.
+        conda_env: Conda environment name.
+        conda_base: Conda base path.
+        ld_library_path: Override LD_LIBRARY_PATH.
+        orca_path: Absolute path to ORCA executable. When provided and
+            absolute, its parent directory is prepended to PATH on worker
+            processes so that ORCA's bundled MPI helpers are found before
+            any conda-provided mpirun.
+        mpirun_path: Absolute path to the desired mpirun executable. When
+            provided, its parent directory is prepended to PATH on worker
+            processes ahead of the ORCA bin directory.
+        enable_monitoring: If True, attach a MonitoringHub that writes
+            resource usage to monitoring.db under the run directory.
 
     Returns:
-        Parsl Config object
+        Parsl Config object.
     """
     if not PARSL_AVAILABLE:
         raise ImportError(
@@ -660,15 +1013,15 @@ def build_parsl_config_flux(
     from parsl.executors import HighThroughputExecutor
     from parsl.providers import LocalProvider
 
-    # Worker initialization commands
-    ld_lib = ld_library_path or DEFAULT_LD_LIBRARY_PATHS.get("flux", "")
-    worker_init = f"""
-        source ~/.bashrc
-        conda activate {conda_env}
-        export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH
-        export OMP_NUM_THREADS=1
-        export JAX_PLATFORMS=cpu
-    """
+    runtime_address = _get_parsl_runtime_address()
+    worker_init = _build_parsl_worker_init(
+        scheduler="flux",
+        conda_env=conda_env,
+        conda_base=conda_base,
+        ld_library_path=ld_library_path,
+        orca_path=orca_path,
+        mpirun_path=mpirun_path,
+    )
 
     provider = LocalProvider(
         worker_init=worker_init,
@@ -676,18 +1029,28 @@ def build_parsl_config_flux(
 
     executor = HighThroughputExecutor(
         label="flux_htex",
+        address=runtime_address,
         cores_per_worker=cores_per_worker,
         max_workers_per_node=max_workers,
         cpu_affinity="block",
         provider=provider,
     )
 
-    return Config(executors=[executor])
+    run_dir = _build_parsl_run_dir()
+    monitoring = (
+        _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+        if enable_monitoring
+        else None
+    )
+
+    return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
 
 
 def build_parsl_config_slurm(
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    cpus_per_node: int | None = None,
+    nodes_per_block: int = 1,
     max_blocks: int = 10,
     init_blocks: int = 2,
     min_blocks: int = 1,
@@ -697,27 +1060,54 @@ def build_parsl_config_slurm(
     conda_env: str = "py10mpi",
     conda_base: str = "/usr/WS1/vargas58/miniconda3",
     ld_library_path: str | None = None,
+    orca_path: str | None = None,
+    mpirun_path: str | None = None,
+    enable_monitoring: bool = True,
 ):
     """Build Parsl Config for SLURM multi-node execution.
 
     Uses SlurmProvider to auto-provision worker nodes via SLURM.
-    Each node runs multiple ORCA workers concurrently.
+    Each block is a SLURM job with ``nodes_per_block`` nodes, and each
+    node runs ``max_workers`` ORCA workers concurrently.
+
+    When ``nodes_per_block > 1``, SrunLauncher is used so that Parsl
+    distributes worker managers across all nodes in the block.  When
+    ``nodes_per_block == 1`` (default), SimpleLauncher is used for
+    backwards compatibility.
 
     Args:
         max_workers: Maximum concurrent workers per node.
         cores_per_worker: CPU cores per worker (must match ORCA nprocs).
-        max_blocks: Maximum number of SLURM nodes to provision.
-        init_blocks: Number of nodes to request at startup.
-        min_blocks: Minimum number of nodes to keep alive.
-        walltime_hours: Walltime per node allocation in hours.
+        cpus_per_node: Scheduler CPU cores requested per node. When omitted,
+            defaults to ``max_workers * cores_per_worker`` for the
+            single-node path. For multi-node Slurm, exclusive allocations
+            already reserve whole nodes; when this is set explicitly, an
+            ``--ntasks-per-node`` request is added to the batch allocation.
+        nodes_per_block: Nodes per SLURM block. >1 enables multi-node
+            blocks with SrunLauncher.  Total capacity is
+            ``max_blocks * nodes_per_block * max_workers``.
+        max_blocks: Maximum number of SLURM blocks to provision.
+        init_blocks: Number of blocks to request at startup.
+        min_blocks: Minimum number of blocks to keep alive.
+        walltime_hours: Walltime per block allocation in hours.
         qos: SLURM QOS.
         account: SLURM account/allocation.
         conda_env: Conda environment name.
         conda_base: Conda base path.
         ld_library_path: Override LD_LIBRARY_PATH.
+        orca_path: Absolute path to ORCA executable. When provided and
+            absolute, its parent directory is prepended to PATH on worker
+            nodes so that ORCA's bundled MPI helpers are found before any
+            conda-provided mpirun (prevents intermittent MPI bootstrap
+            failures on SLURM systems).
+        mpirun_path: Absolute path to the desired mpirun executable. When
+            provided, its parent directory is prepended to PATH on worker
+            nodes ahead of the ORCA bin directory.
+        enable_monitoring: If True, attach a MonitoringHub that writes
+            resource usage to monitoring.db under the run directory.
 
     Returns:
-        Parsl Config object
+        Parsl Config object.
     """
     if not PARSL_AVAILABLE:
         raise ImportError(
@@ -726,27 +1116,57 @@ def build_parsl_config_slurm(
 
     from parsl.config import Config
     from parsl.executors import HighThroughputExecutor
-    from parsl.launchers import SimpleLauncher
     from parsl.providers import SlurmProvider
 
-    ld_lib = ld_library_path or f"{conda_base}/envs/{conda_env}/lib"
-    worker_init = (
-        f"source ~/.bashrc\n"
-        f"conda activate {conda_env}\n"
-        f"export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH\n"
-        f"export JAX_PLATFORMS=cpu\n"
-        f"export OMP_NUM_THREADS=1\n"
+    runtime_address = _get_parsl_runtime_address()
+    worker_init = _build_parsl_worker_init(
+        scheduler="slurm",
+        conda_env=conda_env,
+        conda_base=conda_base,
+        ld_library_path=ld_library_path,
+        orca_path=orca_path,
+        mpirun_path=mpirun_path,
     )
 
-    ntasks = cores_per_worker * max_workers
-    scheduler_options = (
-        f"#SBATCH --ntasks-per-node={ntasks}\n" f"#SBATCH --cpus-per-task=1\n"
-    )
+    active_cores_per_node = max_workers * cores_per_worker
+    requested_cpus_per_node = cpus_per_node or active_cores_per_node
+    if requested_cpus_per_node < active_cores_per_node:
+        raise ValueError(
+            "cpus_per_node must be >= max_workers * cores_per_worker "
+            f"({active_cores_per_node})"
+        )
+
+    # Launcher and scheduler_options differ for single-node vs multi-node.
+    if nodes_per_block > 1:
+        from parsl.launchers import SrunLauncher
+
+        # SrunLauncher: srun starts 1 Parsl worker manager per node.
+        # The worker manager forks max_workers processes internally.
+        launcher = SrunLauncher()
+        # exclusive=True reserves whole nodes by default. When an explicit
+        # CPU-per-node override is requested, add a matching ntasks-per-node
+        # request to the batch allocation while keeping the srun launcher.
+        if cpus_per_node is not None:
+            scheduler_options = (
+                f"#SBATCH --ntasks-per-node={requested_cpus_per_node}\n"
+                f"#SBATCH --cpus-per-task=1\n"
+            )
+        else:
+            scheduler_options = ""
+    else:
+        from parsl.launchers import SimpleLauncher
+
+        # SimpleLauncher: no srun, specify total tasks per node directly.
+        launcher = SimpleLauncher()
+        scheduler_options = (
+            f"#SBATCH --ntasks-per-node={requested_cpus_per_node}\n"
+            f"#SBATCH --cpus-per-task=1\n"
+        )
 
     provider = SlurmProvider(
         qos=qos,
         account=account,
-        nodes_per_block=1,
+        nodes_per_block=nodes_per_block,
         init_blocks=init_blocks,
         min_blocks=min_blocks,
         max_blocks=max_blocks,
@@ -754,18 +1174,163 @@ def build_parsl_config_slurm(
         worker_init=worker_init,
         scheduler_options=scheduler_options,
         exclusive=True,
-        launcher=SimpleLauncher(),  # Not SrunLauncher — ORCA uses internal mpirun
+        launcher=launcher,
         parallelism=1.0,
     )
 
     executor = HighThroughputExecutor(
         label="slurm_htex",
+        address=runtime_address,
         cores_per_worker=cores_per_worker,
         max_workers_per_node=max_workers,
+        cpu_affinity="block",
         provider=provider,
     )
 
-    return Config(executors=[executor])
+    run_dir = _build_parsl_run_dir()
+    monitoring = (
+        _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+        if enable_monitoring
+        else None
+    )
+
+    return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
+
+
+def build_parsl_config_pbspro(
+    max_workers: int = 4,
+    cores_per_worker: int = 16,
+    cpus_per_node: int | None = None,
+    nodes_per_block: int = 1,
+    max_blocks: int = 10,
+    init_blocks: int = 2,
+    min_blocks: int = 1,
+    walltime_hours: int = 2,
+    queue: str = "pbatch",
+    account: str = "ODEFN5169CYFZ",
+    conda_env: str = "py10mpi",
+    conda_base: str = "/usr/WS1/vargas58/miniconda3",
+    ld_library_path: str | None = None,
+    orca_path: str | None = None,
+    mpirun_path: str | None = None,
+    enable_monitoring: bool = True,
+):
+    """Build Parsl Config for PBS Pro / OpenPBS multi-node execution.
+
+    Uses PBSProProvider to auto-provision worker nodes via PBS Pro/OpenPBS.
+    Each block is a PBS job with ``nodes_per_block`` nodes, and each
+    node runs ``max_workers`` ORCA workers concurrently.
+
+    By default, the per-node PBS resource request is derived from the worker
+    layout: ``ncpus = max_workers * cores_per_worker`` and
+    ``select_options = "mpiprocs=<ncpus>"``. ``cpus_per_node`` can be set
+    larger than that derived value to reserve a full node while intentionally
+    leaving some cores idle for memory headroom.
+
+    Args:
+        max_workers: Maximum concurrent workers per node.
+        cores_per_worker: CPU cores per worker (must match ORCA nprocs).
+        cpus_per_node: Scheduler CPU cores reserved per node. When omitted,
+            defaults to ``max_workers * cores_per_worker``.
+        nodes_per_block: Nodes per PBS block.
+        max_blocks: Maximum number of PBS blocks to provision.
+        init_blocks: Number of blocks to request at startup.
+        min_blocks: Minimum blocks to keep alive.
+        walltime_hours: Walltime per block allocation in hours.
+        queue: PBS queue.
+        account: PBS account/allocation.
+        conda_env: Conda environment name.
+        conda_base: Conda base path.
+        ld_library_path: Override LD_LIBRARY_PATH.
+        orca_path: Absolute path to ORCA executable. When provided and
+            absolute, its parent directory is prepended to PATH on worker
+            nodes so that ORCA's bundled MPI helpers are found before any
+            conda-provided mpirun.
+        mpirun_path: Absolute path to the desired mpirun executable. When
+            provided, its parent directory is prepended to PATH on worker
+            nodes ahead of the ORCA bin directory.
+        enable_monitoring: If True, attach a MonitoringHub that writes
+            resource usage to monitoring.db under the run directory.
+
+    Returns:
+        Parsl Config object.
+    """
+    if not PARSL_AVAILABLE:
+        raise ImportError(
+            "Parsl is not installed. Please install with: pip install 'parsl>=2024.1'"
+        )
+
+    from parsl.config import Config
+    from parsl.executors import HighThroughputExecutor
+    from parsl.providers import PBSProProvider
+
+    runtime_address = _get_parsl_runtime_address()
+    worker_init = _build_parsl_worker_init(
+        scheduler="pbspro",
+        conda_env=conda_env,
+        conda_base=conda_base,
+        ld_library_path=ld_library_path,
+        orca_path=orca_path,
+        mpirun_path=mpirun_path,
+    )
+
+    # Validate before any side-effectful construction (matches SLURM builder order).
+    active_cores_per_node = max_workers * cores_per_worker
+    requested_cpus_per_node = cpus_per_node or active_cores_per_node
+    if requested_cpus_per_node < active_cores_per_node:
+        raise ValueError(
+            "cpus_per_node must be >= max_workers * cores_per_worker "
+            f"({active_cores_per_node})"
+        )
+
+    # run_dir is built before the launcher because PbsdshLauncher needs a
+    # filesystem path for its per-node helper scripts.
+    run_dir = _build_parsl_run_dir()
+
+    if nodes_per_block > 1:
+        from .parsl_launchers import PbsdshLauncher
+
+        launcher = PbsdshLauncher(Path(run_dir) / "pbsdsh_helpers")
+    else:
+        from parsl.launchers import SimpleLauncher
+
+        launcher = SimpleLauncher()
+
+    # Note: PBSProProvider has no 'exclusive' keyword (unlike SlurmProvider).
+    # Whole-node exclusivity is achieved via the select statement:
+    # select=N:ncpus=<requested_cpus_per_node>:mpiprocs=<requested_cpus_per_node>.
+    provider = PBSProProvider(
+        queue=queue,
+        account=account,
+        nodes_per_block=nodes_per_block,
+        cpus_per_node=requested_cpus_per_node,
+        select_options=f"mpiprocs={requested_cpus_per_node}",
+        init_blocks=init_blocks,
+        min_blocks=min_blocks,
+        max_blocks=max_blocks,
+        walltime=f"{walltime_hours:02d}:00:00",
+        worker_init=worker_init,
+        launcher=launcher,
+        parallelism=1.0,
+    )
+
+    executor = HighThroughputExecutor(
+        label="pbspro_htex",
+        address=runtime_address,
+        launch_cmd=_build_parsl_htex_launch_cmd(),
+        cores_per_worker=cores_per_worker,
+        max_workers_per_node=max_workers,
+        cpu_affinity="block",
+        provider=provider,
+    )
+
+    monitoring = (
+        _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+        if enable_monitoring
+        else None
+    )
+
+    return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
 
 
 def submit_batch_parsl(
@@ -774,24 +1339,30 @@ def submit_batch_parsl(
     num_jobs: int,
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    cpus_per_node: int | None = None,
     scheduler: str = "flux",
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     orca_config: OrcaConfig | None = None,
     setup_func: Callable | None = None,
     n_cores: int = 16,
     conda_env: str = "py10mpi",
     conda_base: str = "/usr/WS1/vargas58/miniconda3",
     ld_library_path: str | None = None,
+    mpirun_path: str | None = None,
     dry_run: bool = False,
     max_fail_count: int | None = None,
     timeout_seconds: int = 72000,
     randomize: bool = True,
+    nodes_per_block: int = 1,
     max_blocks: int = 10,
     init_blocks: int = 2,
     min_blocks: int = 1,
     walltime_hours: int = 2,
+    queue: str = "pbatch",
     qos: str = "frontier",
     account: str = "ODEFN5169CYFZ",
+    enable_monitoring: bool = True,
+    wandb_run: Any | None = None,
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -801,9 +1372,14 @@ def submit_batch_parsl(
         num_jobs: Total number of jobs to submit
         max_workers: Maximum number of concurrent workers
         cores_per_worker: CPU cores per worker
+        cpus_per_node: Scheduler CPU cores reserved/requested per node. When
+            omitted, defaults to ``max_workers * cores_per_worker`` where the
+            scheduler-specific builder needs an explicit per-node CPU shape.
         scheduler: Parsl provider backend ("flux" for LocalProvider,
-            "slurm" for SlurmProvider multi-node).
-        job_dir_pattern: Pattern for job directory names
+            "slurm" for SlurmProvider multi-node, "pbspro" for
+            PBSProProvider multi-node).
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         orca_config: ORCA configuration
         setup_func: Optional setup function per job
         n_cores: Cores per ORCA job
@@ -814,12 +1390,20 @@ def submit_batch_parsl(
         max_fail_count: Skip jobs with fail_count >= this value
         timeout_seconds: Job timeout in seconds (default: 72000 = 20 hours)
         randomize: Randomize job selection order (default: True)
-        max_blocks: (SLURM) Maximum SLURM nodes to provision.
-        init_blocks: (SLURM) Nodes to request at startup.
-        min_blocks: (SLURM) Minimum nodes to keep alive.
-        walltime_hours: (SLURM) Walltime per node allocation in hours.
+        nodes_per_block: Nodes per scheduler block for scale-out Parsl.
+        max_blocks: Maximum scheduler blocks to provision.
+        init_blocks: Blocks to request at startup.
+        min_blocks: Minimum blocks to keep alive.
+        walltime_hours: Walltime per block allocation in hours.
+        queue: Queue/partition name for supported schedulers.
         qos: (SLURM) SLURM QOS.
         account: (SLURM) SLURM account/allocation.
+        enable_monitoring: If True, attach Parsl MonitoringHub (writes
+            monitoring.db). Disable on systems where the monitoring hub
+            port or SQLAlchemy dependency causes issues.
+        wandb_run: Optional W&B run object from ``init_wandb_run()``. When
+            provided, each job completion/failure/timeout is logged in
+            real-time. Pass ``None`` (default) to disable W&B logging.
 
     Returns:
         List of submitted job IDs
@@ -830,6 +1414,7 @@ def submit_batch_parsl(
         )
         return []
 
+    import signal
     from concurrent.futures import as_completed
 
     import parsl
@@ -875,17 +1460,41 @@ def submit_batch_parsl(
         print("No jobs available after marker filtering")
         return []
 
+    # Filter out jobs that already completed or failed on disk
+    jobs_to_submit = _skip_finished_on_disk(
+        jobs_to_submit, root_dir, job_dir_pattern, workflow
+    )
+
+    if not jobs_to_submit:
+        print("No jobs available after disk check")
+        return []
+
+    # Detect scheduler job ID early so it can be set atomically with the
+    # RUNNING status claim (avoids a window where jobs are RUNNING but have
+    # no worker_id, which would make them invisible to --recover-orphans).
+    _scheduler_job_id = (
+        os.environ.get("SLURM_JOB_ID")
+        or os.environ.get("FLUX_JOB_ID")
+        or f"pid_{os.getpid()}"
+    )
+
     # Claim jobs atomically BEFORE slow directory preparation to prevent
     # concurrent submitters from grabbing the same jobs (TOCTOU fix).
+    # Sets worker_id in the same UPDATE/commit for crash traceability.
     submitted_ids = [j.id for j in jobs_to_submit]
     if not dry_run:
-        workflow.mark_jobs_as_running(submitted_ids)
-        print(f"Claimed {len(submitted_ids)} jobs as RUNNING in database")
+        workflow.mark_jobs_as_running(submitted_ids, worker_id=_scheduler_job_id)
+        print(
+            f"Claimed {len(submitted_ids)} jobs as RUNNING "
+            f"(worker_id={_scheduler_job_id})"
+        )
 
     print(f"\nPreparing {len(jobs_to_submit)} jobs for Parsl submission...")
 
-    # Prepare job directories, tracking any failures
+    # Prepare job directories, tracking any failures.
+    # Collect job_dir updates to batch-commit once (avoids per-job lock contention).
     failed_prep_ids: list[int] = []
+    job_dir_updates: list[dict] = []
     print("Setting up job directories...")
     for i, job in enumerate(jobs_to_submit, 1):
         try:
@@ -897,21 +1506,29 @@ def submit_batch_parsl(
                 n_cores=n_cores,
                 setup_func=setup_func,
             )
+            # Collect for batch commit instead of per-job commit
+            if not dry_run:
+                job_dir_updates.append({"job_id": job.id, "job_dir": str(job_dir)})
             print(f"  [{i}/{len(jobs_to_submit)}] Prepared {job_dir}")
         except Exception as e:
             print(f"  [{i}/{len(jobs_to_submit)}] FAILED to prepare job {job.id}: {e}")
             failed_prep_ids.append(job.id)
 
-    # Reset any jobs that failed during preparation back to READY
+    # Batch-commit all job_dir updates in a single transaction
+    if job_dir_updates:
+        workflow.update_job_metrics_bulk(job_dir_updates)
+        print(f"Persisted {len(job_dir_updates)} job directories in one transaction")
+
+    # Reset any jobs that failed during preparation back to TO_RUN
     if failed_prep_ids:
         for jid in failed_prep_ids:
             try:
-                workflow.update_status(jid, JobStatus.READY)
+                workflow.update_status(jid, JobStatus.TO_RUN)
             except Exception:
                 pass
         jobs_to_submit = [j for j in jobs_to_submit if j.id not in set(failed_prep_ids)]
         submitted_ids = [j.id for j in jobs_to_submit]
-        print(f"Reset {len(failed_prep_ids)} jobs back to READY due to prep failure")
+        print(f"Reset {len(failed_prep_ids)} jobs back to TO_RUN due to prep failure")
 
     if dry_run:
         print("\n[DRY RUN] Would submit to Parsl executor")
@@ -921,12 +1538,33 @@ def submit_batch_parsl(
 
     # Build Parsl configuration
     if scheduler.lower() == "slurm":
+        total_nodes = max_blocks * nodes_per_block
+        total_workers = total_nodes * max_workers
         print(
-            f"\nBuilding Parsl config (SLURM multi-node, up to {max_blocks} nodes)..."
+            f"\nParsl SLURM config: {max_blocks} blocks x {nodes_per_block} "
+            f"nodes/block x {max_workers} workers/node "
+            f"= {total_workers} max concurrent jobs"
         )
+        requested_cpus = cpus_per_node or (max_workers * cores_per_worker)
+        if cpus_per_node is not None:
+            print(
+                f"Each SLURM node requests {requested_cpus} scheduler cores, "
+                f"active worker cores per node: {max_workers * cores_per_worker}, "
+                f"each worker: {cores_per_worker} cores, "
+                f"job timeout: {timeout_seconds}s"
+            )
+        else:
+            print(
+                f"Each SLURM node uses exclusive allocation, "
+                f"active worker cores per node: {max_workers * cores_per_worker}, "
+                f"each worker: {cores_per_worker} cores, "
+                f"job timeout: {timeout_seconds}s"
+            )
         parsl_config = build_parsl_config_slurm(
             max_workers=max_workers,
             cores_per_worker=cores_per_worker,
+            cpus_per_node=cpus_per_node,
+            nodes_per_block=nodes_per_block,
             max_blocks=max_blocks,
             init_blocks=init_blocks,
             min_blocks=min_blocks,
@@ -936,6 +1574,41 @@ def submit_batch_parsl(
             conda_env=conda_env,
             conda_base=conda_base,
             ld_library_path=ld_library_path,
+            orca_path=config.get("orca_path"),
+            mpirun_path=mpirun_path,
+            enable_monitoring=enable_monitoring,
+        )
+    elif scheduler.lower() == "pbspro":
+        total_nodes = max_blocks * nodes_per_block
+        total_workers = total_nodes * max_workers
+        print(
+            f"\nParsl PBS Pro config: {max_blocks} blocks x {nodes_per_block} "
+            f"nodes/block x {max_workers} workers/node "
+            f"= {total_workers} max concurrent jobs"
+        )
+        print(
+            f"Each PBS node reserves {cpus_per_node or (max_workers * cores_per_worker)} "
+            f"ncpus/mpiprocs, active worker cores per node: {max_workers * cores_per_worker}, "
+            f"each worker: {cores_per_worker} cores, "
+            f"job timeout: {timeout_seconds}s"
+        )
+        parsl_config = build_parsl_config_pbspro(
+            max_workers=max_workers,
+            cores_per_worker=cores_per_worker,
+            cpus_per_node=cpus_per_node,
+            nodes_per_block=nodes_per_block,
+            max_blocks=max_blocks,
+            init_blocks=init_blocks,
+            min_blocks=min_blocks,
+            walltime_hours=walltime_hours,
+            queue=queue,
+            account=account,
+            conda_env=conda_env,
+            conda_base=conda_base,
+            ld_library_path=ld_library_path,
+            orca_path=config.get("orca_path"),
+            mpirun_path=mpirun_path,
+            enable_monitoring=enable_monitoring,
         )
     else:
         print("\nBuilding Parsl config (Flux single-node)...")
@@ -945,6 +1618,9 @@ def submit_batch_parsl(
             conda_env=conda_env,
             conda_base=conda_base,
             ld_library_path=ld_library_path,
+            orca_path=config.get("orca_path"),
+            mpirun_path=mpirun_path,
+            enable_monitoring=enable_monitoring,
         )
 
     # Initialize Parsl
@@ -955,23 +1631,68 @@ def submit_batch_parsl(
     except Exception as e:
         print(f"Failed to initialize Parsl: {e}")
         print("Check your conda environment and ORCA installation")
-        # Reset claimed jobs back to READY since we can't run them
-        for jid in submitted_ids:
-            try:
-                workflow.update_status(jid, JobStatus.READY)
-            except Exception:
-                pass
-        print(f"Reset {len(submitted_ids)} claimed jobs back to READY")
+        # Reset claimed jobs back to TO_RUN since we can't run them
+        workflow.update_status_bulk(submitted_ids, JobStatus.TO_RUN, worker_id=None)
+        print(f"Reset {len(submitted_ids)} claimed jobs back to TO_RUN")
         return []
+
+    # --- SIGTERM handler (register AFTER parsl.load to avoid Parsl overwriting) ---
+    # When the scheduler cancels an allocation (scancel / flux cancel), it
+    # sends SIGTERM to our process.  Workers die immediately, so no futures
+    # will ever complete -- as_completed() blocks forever.  A flag-only
+    # handler would never be checked and the finally block (which resets
+    # orphaned jobs) would never run before SIGKILL arrives.
+    #
+    # Fix: after setting the flag, raise KeyboardInterrupt.  This interrupts
+    # as_completed(), is caught by the existing `except KeyboardInterrupt`
+    # handler, and falls through to the finally block which bulk-resets all
+    # in-flight jobs to TO_RUN.  SQLite transactions are atomic, so an
+    # interrupted commit simply rolls back -- at most one job's status update
+    # is lost (and the finally block will correct it).
+    _shutdown_requested = False
+    _original_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _sigterm_handler(signum, frame):
+        nonlocal _shutdown_requested
+        _shutdown_requested = True
+        # Restore original handler so a second SIGTERM during cleanup
+        # does not raise another KeyboardInterrupt mid-finally.
+        signal.signal(signal.SIGTERM, _original_sigterm)
+        try:
+            sys.stderr.write(
+                "\nSIGTERM received -- shutting down and resetting "
+                "in-flight jobs...\n"
+            )
+        except Exception:
+            pass  # Best-effort notification; flag is already set
+        # Break out of as_completed() so the finally block can reset orphans
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    # Check if SIGTERM arrived during Parsl setup (before handler was installed,
+    # the default handler may have set a pending signal that fires now).
+    if _shutdown_requested:
+        print("Shutdown requested during setup -- skipping submission")
+        # Falls through to the finally block which resets orphans
+        signal.signal(signal.SIGTERM, _original_sigterm)
+        workflow.update_status_bulk(submitted_ids, JobStatus.TO_RUN, worker_id=None)
+        print(f"Reset {len(submitted_ids)} jobs back to TO_RUN")
+        return submitted_ids
 
     # Submit futures
     print(f"\nSubmitting {len(jobs_to_submit)} jobs to Parsl...")
     futures = []
+    task_map_path = Path(parsl_config.run_dir).resolve() / "parsl_task_map.tsv"
+    task_map_rows = ["task_id\tjob_id\tjob_dir\n"]
+    print(f"Recording Parsl task mapping to {task_map_path}")
 
     for job in jobs_to_submit:
-        job_dir_name = job_dir_pattern.replace(
-            "{orig_index}", str(job.orig_index)
-        ).replace("{id}", str(job.id))
+        job_dir_name = render_job_dir_pattern(
+            job_dir_pattern,
+            orig_index=job.orig_index,
+            job_id=job.id,
+        )
         job_dir_abs = (root_dir / job_dir_name).resolve()
 
         future = orca_job_wrapper(
@@ -980,14 +1701,19 @@ def submit_batch_parsl(
             orca_config=dict(config),
             timeout_seconds=timeout_seconds,
         )
+        task_map_rows.append(f"{future.tid}\t{job.id}\t{job_dir_abs}\n")
         futures.append((job.id, str(job_dir_abs), future))
+
+    with open(task_map_path, "w", buffering=1024 * 1024) as fh:
+        fh.writelines(task_map_rows)
 
     # Monitor futures concurrently (CRITICAL: use as_completed, not sequential loop)
     print("\nMonitoring job execution...")
     print("(Press Ctrl+C for graceful shutdown)\n")
 
-    completed_ids = []
-    failed_ids = []
+    completed_ids: list[int] = []
+    failed_ids: list[int] = []
+    pending_updates: list[dict] = []
 
     # Create future->(job_id, job_dir) mapping for concurrent completion
     futures_map = {future: (job_id, job_dir) for job_id, job_dir, future in futures}
@@ -1000,86 +1726,139 @@ def submit_batch_parsl(
                 result = future.result()
 
                 if result["status"] == "completed":
-                    workflow.update_status(job_id, JobStatus.COMPLETED)
                     completed_ids.append(job_id)
 
                     # Extract metrics on the fly for successful jobs
+                    metrics_dict: dict | None = None
                     try:
                         metrics = parse_job_metrics(job_dir)
                         wall_time = None
-                        n_cores = None
+                        n_cores_val = None
                         try:
                             log_file = pull_log_file(str(job_dir))
-                            n_cores_val, time_dict = find_timings_and_cores(log_file)
+                            n_cores_parsed, time_dict = find_timings_and_cores(log_file)
                             if time_dict and "Total" in time_dict:
                                 wall_time = time_dict["Total"]
-                            n_cores = n_cores_val
+                            n_cores_val = n_cores_parsed
                         except Exception as e:
                             print(
                                 f"  Warning: timing extraction failed for job {job_id}: {e}"
                             )
                         if metrics["success"]:
-                            workflow.update_job_metrics(
-                                job_id,
-                                job_dir=job_dir,
-                                max_forces=metrics.get("max_forces"),
-                                scf_steps=metrics.get("scf_steps"),
-                                final_energy=metrics.get("final_energy"),
-                                wall_time=wall_time,
-                                n_cores=n_cores,
-                            )
+                            metrics_dict = {
+                                "job_dir": job_dir,
+                                "max_forces": metrics.get("max_forces"),
+                                "scf_steps": metrics.get("scf_steps"),
+                                "final_energy": metrics.get("final_energy"),
+                                "wall_time": wall_time,
+                                "n_cores": n_cores_val,
+                            }
                     except Exception as e:
                         print(
                             f"  Warning: metrics extraction failed for job {job_id}: {e}"
                         )
 
+                    pending_updates.append(
+                        {
+                            "job_id": job_id,
+                            "status": JobStatus.COMPLETED,
+                            "metrics": metrics_dict,
+                        }
+                    )
                     print(
                         f" Job {job_id} completed ({len(completed_ids)}/{len(futures)} done)"
                     )
+                    log_job_result(wandb_run, job_id, "completed", metrics_dict)
                 elif result["status"] == "timeout":
-                    workflow.update_status(
-                        job_id, JobStatus.TIMEOUT, error_message=result.get("error")
+                    pending_updates.append(
+                        {
+                            "job_id": job_id,
+                            "status": JobStatus.TIMEOUT,
+                            "error_message": result.get("error"),
+                        }
                     )
                     failed_ids.append(job_id)
                     print(f"Job {job_id} timeout")
+                    log_job_result(wandb_run, job_id, "timeout")
                 else:
-                    workflow.update_status(
-                        job_id,
-                        JobStatus.FAILED,
-                        error_message=result.get("error"),
-                        increment_fail_count=True,
+                    pending_updates.append(
+                        {
+                            "job_id": job_id,
+                            "status": JobStatus.FAILED,
+                            "error_message": result.get("error"),
+                            "increment_fail_count": True,
+                        }
                     )
                     failed_ids.append(job_id)
                     error_msg = result.get("error", "Unknown error")[:100]
                     print(f"Job {job_id} failed: {error_msg}")
+                    log_job_result(wandb_run, job_id, "failed")
 
             except Exception as e:
-                workflow.update_status(
-                    job_id,
-                    JobStatus.FAILED,
-                    error_message=str(e),
-                    increment_fail_count=True,
+                pending_updates.append(
+                    {
+                        "job_id": job_id,
+                        "status": JobStatus.FAILED,
+                        "error_message": str(e),
+                        "increment_fail_count": True,
+                    }
                 )
                 failed_ids.append(job_id)
                 print(f"Job {job_id} exception: {str(e)[:100]}")
+                log_job_result(wandb_run, job_id, "failed")
+
+            # Flush batch when it reaches _BATCH_COMMIT_SIZE
+            if len(pending_updates) >= _BATCH_COMMIT_SIZE:
+                _flush_pending_updates(workflow, pending_updates)
+                pending_updates.clear()
+
+            # Check shutdown flag AFTER DB writes for this future.
+            if _shutdown_requested:
+                print("Shutdown requested -- exiting monitoring loop...")
+                break
 
     except KeyboardInterrupt:
         print("\n\nGraceful shutdown requested...")
 
     finally:
-        # Reset any jobs that are still RUNNING back to READY so they can be
-        # re-submitted in the next batch (e.g. after Ctrl+C or crash).
+        # Restore original handler first so a second SIGTERM during cleanup
+        # does not raise KeyboardInterrupt mid-finally and abandon dfk.cleanup().
+        try:
+            signal.signal(signal.SIGTERM, _original_sigterm)
+        except Exception:
+            pass
+
+        # Flush any remaining buffered updates before resetting orphans.
+        # Best-effort: if this fails, _skip_finished_on_disk catches it
+        # on the next submission pass.
+        if pending_updates:
+            try:
+                _flush_pending_updates(workflow, pending_updates)
+                pending_updates.clear()
+            except Exception:
+                pass
+
+        # Reset orphaned jobs (still RUNNING) back to TO_RUN.
+        # Use bulk update (single UPDATE + single commit) to stay well within
+        # SLURM's ~30s SIGKILL grace window after SIGTERM.
         resolved_ids = set(completed_ids) | set(failed_ids)
         orphaned_ids = [jid for jid in submitted_ids if jid not in resolved_ids]
         if orphaned_ids:
-            for jid in orphaned_ids:
-                try:
-                    workflow.update_status(jid, JobStatus.READY)
-                except Exception:
-                    pass
-            print(f"Reset {len(orphaned_ids)} in-flight jobs back to READY")
+            try:
+                workflow.update_status_bulk(
+                    orphaned_ids, JobStatus.TO_RUN, worker_id=None
+                )
+            except Exception:
+                # Fallback: try individually if bulk fails
+                for jid in orphaned_ids:
+                    try:
+                        workflow.update_status(jid, JobStatus.TO_RUN, worker_id=None)
+                    except Exception:
+                        pass
+            print(f"Reset {len(orphaned_ids)} in-flight jobs back to TO_RUN")
 
-        # Cleanup Parsl
+        # Cleanup Parsl -- running workers are terminated by dfk.cleanup().
+        # Their job IDs are already classified as orphans and reset above.
         print("\nCleaning up Parsl executor...")
         try:
             dfk = parsl.dfk()
@@ -1092,6 +1871,8 @@ def submit_batch_parsl(
             parsl.clear()
         except Exception:
             pass
+
+        finish_wandb_run(wandb_run)
 
     print("\nSubmission complete:")
     print(f"  Completed: {len(completed_ids)}")
@@ -1106,7 +1887,7 @@ def submit_batch(
     root_dir: str | Path,
     batch_size: int = 10,
     scheduler: str = "flux",
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     orca_config: OrcaConfig | None = None,
     setup_func: Callable | None = None,
     n_cores: int = 4,
@@ -1114,6 +1895,7 @@ def submit_batch(
     queue: str = "pbatch",
     allocation: str = "dnn-sim",
     conda_env: str = "py10mpi",
+    ld_library_path: str | None = None,
     dry_run: bool = False,
     max_fail_count: int | None = None,
     randomize: bool = True,
@@ -1125,7 +1907,8 @@ def submit_batch(
         root_dir: Root directory for job directories.
         batch_size: Number of jobs to submit in this batch.
         scheduler: Either "flux" or "slurm".
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         orca_config: ORCA calculation configuration.
         setup_func: Optional function to set up job-specific files.
         n_cores: Number of cores per job.
@@ -1133,6 +1916,7 @@ def submit_batch(
         queue: Queue/partition/QOS name.
         allocation: Allocation/account name.
         conda_env: Conda environment to activate.
+        ld_library_path: Override LD_LIBRARY_PATH in generated job scripts.
         dry_run: If True, prepare directories but don't submit.
         max_fail_count: If specified, skip jobs with fail_count >= this value.
         randomize: Randomize job selection order (default: True).
@@ -1150,29 +1934,17 @@ def submit_batch(
             scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
         )
 
-    # Get ready jobs (includes both TO_RUN and READY for backward compatibility)
-    # include_geometry=True so prepare_job_directory can write the .inp file
-    ready_jobs = workflow.get_jobs_by_status(
-        [JobStatus.TO_RUN, JobStatus.READY], include_geometry=True
+    jobs_to_submit = filter_jobs_for_submission(
+        workflow,
+        num_jobs=batch_size,
+        max_fail_count=max_fail_count,
+        randomize=randomize,
     )
 
-    # Filter out jobs that have failed too many times
-    if max_fail_count is not None:
-        original_count = len(ready_jobs)
-        ready_jobs = [j for j in ready_jobs if j.fail_count < max_fail_count]
-        skipped = original_count - len(ready_jobs)
-        if skipped > 0:
-            print(f"Skipping {skipped} jobs that have failed {max_fail_count}+ times")
-
-    if not ready_jobs:
+    if not jobs_to_submit:
         print("No ready jobs to submit")
         return []
 
-    # Limit to batch size
-    if randomize:
-        jobs_to_submit = random.sample(ready_jobs, min(batch_size, len(ready_jobs)))
-    else:
-        jobs_to_submit = ready_jobs[:batch_size]
     print(f"Preparing {len(jobs_to_submit)} jobs for submission...")
 
     # Filter out jobs with .do_not_rerun.json marker files
@@ -1184,6 +1956,15 @@ def submit_batch(
         print("No jobs available after marker filtering")
         return []
 
+    # Filter out jobs that already completed or failed on disk
+    jobs_to_submit = _skip_finished_on_disk(
+        jobs_to_submit, root_dir, job_dir_pattern, workflow
+    )
+
+    if not jobs_to_submit:
+        print("No jobs available after disk check")
+        return []
+
     # Claim jobs atomically BEFORE slow directory preparation to prevent
     # concurrent submitters from grabbing the same jobs (TOCTOU fix).
     all_claimed_ids = [j.id for j in jobs_to_submit]
@@ -1192,6 +1973,7 @@ def submit_batch(
         print(f"Claimed {len(all_claimed_ids)} jobs as RUNNING in database")
 
     submitted_ids = []
+    job_dir_map: dict[int, Path] = {}  # job_id -> job_dir for batch commit
 
     for i, job in enumerate(jobs_to_submit):
         try:
@@ -1204,6 +1986,10 @@ def submit_batch(
                 n_cores=n_cores,
                 setup_func=setup_func,
             )
+
+            # Collect for batch commit (avoids per-job lock contention)
+            if not dry_run:
+                job_dir_map[job.id] = job_dir
 
             # Write job submission script
             orca_path = config.get("orca_path", DEFAULT_ORCA_PATHS["flux"])
@@ -1218,6 +2004,7 @@ def submit_batch(
                     orca_path=orca_path,
                     conda_env=conda_env,
                     optimizer=optimizer,
+                    ld_library_path=ld_library_path,
                 )
                 submit_cmd = ["flux", "batch", job_script.name]
 
@@ -1231,6 +2018,7 @@ def submit_batch(
                     orca_path=orca_path,
                     conda_env=conda_env,
                     optimizer=optimizer,
+                    ld_library_path=ld_library_path,
                 )
                 submit_cmd = ["sbatch", job_script.name]
             else:
@@ -1257,21 +2045,28 @@ def submit_batch(
             print(f"  [{i+1}/{len(jobs_to_submit)}] Error for job {job.id}: {e}")
             if not dry_run:
                 try:
-                    workflow.update_status(job.id, JobStatus.READY)
+                    workflow.update_status(job.id, JobStatus.TO_RUN)
                 except Exception:
                     pass
             continue
 
-    # Reset any claimed-but-not-submitted jobs back to READY
+    # Batch-commit all job_dir updates in one transaction
+    if not dry_run and job_dir_map:
+        bulk_updates = [
+            {"job_id": jid, "job_dir": str(jdir)} for jid, jdir in job_dir_map.items()
+        ]
+        workflow.update_job_metrics_bulk(bulk_updates)
+
+    # Reset any claimed-but-not-submitted jobs back to TO_RUN
     if not dry_run:
         not_submitted = set(all_claimed_ids) - set(submitted_ids)
         if not_submitted:
             for jid in not_submitted:
                 try:
-                    workflow.update_status(jid, JobStatus.READY)
+                    workflow.update_status(jid, JobStatus.TO_RUN)
                 except Exception:
                     pass
-            print(f"Reset {len(not_submitted)} unclaimed jobs back to READY")
+            print(f"Reset {len(not_submitted)} unclaimed jobs back to TO_RUN")
 
     return submitted_ids
 
@@ -1299,14 +2094,27 @@ def main():
     )
     parser.add_argument(
         "--scheduler",
-        choices=["flux", "slurm"],
+        choices=["flux", "slurm", "pbspro"],
         default="flux",
         help="HPC scheduler (default: flux)",
     )
     parser.add_argument(
         "--job-dir-pattern",
-        default="job_{orig_index}",
-        help="Pattern for job directory names (default: job_{orig_index})",
+        default=DEFAULT_JOB_DIR_PATTERN,
+        help=(
+            "Pattern for job directory names. Supports {hostname}, "
+            "{orig_index}, and {id} (default: "
+            f"{DEFAULT_JOB_DIR_PATTERN})"
+        ),
+    )
+    parser.add_argument(
+        "--job-prefix",
+        default=None,
+        help=(
+            "Optional stable prefix to prepend to job directories, for example "
+            "'campaignA' -> campaignA_job_{orig_index}. Useful across coordinator "
+            "requeues when the same run should keep reusing the same job directories."
+        ),
     )
     parser.add_argument(
         "--n-cores",
@@ -1334,6 +2142,11 @@ def main():
         "--conda-env",
         default="py10mpi",
         help="Conda environment to activate (default: py10mpi)",
+    )
+    parser.add_argument(
+        "--ld-library-path",
+        default=None,
+        help="Override LD_LIBRARY_PATH in generated job scripts",
     )
     parser.add_argument(
         "--dry-run",
@@ -1366,44 +2179,69 @@ def main():
         default=72000,
         help="Job timeout in seconds for Parsl mode (default: 72000 = 20 hours)",
     )
-
-    # SLURM multi-node Parsl options (--use-parsl --scheduler slurm)
-    slurm_parsl_group = parser.add_argument_group(
-        "SLURM Parsl Options (--use-parsl --scheduler slurm)"
+    parsl_group.add_argument(
+        "--no-parsl-monitoring",
+        action="store_true",
+        default=False,
+        help="Disable Parsl MonitoringHub (skip monitoring.db). Useful on systems "
+        "where the monitoring hub port or SQLAlchemy dependency causes issues.",
     )
-    slurm_parsl_group.add_argument(
+
+    # W&B options (--use-parsl only)
+    add_wandb_args(parser)
+
+    # Scale-out Parsl options (--use-parsl --scheduler slurm|pbspro)
+    scaleout_parsl_group = parser.add_argument_group(
+        "Scale-Out Parsl Options (--use-parsl --scheduler slurm|pbspro)"
+    )
+    scaleout_parsl_group.add_argument(
+        "--nodes-per-block",
+        type=int,
+        default=1,
+        help="Nodes per scheduler block. >1 enables multi-node blocks. "
+        "Total capacity = max_blocks * nodes_per_block * max_workers. (default: 1)",
+    )
+    scaleout_parsl_group.add_argument(
         "--max-blocks",
         type=int,
         default=10,
-        help="Maximum SLURM nodes to provision (default: 10)",
+        help="Maximum scheduler blocks to provision (default: 10)",
     )
-    slurm_parsl_group.add_argument(
+    scaleout_parsl_group.add_argument(
         "--init-blocks",
         type=int,
         default=2,
-        help="Number of SLURM nodes to request at startup (default: 2)",
+        help="Number of scheduler blocks to request at startup (default: 2)",
     )
-    slurm_parsl_group.add_argument(
+    scaleout_parsl_group.add_argument(
         "--min-blocks",
         type=int,
         default=1,
-        help="Minimum SLURM nodes to keep alive (default: 1)",
+        help="Minimum scheduler blocks to keep alive (default: 1)",
     )
-    slurm_parsl_group.add_argument(
+    scaleout_parsl_group.add_argument(
         "--walltime-hours",
         type=int,
         default=2,
-        help="Walltime per SLURM node allocation in hours (default: 2)",
+        help="Walltime per scheduler block allocation in hours (default: 2)",
     )
-    slurm_parsl_group.add_argument(
+    scaleout_parsl_group.add_argument(
+        "--cpus-per-node",
+        type=int,
+        default=None,
+        help="Scheduler CPU cores reserved per node in Parsl scale-out mode. "
+        "Defaults to max_workers * cores_per_worker. Useful on systems that "
+        "require full-node requests while intentionally leaving some cores idle.",
+    )
+    scaleout_parsl_group.add_argument(
         "--qos",
         default="frontier",
         help="SLURM QOS (default: frontier)",
     )
-    slurm_parsl_group.add_argument(
+    scaleout_parsl_group.add_argument(
         "--account",
         default="ODEFN5169CYFZ",
-        help="SLURM account/allocation (default: ODEFN5169CYFZ)",
+        help="Scheduler account/allocation for Parsl mode (default: ODEFN5169CYFZ)",
     )
 
     parser.add_argument(
@@ -1422,7 +2260,7 @@ def main():
     )
     orca_group.add_argument(
         "--simple-input",
-        choices=["omol", "omol_base", "x2c", "dk3"],
+        choices=["omol", "omol_base", "x2c", "dk3", "pm3"],
         default="omol",
         help="ORCA input template (default: omol)",
     )
@@ -1506,6 +2344,25 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate multi-node Parsl args
+    if args.nodes_per_block < 1:
+        parser.error("--nodes-per-block must be >= 1")
+    if args.scheduler == "flux" and args.nodes_per_block > 1:
+        parser.error(
+            "--nodes-per-block > 1 is only supported with --scheduler slurm or pbspro. "
+            "Flux uses LocalProvider which does not support multi-node blocks."
+        )
+    if args.scheduler == "pbspro" and not args.use_parsl:
+        parser.error("--scheduler pbspro is currently only supported with --use-parsl")
+    if (
+        args.scheduler in {"slurm", "pbspro"}
+        and args.cpus_per_node is not None
+        and args.cpus_per_node < args.max_workers * args.cores_per_worker
+    ):
+        parser.error(
+            "--cpus-per-node must be >= max_workers * cores_per_worker in Slurm/PBS Pro mode"
+        )
+
     # Validate optimizer-specific args
     if args.optimizer == "orca" and args.max_opt_steps is not None:
         parser.error("--max-opt-steps is only valid with --optimizer sella")
@@ -1517,6 +2374,13 @@ def main():
         parser.error("--opt-level is only valid with --optimizer orca")
     if args.optimizer is None and args.opt_level != "normal":
         parser.error("--opt-level requires --optimizer orca")
+
+    try:
+        effective_job_dir_pattern = apply_job_dir_prefix(
+            args.job_dir_pattern, args.job_prefix
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Build ORCA config from CLI arguments
     orca_config: OrcaConfig = {
@@ -1541,15 +2405,42 @@ def main():
     if args.orca_path:
         orca_config["orca_path"] = args.orca_path
 
-    # Open workflow
+    # Open workflow (higher retry budget for Parsl to survive Lustre contention)
     try:
-        workflow = ArchitectorWorkflow(args.db_path)
+        if args.use_parsl:
+            workflow = ArchitectorWorkflow(
+                args.db_path,
+                timeout=15.0,
+                max_retries=10,
+                retry_delay_cap=10.0,
+            )
+        else:
+            workflow = ArchitectorWorkflow(args.db_path)
     except FileNotFoundError:
         print(f"Error: Database not found at {args.db_path}")
         sys.exit(1)
 
+    # Validate W&B options are only used with Parsl mode
+    if args.wandb_project and not args.use_parsl:
+        parser.error("--wandb-project requires --use-parsl")
+
     # Submit based on mode
     if args.use_parsl:
+        # Initialize W&B run if requested
+        wandb_run = None
+        if args.wandb_project:
+            if not WANDB_AVAILABLE:
+                print(
+                    "Warning: wandb not installed; --wandb-project ignored. "
+                    "Install with: pip install wandb"
+                )
+            else:
+                wandb_run = init_wandb_run(
+                    project=args.wandb_project,
+                    run_name=args.wandb_run_name or Path(args.db_path).stem,
+                    run_id=args.wandb_run_id,
+                )
+
         # Parsl mode: concurrent execution (single-node or multi-node)
         submitted_ids = submit_batch_parsl(
             workflow=workflow,
@@ -1558,21 +2449,26 @@ def main():
             max_workers=args.max_workers,
             cores_per_worker=args.cores_per_worker,
             scheduler=args.scheduler,
-            job_dir_pattern=args.job_dir_pattern,
+            job_dir_pattern=effective_job_dir_pattern,
             orca_config=orca_config,
             n_cores=args.n_cores,
             conda_env=args.conda_env,
             conda_base=args.conda_base,
+            ld_library_path=args.ld_library_path,
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             timeout_seconds=args.job_timeout,
             randomize=True,
+            cpus_per_node=args.cpus_per_node,
+            nodes_per_block=args.nodes_per_block,
             max_blocks=args.max_blocks,
             init_blocks=args.init_blocks,
             min_blocks=args.min_blocks,
             walltime_hours=args.walltime_hours,
             qos=args.qos,
             account=args.account,
+            enable_monitoring=not args.no_parsl_monitoring,
+            wandb_run=wandb_run,
         )
     else:
         # Traditional mode: one job script per job
@@ -1581,13 +2477,14 @@ def main():
             root_dir=args.root_dir,
             batch_size=args.batch_size,
             scheduler=args.scheduler,
-            job_dir_pattern=args.job_dir_pattern,
+            job_dir_pattern=effective_job_dir_pattern,
             orca_config=orca_config,
             n_cores=args.n_cores,
             n_hours=args.n_hours,
             queue=args.queue,
             allocation=args.allocation,
             conda_env=args.conda_env,
+            ld_library_path=args.ld_library_path,
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             randomize=True,

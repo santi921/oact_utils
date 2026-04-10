@@ -3,6 +3,7 @@
 from .architector_workflow import (
     ArchitectorWorkflow,
     JobStatus,
+    create_split_workflows,
     create_workflow,
     update_job_status,
 )
@@ -10,6 +11,7 @@ from .architector_workflow import (
 __all__ = [
     "ArchitectorWorkflow",
     "JobStatus",
+    "create_split_workflows",
     "create_workflow",
     "update_job_status",
 ]
