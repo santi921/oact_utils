@@ -26,6 +26,7 @@ def mock_job_record():
     record = MagicMock()
     record.id = 1
     record.orig_index = 42
+    record.job_dir = None
     record.geometry = """H 0.0 0.0 0.0
 H 0.0 0.0 0.74"""
     record.charge = 0
@@ -39,6 +40,7 @@ def mock_actinide_job_record():
     record = MagicMock()
     record.id = 2
     record.orig_index = 100
+    record.job_dir = None
     record.geometry = """U 0.0 0.0 0.0
 O 1.8 0.0 0.0
 O -1.8 0.0 0.0"""
@@ -274,6 +276,7 @@ class TestPrepareJobDirectory:
         record = MagicMock()
         record.id = 1
         record.orig_index = 1
+        record.job_dir = None
         record.geometry = None
 
         job_dir = prepare_job_directory(record, tmp_path)
@@ -281,6 +284,23 @@ class TestPrepareJobDirectory:
         assert job_dir.exists()
         # No orca.inp should be created without geometry
         assert not (job_dir / "orca.inp").exists()
+
+    def test_uses_preset_job_dir(
+        self, mock_job_record, tmp_path, orca_config_with_path
+    ):
+        """If job_record.job_dir is set, use it instead of computing from root_dir/pattern."""
+        preset = tmp_path / "seeds" / "orig_index_42"
+        preset.mkdir(parents=True)
+        mock_job_record.job_dir = str(preset)
+
+        irrelevant_root = tmp_path / "should_not_be_used"
+        result = prepare_job_directory(
+            mock_job_record, irrelevant_root, orca_config=orca_config_with_path
+        )
+
+        assert result == preset
+        assert (preset / "orca.inp").exists()
+        assert not irrelevant_root.exists()
 
 
 class TestWriteFluxJobFile:

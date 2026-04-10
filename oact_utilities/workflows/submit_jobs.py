@@ -210,13 +210,16 @@ def prepare_job_directory(
     Returns:
         Path to the created job directory.
     """
-    job_dir_name = render_job_dir_pattern(
-        job_dir_pattern,
-        orig_index=job_record.orig_index,
-        job_id=job_record.id,
-    )
+    if job_record.job_dir:
+        job_dir = Path(job_record.job_dir)
+    else:
+        job_dir_name = render_job_dir_pattern(
+            job_dir_pattern,
+            orig_index=job_record.orig_index,
+            job_id=job_record.id,
+        )
+        job_dir = root_dir / job_dir_name
 
-    job_dir = root_dir / job_dir_name
     job_dir.mkdir(parents=True, exist_ok=True)
 
     # Merge with defaults
