@@ -11,6 +11,7 @@ High-throughput workflow management for architector calculations on HPC systems.
 - **Concurrency Handling**: WAL mode + retry logic for concurrent database access
 - **HPC Integration**: Works with existing Flux/SLURM job generation utilities
 - **Parsl Mode**: Concurrent execution on exclusive nodes with real-time status updates
+- **W&B Integration**: Optional Weights & Biases logging for team-visible campaign dashboards
 - **Dashboard**: Command-line monitoring with metrics display
 - **Batch Submission**: Submit jobs in batches with automatic status updates (traditional or Parsl mode)
 - **Error Handling**: Robust parsers handle missing files and gzipped outputs (quacc)
@@ -199,6 +200,45 @@ python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-re
 # Show jobs that have failed multiple times (chronic failures)
 python -m oact_utilities.workflows.dashboard workflow.db --show-chronic-failures 3
 ```
+
+### W&B Integration (Online Monitoring)
+
+Stream job progress and campaign metrics to [Weights & Biases](https://wandb.ai) for a team-visible live dashboard:
+
+```bash
+# During Parsl submission -- logs each job outcome in real-time
+python -m oact_utilities.workflows.submit_jobs \
+    workflow.db \
+    jobs/ \
+    --use-parsl \
+    --max-workers 4 \
+    --wandb-project actinide-campaign \
+    --wandb-run-name wave_two
+
+# During dashboard scans -- logs aggregate campaign snapshot
+python -m oact_utilities.workflows.dashboard \
+    workflow.db \
+    --update jobs/ \
+    --extract-metrics \
+    --wandb-project actinide-campaign \
+    --wandb-run-id <run-id>  # Reuse the same W&B run across both CLIs
+```
+
+**W&B is optional.** If wandb is not installed or `--wandb-project` is not passed, nothing changes. All W&B calls are wrapped in try/except -- a failure never aborts a campaign.
+
+**Installation:** `pip install wandb && wandb login`
+
+| Key namespace | Logged by | Description |
+|---------------|-----------|-------------|
+| `progress/completed` | submit_jobs | +1 per completed job |
+| `progress/failed` | submit_jobs | +1 per failed job |
+| `metrics/max_forces` | submit_jobs | Per-job max gradient |
+| `campaign/completed` | dashboard | Total completed count |
+| `campaign/progress_pct` | dashboard | % complete |
+| `metrics/wall_time_total_hours` | dashboard | Aggregate wall time |
+| `metrics/core_hours_total` | dashboard | Total core-hours consumed |
+
+See `docs/parsl_integration.md` for full W&B documentation.
 
 ## Database Schema
 

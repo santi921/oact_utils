@@ -34,6 +34,11 @@ LD_LIBRARY_PATH_OVERRIDE=""
 JOB_TIMEOUT=432000
 MAX_FAIL_COUNT=3
 
+# W&B online monitoring (optional -- leave empty to disable)
+WANDB_PROJECT=""        # e.g. "actinide-campaign"
+WANDB_RUN_NAME=""       # display name in W&B UI (default: db filename stem)
+WANDB_RUN_ID=""         # resume an existing run across batches
+
 # PBS Pro scale-out settings
 NODES_PER_BLOCK=39
 MAX_BLOCKS=10
@@ -85,4 +90,7 @@ python -m oact_utilities.workflows.submit_jobs \
     --non-actinide-basis "${NON_ACTINIDE_BASIS}" \
     --scf-maxiter "${SCF_MAXITER}" \
     --ks-method uks \
-    --orca-path "${ORCA_PATH}"
+    --orca-path "${ORCA_PATH}" \
+    ${WANDB_PROJECT:+--wandb-project "${WANDB_PROJECT}"} \
+    ${WANDB_RUN_NAME:+--wandb-run-name "${WANDB_RUN_NAME}"} \
+    ${WANDB_RUN_ID:+--wandb-run-id "${WANDB_RUN_ID}"}

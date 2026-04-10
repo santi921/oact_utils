@@ -33,6 +33,11 @@ LD_LIBRARY_PATH_OVERRIDE=""  # (optional) set to override LD_LIBRARY_PATH in job
 JOB_TIMEOUT=604800          # 7 days per job
 MAX_FAIL_COUNT=3
 
+# W&B online monitoring (optional -- leave empty to disable)
+WANDB_PROJECT=""        # e.g. "actinide-campaign"
+WANDB_RUN_NAME=""       # display name in W&B UI (default: db filename stem)
+WANDB_RUN_ID=""         # resume an existing run across batches
+
 # ORCA settings
 FUNCTIONAL="wB97M-V"
 SIMPLE_INPUT="omol"
@@ -64,4 +69,7 @@ python -m oact_utilities.workflows.submit_jobs \
     --actinide-ecp "${ACTINIDE_ECP}" \
     --non-actinide-basis "${NON_ACTINIDE_BASIS}" \
     --scf-maxiter "${SCF_MAXITER}" \
-    --ks-method uks
+    --ks-method uks \
+    ${WANDB_PROJECT:+--wandb-project "${WANDB_PROJECT}"} \
+    ${WANDB_RUN_NAME:+--wandb-run-name "${WANDB_RUN_NAME}"} \
+    ${WANDB_RUN_ID:+--wandb-run-id "${WANDB_RUN_ID}"}
