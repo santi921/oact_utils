@@ -46,6 +46,7 @@ _EXCLUSION_SET = frozenset(
         "orca.engrad.gz",
         "orca.xyz",
         "orca_metrics.json",
+        "generator_metrics.json",
         "orca.property.txt",
         "orca.property.txt.gz",
         "orca.gbw",

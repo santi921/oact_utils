@@ -260,6 +260,7 @@ parsl.*
 *.db-shm
 *.db-wal
 *.md
+*.parquet
 
 # Local-only docs directories (plans, solutions, todos)
 docs/plans/
