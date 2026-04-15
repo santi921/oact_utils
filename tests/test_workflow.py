@@ -163,6 +163,39 @@ def test_workflow_metrics(tmp_path):
         assert job.final_energy == pytest.approx(-1.23456)
 
 
+def test_claim_jobs_for_submission_marks_running_and_sets_worker_id(tmp_path):
+    """Claiming jobs should atomically move them to RUNNING."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    for i in range(3):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="to_run",
+        )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        claimed = workflow.claim_jobs_for_submission(limit=2, worker_id="pid_123")
+
+        assert len(claimed) == 2
+        assert {job.status for job in claimed} == {JobStatus.RUNNING}
+        assert {job.worker_id for job in claimed} == {"pid_123"}
+
+        running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        ready = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+
+        assert len(running) == 2
+        assert len(ready) == 1
+
+
 def test_count_by_status(tmp_path):
     """Test status counting."""
     db_path = tmp_path / "test.db"

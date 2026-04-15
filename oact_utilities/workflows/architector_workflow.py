@@ -608,6 +608,88 @@ class ArchitectorWorkflow:
         """
         self.update_status_bulk(job_ids, JobStatus.RUNNING, worker_id=worker_id)
 
+    def claim_jobs_for_submission(
+        self,
+        limit: int,
+        worker_id: str | None = None,
+        max_fail_count: int | None = None,
+        randomize: bool = True,
+    ) -> list[JobRecord]:
+        """Atomically claim up to ``limit`` TO_RUN jobs for submission.
+
+        The selected jobs are updated to ``RUNNING`` in the same transaction
+        so a concurrent submitter cannot claim the same rows.
+
+        Args:
+            limit: Maximum number of jobs to claim.
+            worker_id: Optional scheduler job ID to associate with the claim.
+            max_fail_count: If provided, skip jobs with ``fail_count`` at or
+                above this value.
+            randomize: If True, sample jobs with ``ORDER BY RANDOM()``.
+
+        Returns:
+            Claimed jobs as ``JobRecord`` objects. The returned records have
+            ``status=RUNNING`` and reflect the state after the claim.
+        """
+        if limit <= 0:
+            return []
+
+        order_by = "ORDER BY RANDOM()" if randomize else "ORDER BY id"
+        params: list[object] = [JobStatus.TO_RUN.value]
+        query = (
+            f"SELECT {self._LIGHT_COLS} FROM structures "
+            "WHERE status = ?"
+        )
+        if max_fail_count is not None:
+            query += " AND COALESCE(fail_count, 0) < ?"
+            params.append(max_fail_count)
+        query += f" {order_by} LIMIT ?"
+        params.append(limit)
+
+        for attempt in range(self.max_retries):
+            try:
+                cur = self.conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                cur.execute(query, tuple(params))
+                rows = cur.fetchall()
+                if not rows:
+                    self.conn.rollback()
+                    return []
+
+                job_ids = [row["id"] for row in rows]
+                placeholders = ",".join("?" * len(job_ids))
+                update_query = (
+                    "UPDATE structures SET status = ?, worker_id = ?, "
+                    "updated_at = CURRENT_TIMESTAMP "
+                    f"WHERE id IN ({placeholders}) AND status = ?"
+                )
+                cur.execute(
+                    update_query,
+                    tuple(
+                        [JobStatus.RUNNING.value, worker_id]
+                        + job_ids
+                        + [JobStatus.TO_RUN.value]
+                    ),
+                )
+                cur.execute(
+                    f"SELECT {self._LIGHT_COLS} FROM structures WHERE id IN ({placeholders})",
+                    tuple(job_ids),
+                )
+                claimed_rows = cur.fetchall()
+                self.conn.commit()
+                return [self._row_to_record(row) for row in claimed_rows]
+            except sqlite3.OperationalError as e:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                if self._is_retryable(e) and attempt < self.max_retries - 1:
+                    delay = min(0.1 * (2**attempt), self.retry_delay_cap)
+                    jitter = random.uniform(0, delay * 0.2)
+                    time.sleep(delay + jitter)
+                    continue
+                raise
+
     def reset_failed_jobs(
         self, max_fail_count: int | None = None, include_timeout: bool = False
     ):

@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Literal, TypedDict
+from typing import Any, Callable, Literal, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
 from ..core.orca.sella_runner import write_sella_runner_shim
@@ -26,6 +26,11 @@ from ..utils.analysis import find_timings_and_cores, parse_job_metrics
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .job_dir_patterns import (
+    DEFAULT_JOB_DIR_PATTERN,
+    apply_job_dir_prefix,
+    render_job_dir_pattern,
+)
 
 try:
     from parsl import python_app
@@ -290,10 +295,28 @@ def _build_parsl_htex_launch_cmd(python_executable: str | None = None) -> str:
     return f"{entrypoint} {DEFAULT_LAUNCH_CMD}"
 
 
+def _is_manager_lost_exception(exc: BaseException) -> bool:
+    """Return True when *exc* represents a Parsl manager or worker loss."""
+    exc_name = type(exc).__name__
+    message = str(exc)
+    return (
+        exc_name in {"ManagerLost", "WorkerLost"}
+        or "ManagerLost" in message
+        or "WorkerLost" in message
+    )
+
+
+def _classify_parsl_future_failure(exc: BaseException) -> tuple[JobStatus, bool, str]:
+    """Map a Parsl future exception to a DB status and W&B outcome label."""
+    if _is_manager_lost_exception(exc):
+        return JobStatus.TO_RUN, False, "requeued"
+    return JobStatus.FAILED, True, "failed"
+
+
 def prepare_job_directory(
     job_record,
     root_dir: Path,
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     orca_config: OrcaConfig | None = None,
     n_cores: int = 4,
     setup_func: Callable | None = None,
@@ -314,21 +337,10 @@ def prepare_job_directory(
     Returns:
         Path to the created job directory.
     """
-    # Use limited, explicit placeholder replacement to avoid format string issues.
-    # Supported placeholders: {orig_index}, {id}. Any other braces are rejected.
-    pattern = job_dir_pattern
-
-    allowed_placeholders = ("{orig_index}", "{id}")
-    temp_pattern = pattern
-    for placeholder in allowed_placeholders:
-        temp_pattern = temp_pattern.replace(placeholder, "")
-    if "{" in temp_pattern or "}" in temp_pattern:
-        raise ValueError(
-            f"Unsupported placeholder or stray brace in job_dir_pattern: {job_dir_pattern!r}"
-        )
-
-    job_dir_name = pattern.replace("{orig_index}", str(job_record.orig_index)).replace(
-        "{id}", str(job_record.id)
+    job_dir_name = render_job_dir_pattern(
+        job_dir_pattern,
+        orig_index=job_record.orig_index,
+        job_id=job_record.id,
     )
 
     job_dir = root_dir / job_dir_name
@@ -567,9 +579,11 @@ def _filter_marker_jobs(
             if marker_path.exists():
                 marker_found = True
         if not marker_found:
-            pattern = job_dir_pattern.replace(
-                "{orig_index}", str(job.orig_index)
-            ).replace("{id}", str(job.id))
+            pattern = render_job_dir_pattern(
+                job_dir_pattern,
+                orig_index=job.orig_index,
+                job_id=job.id,
+            )
             candidate = root_dir / pattern / ".do_not_rerun.json"
             if candidate.exists():
                 marker_found = True
@@ -632,9 +646,11 @@ def _skip_finished_on_disk(
         if job.job_dir and Path(job.job_dir).is_dir():
             job_dir = job.job_dir
         else:
-            pattern = job_dir_pattern.replace(
-                "{orig_index}", str(job.orig_index)
-            ).replace("{id}", str(job.id))
+            pattern = render_job_dir_pattern(
+                job_dir_pattern,
+                orig_index=job.orig_index,
+                job_id=job.id,
+            )
             candidate = root_dir / pattern
             if candidate.is_dir():
                 job_dir = str(candidate)
@@ -1086,6 +1102,7 @@ def build_parsl_config_flux(
 def build_parsl_config_slurm(
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    cpus_per_node: int | None = None,
     nodes_per_block: int = 1,
     max_blocks: int = 10,
     init_blocks: int = 2,
@@ -1113,6 +1130,8 @@ def build_parsl_config_slurm(
     Args:
         max_workers: Maximum concurrent workers per node.
         cores_per_worker: CPU cores per worker (must match ORCA nprocs).
+        cpus_per_node: Scheduler CPU cores reserved per node. Defaults to
+            ``max_workers * cores_per_worker``.
         nodes_per_block: Nodes per SLURM block. >1 enables multi-node
             blocks with SrunLauncher.  Total capacity is
             ``max_blocks * nodes_per_block * max_workers``.
@@ -1156,6 +1175,8 @@ def build_parsl_config_slurm(
         mpirun_path=mpirun_path,
     )
 
+    requested_cpus_per_node = cpus_per_node or (max_workers * cores_per_worker)
+
     # Launcher and scheduler_options differ for single-node vs multi-node.
     if nodes_per_block > 1:
         from parsl.launchers import SrunLauncher
@@ -1165,13 +1186,13 @@ def build_parsl_config_slurm(
         launcher = SrunLauncher()
         # No extra scheduler_options needed -- exclusive=True on the
         # provider already adds --exclusive to the SBATCH script.
-        scheduler_options = ""
+        scheduler_options = f"#SBATCH --cpus-per-task={requested_cpus_per_node}\n"
     else:
         from parsl.launchers import SimpleLauncher
 
         # SimpleLauncher: no srun, specify total tasks per node directly.
         launcher = SimpleLauncher()
-        ntasks = cores_per_worker * max_workers
+        ntasks = requested_cpus_per_node
         scheduler_options = (
             f"#SBATCH --ntasks-per-node={ntasks}\n" f"#SBATCH --cpus-per-task=1\n"
         )
@@ -1209,6 +1230,7 @@ def build_parsl_config_slurm(
 def build_parsl_config_pbspro(
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    cpus_per_node: int | None = None,
     nodes_per_block: int = 1,
     max_blocks: int = 10,
     init_blocks: int = 2,
@@ -1235,6 +1257,8 @@ def build_parsl_config_pbspro(
     Args:
         max_workers: Maximum concurrent workers per node.
         cores_per_worker: CPU cores per worker (must match ORCA nprocs).
+        cpus_per_node: Scheduler CPU cores reserved per node. Defaults to
+            ``max_workers * cores_per_worker``.
         nodes_per_block: Nodes per PBS block.
         max_blocks: Maximum number of PBS blocks to provision.
         init_blocks: Number of blocks to request at startup.
@@ -1286,13 +1310,13 @@ def build_parsl_config_pbspro(
 
         launcher = SimpleLauncher()
 
-    cpus_per_node = max_workers * cores_per_worker
+    requested_cpus_per_node = cpus_per_node or (max_workers * cores_per_worker)
     provider = PBSProProvider(
         queue=queue,
         account=account,
         nodes_per_block=nodes_per_block,
-        cpus_per_node=cpus_per_node,
-        select_options=f"mpiprocs={cpus_per_node}",
+        cpus_per_node=requested_cpus_per_node,
+        select_options=f"mpiprocs={requested_cpus_per_node}",
         init_blocks=init_blocks,
         min_blocks=min_blocks,
         max_blocks=max_blocks,
@@ -1323,8 +1347,9 @@ def submit_batch_parsl(
     num_jobs: int,
     max_workers: int = 4,
     cores_per_worker: int = 16,
+    cpus_per_node: int | None = None,
     scheduler: str = "flux",
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     orca_config: OrcaConfig | None = None,
     setup_func: Callable | None = None,
     n_cores: int = 16,
@@ -1350,9 +1375,14 @@ def submit_batch_parsl(
     Args:
         workflow: ArchitectorWorkflow instance
         root_dir: Root directory for job directories
-        num_jobs: Total number of jobs to submit
+        num_jobs: Maximum number of jobs to keep claimed/submitted in the
+            active Parsl pipeline at once. The submitter refills this window
+            from the DB until no ``TO_RUN`` jobs remain or the process is
+            interrupted.
         max_workers: Maximum number of concurrent workers
         cores_per_worker: CPU cores per worker
+        cpus_per_node: Scheduler CPU cores reserved/requested per node. When
+            omitted, defaults to ``max_workers * cores_per_worker``.
         scheduler: Parsl provider backend ("flux" for LocalProvider,
             "slurm" for SlurmProvider multi-node, "pbspro" for
             PBSProProvider multi-node).
@@ -1386,7 +1416,8 @@ def submit_batch_parsl(
         )
         return []
 
-    from concurrent.futures import as_completed
+    import signal
+    from concurrent.futures import FIRST_COMPLETED, wait
 
     import parsl
 
@@ -1410,35 +1441,35 @@ def submit_batch_parsl(
             scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
         )
 
-    # Filter jobs for submission (DB status only)
-    jobs_to_submit = filter_jobs_for_submission(
-        workflow,
-        num_jobs=num_jobs,
-        max_fail_count=max_fail_count,
-        randomize=randomize,
-    )
+    if dry_run:
+        # Dry runs preserve the current preview behavior: take one snapshot
+        # from the DB, apply disk/marker filters, and stop before Parsl load.
+        jobs_to_submit = filter_jobs_for_submission(
+            workflow,
+            num_jobs=num_jobs,
+            max_fail_count=max_fail_count,
+            randomize=randomize,
+        )
 
-    if not jobs_to_submit:
-        print("No jobs available for submission after filtering")
-        return []
+        if not jobs_to_submit:
+            print("No jobs available for submission after filtering")
+            return []
 
-    # Filter out jobs with .do_not_rerun.json marker files
-    jobs_to_submit = _filter_marker_jobs(
-        jobs_to_submit, root_dir, job_dir_pattern, workflow
-    )
+        jobs_to_submit = _filter_marker_jobs(
+            jobs_to_submit, root_dir, job_dir_pattern, workflow
+        )
 
-    if not jobs_to_submit:
-        print("No jobs available after marker filtering")
-        return []
+        if not jobs_to_submit:
+            print("No jobs available after marker filtering")
+            return []
 
-    # Filter out jobs that already completed or failed on disk
-    jobs_to_submit = _skip_finished_on_disk(
-        jobs_to_submit, root_dir, job_dir_pattern, workflow
-    )
+        jobs_to_submit = _skip_finished_on_disk(
+            jobs_to_submit, root_dir, job_dir_pattern, workflow
+        )
 
-    if not jobs_to_submit:
-        print("No jobs available after disk check")
-        return []
+        if not jobs_to_submit:
+            print("No jobs available after disk check")
+            return []
 
     # Detect scheduler job ID early so it can be set atomically with the
     # RUNNING status claim (avoids a window where jobs are RUNNING but have
@@ -1448,58 +1479,6 @@ def submit_batch_parsl(
         or os.environ.get("FLUX_JOB_ID")
         or f"pid_{os.getpid()}"
     )
-
-    # Claim jobs atomically BEFORE slow directory preparation to prevent
-    # concurrent submitters from grabbing the same jobs (TOCTOU fix).
-    # Sets worker_id in the same UPDATE/commit for crash traceability.
-    submitted_ids = [j.id for j in jobs_to_submit]
-    if not dry_run:
-        workflow.mark_jobs_as_running(submitted_ids, worker_id=_scheduler_job_id)
-        print(
-            f"Claimed {len(submitted_ids)} jobs as RUNNING "
-            f"(worker_id={_scheduler_job_id})"
-        )
-
-    print(f"\nPreparing {len(jobs_to_submit)} jobs for Parsl submission...")
-
-    # Prepare job directories, tracking any failures.
-    # Collect job_dir updates to batch-commit once (avoids per-job lock contention).
-    failed_prep_ids: list[int] = []
-    job_dir_updates: list[dict] = []
-    print("Setting up job directories...")
-    for i, job in enumerate(jobs_to_submit, 1):
-        try:
-            job_dir = prepare_job_directory(
-                job,
-                root_dir,
-                job_dir_pattern=job_dir_pattern,
-                orca_config=config,
-                n_cores=n_cores,
-                setup_func=setup_func,
-            )
-            # Collect for batch commit instead of per-job commit
-            if not dry_run:
-                job_dir_updates.append({"job_id": job.id, "job_dir": str(job_dir)})
-            print(f"  [{i}/{len(jobs_to_submit)}] Prepared {job_dir}")
-        except Exception as e:
-            print(f"  [{i}/{len(jobs_to_submit)}] FAILED to prepare job {job.id}: {e}")
-            failed_prep_ids.append(job.id)
-
-    # Batch-commit all job_dir updates in a single transaction
-    if job_dir_updates:
-        workflow.update_job_metrics_bulk(job_dir_updates)
-        print(f"Persisted {len(job_dir_updates)} job directories in one transaction")
-
-    # Reset any jobs that failed during preparation back to TO_RUN
-    if failed_prep_ids:
-        for jid in failed_prep_ids:
-            try:
-                workflow.update_status(jid, JobStatus.TO_RUN)
-            except Exception:
-                pass
-        jobs_to_submit = [j for j in jobs_to_submit if j.id not in set(failed_prep_ids)]
-        submitted_ids = [j.id for j in jobs_to_submit]
-        print(f"Reset {len(failed_prep_ids)} jobs back to TO_RUN due to prep failure")
 
     if dry_run:
         print("\n[DRY RUN] Would submit to Parsl executor")
@@ -1516,13 +1495,17 @@ def submit_batch_parsl(
             f"nodes/block x {max_workers} workers/node "
             f"= {total_workers} max concurrent jobs"
         )
+        requested_cpus = cpus_per_node or (max_workers * cores_per_worker)
         print(
-            f"Each worker: {cores_per_worker} cores, "
+            f"Each SLURM node requests {requested_cpus} scheduler cores, "
+            f"active worker cores per node: {max_workers * cores_per_worker}, "
+            f"each worker: {cores_per_worker} cores, "
             f"job timeout: {timeout_seconds}s"
         )
         parsl_config = build_parsl_config_slurm(
             max_workers=max_workers,
             cores_per_worker=cores_per_worker,
+            cpus_per_node=cpus_per_node,
             nodes_per_block=nodes_per_block,
             max_blocks=max_blocks,
             init_blocks=init_blocks,
@@ -1545,13 +1528,15 @@ def submit_batch_parsl(
             f"= {total_workers} max concurrent jobs"
         )
         print(
-            f"Each PBS node: {max_workers * cores_per_worker} ncpus/mpiprocs, "
+            f"Each PBS node reserves {cpus_per_node or (max_workers * cores_per_worker)} "
+            f"ncpus/mpiprocs, active worker cores per node: {max_workers * cores_per_worker}, "
             f"each worker: {cores_per_worker} cores, "
             f"job timeout: {timeout_seconds}s"
         )
         parsl_config = build_parsl_config_pbspro(
             max_workers=max_workers,
             cores_per_worker=cores_per_worker,
+            cpus_per_node=cpus_per_node,
             nodes_per_block=nodes_per_block,
             max_blocks=max_blocks,
             init_blocks=init_blocks,
@@ -1584,24 +1569,17 @@ def submit_batch_parsl(
     except Exception as e:
         print(f"Failed to initialize Parsl: {e}")
         print("Check your conda environment and ORCA installation")
-        # Reset claimed jobs back to TO_RUN since we can't run them
-        for jid in submitted_ids:
-            try:
-                workflow.update_status(jid, JobStatus.TO_RUN, worker_id=None)
-            except Exception:
-                pass
-        print(f"Reset {len(submitted_ids)} claimed jobs back to TO_RUN")
         return []
 
     # --- SIGTERM handler (register AFTER parsl.load to avoid Parsl overwriting) ---
     # When the scheduler cancels an allocation (scancel / flux cancel), it
     # sends SIGTERM to our process.  Workers die immediately, so no futures
-    # will ever complete -- as_completed() blocks forever.  A flag-only
+    # will ever complete -- wait() blocks forever.  A flag-only
     # handler would never be checked and the finally block (which resets
     # orphaned jobs) would never run before SIGKILL arrives.
     #
     # Fix: after setting the flag, raise KeyboardInterrupt.  This interrupts
-    # as_completed(), is caught by the existing `except KeyboardInterrupt`
+    # wait(), is caught by the existing `except KeyboardInterrupt`
     # handler, and falls through to the finally block which bulk-resets all
     # in-flight jobs to TO_RUN.  SQLite transactions are atomic, so an
     # interrupted commit simply rolls back -- at most one job's status update
@@ -1622,7 +1600,7 @@ def submit_batch_parsl(
             )
         except Exception:
             pass  # Best-effort notification; flag is already set
-        # Break out of as_completed() so the finally block can reset orphans
+        # Break out of wait() so the finally block can reset orphans
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _sigterm_handler)
@@ -1631,142 +1609,257 @@ def submit_batch_parsl(
     # the default handler may have set a pending signal that fires now).
     if _shutdown_requested:
         print("Shutdown requested during setup -- skipping submission")
-        # Falls through to the finally block which resets orphans
         signal.signal(signal.SIGTERM, _original_sigterm)
-        workflow.update_status_bulk(submitted_ids, JobStatus.TO_RUN, worker_id=None)
-        print(f"Reset {len(submitted_ids)} jobs back to TO_RUN")
-        return submitted_ids
+        return []
 
-    # Submit futures
-    print(f"\nSubmitting {len(jobs_to_submit)} jobs to Parsl...")
-    futures = []
-    task_map_path = Path(parsl_config.run_dir).resolve() / "parsl_task_map.tsv"
-    task_map_path.write_text("task_id\tjob_id\tjob_dir\n")
-    print(f"Writing Parsl task mapping to {task_map_path}")
-
-    for job in jobs_to_submit:
-        job_dir_name = job_dir_pattern.replace(
-            "{orig_index}", str(job.orig_index)
-        ).replace("{id}", str(job.id))
-        job_dir_abs = (root_dir / job_dir_name).resolve()
-
-        future = orca_job_wrapper(
-            job_id=job.id,
-            job_dir=str(job_dir_abs),
-            orca_config=dict(config),
-            ld_library_path=ld_library_path,
-            mpirun_path=mpirun_path,
-            timeout_seconds=timeout_seconds,
-        )
-        with open(task_map_path, "a") as fh:
-            fh.write(f"{future.tid}\t{job.id}\t{job_dir_abs}\n")
-        futures.append((job.id, str(job_dir_abs), future))
-
-    # Monitor futures concurrently (CRITICAL: use as_completed, not sequential loop)
-    print("\nMonitoring job execution...")
+    # Continuously refill the submission window until no claimable TO_RUN jobs
+    # remain or the submitter is interrupted.
+    print(
+        f"\nSubmitting jobs to Parsl with a refill window of {num_jobs} "
+        "claimed jobs..."
+    )
     print("(Press Ctrl+C for graceful shutdown)\n")
 
+    task_map_path = Path(parsl_config.run_dir).resolve() / "parsl_task_map.tsv"
+    print(f"Recording Parsl task mapping to {task_map_path}")
+
+    submitted_ids: list[int] = []
+    submitted_id_set: set[int] = set()
     completed_ids: list[int] = []
     failed_ids: list[int] = []
     pending_updates: list[dict] = []
+    active_futures: dict[Any, tuple[int, str]] = {}
 
-    # Create future->(job_id, job_dir) mapping for concurrent completion
-    futures_map = {future: (job_id, job_dir) for job_id, job_dir, future in futures}
+    def _track_submitted(job_id: int) -> None:
+        if job_id not in submitted_id_set:
+            submitted_ids.append(job_id)
+            submitted_id_set.add(job_id)
+
+    def _flush_active_prep_updates() -> None:
+        nonlocal pending_updates
+        if len(pending_updates) >= _BATCH_COMMIT_SIZE:
+            _flush_pending_updates(workflow, pending_updates)
+            pending_updates.clear()
+
+    def _claim_and_submit_window(task_map_fh) -> bool:
+        nonlocal pending_updates
+        claimed_any = False
+
+        while len(active_futures) < num_jobs:
+            claim_limit = num_jobs - len(active_futures)
+            if claim_limit <= 0:
+                return claimed_any
+
+            claimed_jobs = workflow.claim_jobs_for_submission(
+                limit=claim_limit,
+                worker_id=_scheduler_job_id,
+                max_fail_count=max_fail_count,
+                randomize=randomize,
+            )
+            if not claimed_jobs:
+                return claimed_any
+
+            claimed_any = True
+            claimed_jobs = _filter_marker_jobs(
+                claimed_jobs, root_dir, job_dir_pattern, workflow
+            )
+            if not claimed_jobs:
+                continue
+
+            claimed_jobs = _skip_finished_on_disk(
+                claimed_jobs, root_dir, job_dir_pattern, workflow
+            )
+            if not claimed_jobs:
+                continue
+
+            print(f"Preparing {len(claimed_jobs)} jobs for Parsl submission...")
+            job_dir_updates: list[dict] = []
+            prepared_jobs: list[tuple[int, str]] = []
+
+            for i, job in enumerate(claimed_jobs, 1):
+                try:
+                    job_dir = prepare_job_directory(
+                        job,
+                        root_dir,
+                        job_dir_pattern=job_dir_pattern,
+                        orca_config=config,
+                        n_cores=n_cores,
+                        setup_func=setup_func,
+                    )
+                    job_dir_updates.append(
+                        {"job_id": job.id, "job_dir": str(job_dir)}
+                    )
+                    prepared_jobs.append((job.id, str(job_dir)))
+                    print(f"  [{i}/{len(claimed_jobs)}] Prepared {job_dir}")
+                except Exception as e:
+                    print(
+                        f"  [{i}/{len(claimed_jobs)}] FAILED to prepare job {job.id}: {e}"
+                    )
+                    pending_updates.append(
+                        {"job_id": job.id, "status": JobStatus.TO_RUN}
+                    )
+
+            if job_dir_updates:
+                workflow.update_job_metrics_bulk(job_dir_updates)
+                print(
+                    f"Persisted {len(job_dir_updates)} job directories in one transaction"
+                )
+
+            if prepared_jobs:
+                print(f"Submitting {len(prepared_jobs)} jobs to Parsl...")
+
+            for job_id, job_dir in prepared_jobs:
+                future = orca_job_wrapper(
+                    job_id=job_id,
+                    job_dir=job_dir,
+                    orca_config=dict(config),
+                    ld_library_path=ld_library_path,
+                    mpirun_path=mpirun_path,
+                    timeout_seconds=timeout_seconds,
+                )
+                active_futures[future] = (job_id, job_dir)
+                _track_submitted(job_id)
+                task_map_fh.write(f"{future.tid}\t{job_id}\t{job_dir}\n")
+                _flush_active_prep_updates()
+
+            if _shutdown_requested:
+                return claimed_any
+
+        return claimed_any
+
+    print("Monitoring job execution...")
 
     try:
-        # as_completed() yields futures as they finish (concurrent, not sequential!)
-        for future in as_completed(futures_map.keys()):
-            job_id, job_dir = futures_map[future]
-            try:
-                result = future.result()
+        with open(task_map_path, "w", buffering=1024 * 1024) as task_map_fh:
+            task_map_fh.write("task_id\tjob_id\tjob_dir\n")
 
-                if result["status"] == "completed":
-                    completed_ids.append(job_id)
-
-                    # Extract metrics on the fly for successful jobs
-                    metrics_dict: dict | None = None
+            while True:
+                if pending_updates and not active_futures:
                     try:
-                        metrics = parse_job_metrics(job_dir)
-                        wall_time = None
-                        n_cores_val = None
-                        try:
-                            log_file = pull_log_file(str(job_dir))
-                            n_cores_parsed, time_dict = find_timings_and_cores(log_file)
-                            if time_dict and "Total" in time_dict:
-                                wall_time = time_dict["Total"]
-                            n_cores_val = n_cores_parsed
-                        except Exception as e:
-                            print(
-                                f"  Warning: timing extraction failed for job {job_id}: {e}"
+                        _flush_pending_updates(workflow, pending_updates)
+                        pending_updates.clear()
+                    except Exception:
+                        pass
+
+                claimed_any = _claim_and_submit_window(task_map_fh)
+
+                if _shutdown_requested:
+                    print("Shutdown requested -- exiting monitoring loop...")
+                    break
+
+                if not active_futures:
+                    if not claimed_any:
+                        break
+                    continue
+
+                done, _ = wait(active_futures.keys(), return_when=FIRST_COMPLETED)
+
+                for future in done:
+                    job_id, job_dir = active_futures.pop(future)
+                    try:
+                        result = future.result()
+
+                        if result["status"] == "completed":
+                            completed_ids.append(job_id)
+
+                            metrics_dict: dict | None = None
+                            try:
+                                metrics = parse_job_metrics(job_dir)
+                                wall_time = None
+                                n_cores_val = None
+                                try:
+                                    log_file = pull_log_file(str(job_dir))
+                                    n_cores_parsed, time_dict = find_timings_and_cores(
+                                        log_file
+                                    )
+                                    if time_dict and "Total" in time_dict:
+                                        wall_time = time_dict["Total"]
+                                    n_cores_val = n_cores_parsed
+                                except Exception as e:
+                                    print(
+                                        f"  Warning: timing extraction failed for job {job_id}: {e}"
+                                    )
+                                if metrics["success"]:
+                                    metrics_dict = {
+                                        "job_dir": job_dir,
+                                        "max_forces": metrics.get("max_forces"),
+                                        "scf_steps": metrics.get("scf_steps"),
+                                        "final_energy": metrics.get("final_energy"),
+                                        "wall_time": wall_time,
+                                        "n_cores": n_cores_val,
+                                    }
+                            except Exception as e:
+                                print(
+                                    f"  Warning: metrics extraction failed for job {job_id}: {e}"
+                                )
+
+                            pending_updates.append(
+                                {
+                                    "job_id": job_id,
+                                    "status": JobStatus.COMPLETED,
+                                    "metrics": metrics_dict,
+                                }
                             )
-                        if metrics["success"]:
-                            metrics_dict = {
-                                "job_dir": job_dir,
-                                "max_forces": metrics.get("max_forces"),
-                                "scf_steps": metrics.get("scf_steps"),
-                                "final_energy": metrics.get("final_energy"),
-                                "wall_time": wall_time,
-                                "n_cores": n_cores_val,
-                            }
+                            print(
+                                f" Job {job_id} completed ({len(completed_ids)}/{len(submitted_ids)} done)"
+                            )
+                        elif result["status"] == "timeout":
+                            pending_updates.append(
+                                {
+                                    "job_id": job_id,
+                                    "status": JobStatus.TIMEOUT,
+                                    "error_message": result.get("error"),
+                                }
+                            )
+                            failed_ids.append(job_id)
+                            print(f"Job {job_id} timeout")
+                        else:
+                            pending_updates.append(
+                                {
+                                    "job_id": job_id,
+                                    "status": JobStatus.FAILED,
+                                    "error_message": result.get("error"),
+                                    "increment_fail_count": True,
+                                }
+                            )
+                            failed_ids.append(job_id)
+                            error_msg = result.get("error", "Unknown error")[:100]
+                            print(f"Job {job_id} failed: {error_msg}")
                     except Exception as e:
-                        print(
-                            f"  Warning: metrics extraction failed for job {job_id}: {e}"
+                        failure_status, increment_fail_count, _outcome_label = (
+                            _classify_parsl_future_failure(e)
                         )
+                        if failure_status == JobStatus.TO_RUN:
+                            pending_updates.append(
+                                {
+                                    "job_id": job_id,
+                                    "status": JobStatus.TO_RUN,
+                                }
+                            )
+                            print(
+                                f"Job {job_id} lost its manager; resetting to TO_RUN"
+                            )
+                        else:
+                            pending_updates.append(
+                                {
+                                    "job_id": job_id,
+                                    "status": failure_status,
+                                    "error_message": str(e),
+                                    "increment_fail_count": increment_fail_count,
+                                }
+                            )
+                            failed_ids.append(job_id)
+                            print(f"Job {job_id} exception: {str(e)[:100]}")
+                    if len(pending_updates) >= _BATCH_COMMIT_SIZE:
+                        _flush_pending_updates(workflow, pending_updates)
+                        pending_updates.clear()
 
-                    pending_updates.append(
-                        {
-                            "job_id": job_id,
-                            "status": JobStatus.COMPLETED,
-                            "metrics": metrics_dict,
-                        }
-                    )
-                    print(
-                        f" Job {job_id} completed ({len(completed_ids)}/{len(futures)} done)"
-                    )
-                elif result["status"] == "timeout":
-                    pending_updates.append(
-                        {
-                            "job_id": job_id,
-                            "status": JobStatus.TIMEOUT,
-                            "error_message": result.get("error"),
-                        }
-                    )
-                    failed_ids.append(job_id)
-                    print(f"Job {job_id} timeout")
-                else:
-                    pending_updates.append(
-                        {
-                            "job_id": job_id,
-                            "status": JobStatus.FAILED,
-                            "error_message": result.get("error"),
-                            "increment_fail_count": True,
-                        }
-                    )
-                    failed_ids.append(job_id)
-                    error_msg = result.get("error", "Unknown error")[:100]
-                    print(f"Job {job_id} failed: {error_msg}")
+                    if _shutdown_requested:
+                        print("Shutdown requested -- exiting monitoring loop...")
+                        break
 
-            except Exception as e:
-                pending_updates.append(
-                    {
-                        "job_id": job_id,
-                        "status": JobStatus.FAILED,
-                        "error_message": str(e),
-                        "increment_fail_count": True,
-                    }
-                )
-                failed_ids.append(job_id)
-                print(f"Job {job_id} exception: {str(e)[:100]}")
-
-            # Flush batch when it reaches _BATCH_COMMIT_SIZE
-            if len(pending_updates) >= _BATCH_COMMIT_SIZE:
-                _flush_pending_updates(workflow, pending_updates)
-                pending_updates.clear()
-
-            # Check shutdown flag AFTER DB writes for this future.
-            if _shutdown_requested:
-                print("Shutdown requested -- exiting monitoring loop...")
-                break
+                if _shutdown_requested:
+                    break
 
     except KeyboardInterrupt:
         print("\n\nGraceful shutdown requested...")
@@ -1832,7 +1925,7 @@ def submit_batch(
     root_dir: str | Path,
     batch_size: int = 10,
     scheduler: str = "flux",
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     orca_config: OrcaConfig | None = None,
     setup_func: Callable | None = None,
     n_cores: int = 4,
@@ -2044,7 +2137,11 @@ def main():
         "--batch-size",
         type=int,
         default=10,
-        help="Number of jobs to submit (default: 10). For Parsl mode, this is the total job count.",
+        help=(
+            "Number of jobs to keep in the active submission window "
+            "(default: 10). For Parsl mode, the submitter refills this window "
+            "from the DB until no TO_RUN jobs remain."
+        ),
     )
     parser.add_argument(
         "--scheduler",
@@ -2054,8 +2151,21 @@ def main():
     )
     parser.add_argument(
         "--job-dir-pattern",
-        default="job_{orig_index}",
-        help="Pattern for job directory names (default: job_{orig_index})",
+        default=DEFAULT_JOB_DIR_PATTERN,
+        help=(
+            "Pattern for job directory names. Supports {hostname}, "
+            "{orig_index}, and {id} (default: "
+            f"{DEFAULT_JOB_DIR_PATTERN})"
+        ),
+    )
+    parser.add_argument(
+        "--job-prefix",
+        default=None,
+        help=(
+            "Optional stable prefix to prepend to job directories, for example "
+            "'campaignA' -> campaignA_job_{orig_index}. Useful across coordinator "
+            "requeues when the same run should keep reusing the same job directories."
+        ),
     )
     parser.add_argument(
         "--n-cores",
@@ -2160,6 +2270,14 @@ def main():
         type=int,
         default=2,
         help="Walltime per scheduler block allocation in hours (default: 2)",
+    )
+    scaleout_parsl_group.add_argument(
+        "--cpus-per-node",
+        type=int,
+        default=None,
+        help="Scheduler CPU cores reserved per node in Parsl scale-out mode. "
+        "Defaults to max_workers * cores_per_worker. Useful on systems that "
+        "require full-node requests while intentionally leaving some cores idle.",
     )
     scaleout_parsl_group.add_argument(
         "--qos",
@@ -2282,6 +2400,14 @@ def main():
         )
     if args.scheduler == "pbspro" and not args.use_parsl:
         parser.error("--scheduler pbspro is currently only supported with --use-parsl")
+    if (
+        args.scheduler in {"slurm", "pbspro"}
+        and args.cpus_per_node is not None
+        and args.cpus_per_node < args.max_workers * args.cores_per_worker
+    ):
+        parser.error(
+            "--cpus-per-node must be >= max_workers * cores_per_worker in Slurm/PBS Pro mode"
+        )
 
     # Validate optimizer-specific args
     if args.optimizer == "orca" and args.max_opt_steps is not None:
@@ -2294,6 +2420,13 @@ def main():
         parser.error("--opt-level is only valid with --optimizer orca")
     if args.optimizer is None and args.opt_level != "normal":
         parser.error("--opt-level requires --optimizer orca")
+
+    try:
+        effective_job_dir_pattern = apply_job_dir_prefix(
+            args.job_dir_pattern, args.job_prefix
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Build ORCA config from CLI arguments
     orca_config: OrcaConfig = {
@@ -2342,8 +2475,9 @@ def main():
             num_jobs=args.batch_size,
             max_workers=args.max_workers,
             cores_per_worker=args.cores_per_worker,
+            cpus_per_node=args.cpus_per_node,
             scheduler=args.scheduler,
-            job_dir_pattern=args.job_dir_pattern,
+            job_dir_pattern=effective_job_dir_pattern,
             orca_config=orca_config,
             n_cores=args.n_cores,
             conda_env=args.conda_env,
@@ -2370,7 +2504,7 @@ def main():
             root_dir=args.root_dir,
             batch_size=args.batch_size,
             scheduler=args.scheduler,
-            job_dir_pattern=args.job_dir_pattern,
+            job_dir_pattern=effective_job_dir_pattern,
             orca_config=orca_config,
             n_cores=args.n_cores,
             n_hours=args.n_hours,

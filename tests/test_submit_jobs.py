@@ -11,7 +11,9 @@ from oact_utilities.workflows.submit_jobs import (
     DEFAULT_ORCA_CONFIG,
     DEFAULT_ORCA_PATHS,
     OrcaConfig,
+    _classify_parsl_future_failure,
     _flush_pending_updates,
+    _is_manager_lost_exception,
     prepare_job_directory,
     write_flux_job_file,
     write_slurm_job_file,
@@ -465,6 +467,63 @@ class TestWriteSlurmJobFile:
 
         content = slurm_script.read_text()
         assert "export LD_LIBRARY_PATH=/custom/lib" in content
+
+
+class TestLegacySubmitBatch:
+    """Tests for the non-Parsl submit path."""
+
+    def test_flux_path_stays_on_legacy_batch_flow(self, monkeypatch, tmp_path):
+        """Flux submission should keep using the old one-shot batch logic."""
+        from types import SimpleNamespace
+
+        from oact_utilities.workflows import submit_jobs as sj
+
+        workflow = MagicMock()
+        workflow.mark_jobs_as_running = MagicMock()
+        workflow.claim_jobs_for_submission = MagicMock()
+        workflow.update_job_metrics_bulk = MagicMock()
+        workflow.update_status = MagicMock()
+
+        job1 = MagicMock(id=1, orig_index=1, job_dir=None, geometry="H 0 0 0", charge=0, spin=1)
+        job2 = MagicMock(id=2, orig_index=2, job_dir=None, geometry="H 0 0 0", charge=0, spin=1)
+
+        monkeypatch.setattr(
+            sj,
+            "filter_jobs_for_submission",
+            lambda *args, **kwargs: [job1, job2],
+        )
+        monkeypatch.setattr(sj, "_filter_marker_jobs", lambda jobs, *a, **k: jobs)
+        monkeypatch.setattr(sj, "_skip_finished_on_disk", lambda jobs, *a, **k: jobs)
+
+        def fake_prepare_job_directory(job_record, root_dir, **kwargs):
+            job_dir = root_dir / f"job_{job_record.id}"
+            job_dir.mkdir(parents=True, exist_ok=True)
+            (job_dir / "orca.inp").write_text("! test\n")
+            return job_dir
+
+        def fake_write_flux_job_file(job_dir, **kwargs):
+            job_script = job_dir / "flux_job.flux"
+            job_script.write_text("#!/bin/bash\n")
+            return job_script
+
+        monkeypatch.setattr(sj, "prepare_job_directory", fake_prepare_job_directory)
+        monkeypatch.setattr(sj, "write_flux_job_file", fake_write_flux_job_file)
+        monkeypatch.setattr(
+            sj.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(stdout="submitted"),
+        )
+
+        submitted = sj.submit_batch(
+            workflow=workflow,
+            root_dir=tmp_path / "root",
+            batch_size=2,
+            scheduler="flux",
+        )
+
+        assert submitted == [1, 2]
+        workflow.mark_jobs_as_running.assert_called_once_with([1, 2])
+        workflow.claim_jobs_for_submission.assert_not_called()
 
     def test_slurm_script_no_ld_library_path_by_default(self, tmp_path):
         """Test that LD_LIBRARY_PATH export is omitted when default is empty."""
@@ -1266,3 +1325,42 @@ class TestFlushPendingUpdates:
             assert len(failed) == 1
             assert len(timeout) == 1
             assert len(running) == 2  # jobs 4 and 5 unchanged
+
+
+class TestParslFailureClassification:
+    """Tests for Parsl failure classification helpers."""
+
+    def test_manager_lost_exception_is_detected_by_name(self):
+        """ManagerLost exceptions are recognized without importing Parsl."""
+
+        class ManagerLost(Exception):
+            pass
+
+        assert _is_manager_lost_exception(ManagerLost("lost manager"))
+
+    def test_worker_lost_exception_is_detected_by_message(self):
+        """WorkerLost text in the message is also treated as an infra loss."""
+        exc = RuntimeError("WorkerLost: task could not find its manager")
+        assert _is_manager_lost_exception(exc)
+
+    def test_manager_lost_maps_to_to_run(self):
+        """Manager loss should requeue the job instead of incrementing fail count."""
+
+        class ManagerLost(Exception):
+            pass
+
+        status, increment_fail_count, wandb_status = _classify_parsl_future_failure(
+            ManagerLost("manager vanished")
+        )
+        assert status == JobStatus.TO_RUN
+        assert increment_fail_count is False
+        assert wandb_status == "requeued"
+
+    def test_regular_exception_remains_failed(self):
+        """Non-infrastructure errors remain terminal failures."""
+        status, increment_fail_count, wandb_status = _classify_parsl_future_failure(
+            RuntimeError("SCF crashed")
+        )
+        assert status == JobStatus.FAILED
+        assert increment_fail_count is True
+        assert wandb_status == "failed"
