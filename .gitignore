@@ -247,6 +247,7 @@ __marimo__/
 *.in
 log
 *flux
+pbs_jobs/
 *pkl
 orca.py
 *.bak.*
