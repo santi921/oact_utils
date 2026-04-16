@@ -198,6 +198,7 @@ def prepare_job_directory(
     n_cores: int = 4,
     setup_func: Callable | None = None,
     return_full_path: bool = True,
+    force_root_dir: bool = False,
 ) -> Path:
     """Create a job directory and prepare ORCA input files.
 
@@ -211,11 +212,14 @@ def prepare_job_directory(
         setup_func: Optional function to set up additional files. Called with
                    (job_dir, job_record) as arguments.
         return_full_path: If True, return full path to job directory. If False, return relative path.
+        force_root_dir: If True, always construct job_dir from root_dir
+            instead of using the path stored in the database. Useful when
+            the database has been moved to a different location.
 
     Returns:
         Path to the created job directory.
     """
-    if job_record.job_dir:
+    if job_record.job_dir and not force_root_dir:
         job_dir = Path(job_record.job_dir)
     else:
         job_dir_name = render_job_dir_pattern(
@@ -434,6 +438,7 @@ def _filter_marker_jobs(
     root_dir: Path,
     job_dir_pattern: str,
     workflow: ArchitectorWorkflow,
+    force_root_dir: bool = False,
 ) -> list:
     """Filter out jobs that have a .do_not_rerun.json marker file.
 
@@ -446,6 +451,8 @@ def _filter_marker_jobs(
         job_dir_pattern: Pattern for job directory names. Supports
             {hostname}, {orig_index}, and {id}.
         workflow: ArchitectorWorkflow instance for DB updates.
+        force_root_dir: If True, skip DB job_dir and always use
+            root_dir + pattern for lookups.
 
     Returns:
         Filtered list of jobs (without marker-blocked ones).
@@ -456,7 +463,7 @@ def _filter_marker_jobs(
     for job in jobs:
         # Try DB job_dir first, then pattern-based path
         marker_found = False
-        if job.job_dir:
+        if job.job_dir and not force_root_dir:
             marker_path = Path(job.job_dir) / ".do_not_rerun.json"
             if marker_path.exists():
                 marker_found = True
@@ -493,6 +500,7 @@ def _skip_finished_on_disk(
     job_dir_pattern: str,
     workflow: ArchitectorWorkflow,
     hours_cutoff: float = 168,
+    force_root_dir: bool = False,
 ) -> list:
     """Filter out jobs that already completed or failed on disk.
 
@@ -513,6 +521,8 @@ def _skip_finished_on_disk(
         hours_cutoff: Hours threshold for timeout detection in
             check_job_termination. Defaults to 168 (1 week) to avoid
             false timeout classifications on idle directories.
+        force_root_dir: If True, skip DB job_dir and always use
+            root_dir + pattern for lookups.
 
     Returns:
         Filtered list of jobs (without completed/failed ones).
@@ -525,7 +535,7 @@ def _skip_finished_on_disk(
     for job in jobs:
         # Resolve directory: try DB job_dir first, then pattern-based path
         job_dir = None
-        if job.job_dir and Path(job.job_dir).is_dir():
+        if job.job_dir and not force_root_dir and Path(job.job_dir).is_dir():
             job_dir = job.job_dir
         else:
             pattern = render_job_dir_pattern(
@@ -1368,6 +1378,7 @@ def submit_batch_parsl(
     account: str = "ODEFN5169CYFZ",
     enable_monitoring: bool = True,
     wandb_run: Any | None = None,
+    reroot: bool = False,
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -1409,6 +1420,9 @@ def submit_batch_parsl(
         wandb_run: Optional W&B run object from ``init_wandb_run()``. When
             provided, each job completion/failure/timeout is logged in
             real-time. Pass ``None`` (default) to disable W&B logging.
+        reroot: If True, ignore job_dir paths stored in the database and
+            always construct paths from root_dir + job_dir_pattern. Useful
+            when the database has been relocated.
 
     Returns:
         List of submitted job IDs
@@ -1456,9 +1470,16 @@ def submit_batch_parsl(
         print("No jobs available for submission after filtering")
         return []
 
+    if reroot:
+        print("Reroot mode: ignoring database job_dir paths, using root_dir")
+
     # Filter out jobs with .do_not_rerun.json marker files
     jobs_to_submit = _filter_marker_jobs(
-        jobs_to_submit, root_dir, job_dir_pattern, workflow
+        jobs_to_submit,
+        root_dir,
+        job_dir_pattern,
+        workflow,
+        force_root_dir=reroot,
     )
 
     if not jobs_to_submit:
@@ -1467,7 +1488,11 @@ def submit_batch_parsl(
 
     # Filter out jobs that already completed or failed on disk
     jobs_to_submit = _skip_finished_on_disk(
-        jobs_to_submit, root_dir, job_dir_pattern, workflow
+        jobs_to_submit,
+        root_dir,
+        job_dir_pattern,
+        workflow,
+        force_root_dir=reroot,
     )
 
     if not jobs_to_submit:
@@ -1510,6 +1535,7 @@ def submit_batch_parsl(
                 orca_config=config,
                 n_cores=n_cores,
                 setup_func=setup_func,
+                force_root_dir=reroot,
             )
             # Collect for batch commit instead of per-job commit
             if not dry_run:
@@ -1913,6 +1939,7 @@ def submit_batch(
     dry_run: bool = False,
     max_fail_count: int | None = None,
     randomize: bool = True,
+    reroot: bool = False,
 ) -> list[int]:
     """Submit a batch of ready jobs to the HPC scheduler.
 
@@ -1934,6 +1961,9 @@ def submit_batch(
         dry_run: If True, prepare directories but don't submit.
         max_fail_count: If specified, skip jobs with fail_count >= this value.
         randomize: Randomize job selection order (default: True).
+        reroot: If True, ignore job_dir paths stored in the database and
+            always construct paths from root_dir + job_dir_pattern. Useful
+            when the database has been relocated.
 
     Returns:
         List of job IDs that were submitted.
@@ -1961,9 +1991,16 @@ def submit_batch(
 
     print(f"Preparing {len(jobs_to_submit)} jobs for submission...")
 
+    if reroot:
+        print("Reroot mode: ignoring database job_dir paths, using root_dir")
+
     # Filter out jobs with .do_not_rerun.json marker files
     jobs_to_submit = _filter_marker_jobs(
-        jobs_to_submit, root_dir, job_dir_pattern, workflow
+        jobs_to_submit,
+        root_dir,
+        job_dir_pattern,
+        workflow,
+        force_root_dir=reroot,
     )
 
     if not jobs_to_submit:
@@ -1972,7 +2009,11 @@ def submit_batch(
 
     # Filter out jobs that already completed or failed on disk
     jobs_to_submit = _skip_finished_on_disk(
-        jobs_to_submit, root_dir, job_dir_pattern, workflow
+        jobs_to_submit,
+        root_dir,
+        job_dir_pattern,
+        workflow,
+        force_root_dir=reroot,
     )
 
     if not jobs_to_submit:
@@ -1999,6 +2040,7 @@ def submit_batch(
                 orca_config=config,
                 n_cores=n_cores,
                 setup_func=setup_func,
+                force_root_dir=reroot,
             )
 
             # Collect for batch commit (avoids per-job lock contention)
@@ -2166,6 +2208,15 @@ def main():
         "--dry-run",
         action="store_true",
         help="Prepare jobs but don't submit",
+    )
+    parser.add_argument(
+        "--reroot",
+        action="store_true",
+        help=(
+            "Ignore job_dir paths stored in the database and always "
+            "construct paths from root_dir. Useful when the database "
+            "has been moved to a different directory."
+        ),
     )
 
     # Parsl-specific options
@@ -2483,6 +2534,7 @@ def main():
             account=args.account,
             enable_monitoring=not args.no_parsl_monitoring,
             wandb_run=wandb_run,
+            reroot=args.reroot,
         )
     else:
         # Traditional mode: one job script per job
@@ -2502,6 +2554,7 @@ def main():
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             randomize=True,
+            reroot=args.reroot,
         )
 
     print(f"\nTotal jobs submitted: {len(submitted_ids)}")
