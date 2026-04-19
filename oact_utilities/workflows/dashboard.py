@@ -14,6 +14,7 @@ from typing import Callable
 
 from ..utils.status import check_job_termination, parse_failure_reason
 from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
 from .job_dir_patterns import (
     DEFAULT_JOB_DIR_PATTERN,
     apply_job_dir_prefix,
@@ -489,11 +490,12 @@ def _check_single_job_status(
     current_status: JobStatus,
     job_dir: Path,
     check_func: Callable,
-) -> dict:
+) -> dict | None:
     """Check status of a single job (pure I/O, no DB writes).
 
     Returns:
-        Dictionary with job_id, old_status, new_status, job_dir, marker_blocked.
+        Dictionary with job_id, old_status, new_status, job_dir, marker_blocked,
+        or None if job_dir does not exist.
     """
     if not job_dir.exists():
         return None
@@ -501,7 +503,7 @@ def _check_single_job_status(
     # .do_not_rerun.json (written by clean.py --purge-failed) overrides all
     # other checks. Without this, a purged directory (which has no orca.out)
     # would be classified as RUNNING or TIMEOUT and could be cycled by submit.
-    marker_blocked = (job_dir / ".do_not_rerun.json").exists()
+    marker_blocked = is_marker_blocked(job_dir)
     if marker_blocked:
         new_status = JobStatus.FAILED
     else:
@@ -524,6 +526,35 @@ def _check_single_job_status(
         "job_dir": job_dir,
         "marker_blocked": marker_blocked,
     }
+
+
+def _commit_status_changes(
+    workflow: ArchitectorWorkflow,
+    status_groups: dict[JobStatus, list[int]],
+    marker_blocked_by_old_status: dict[JobStatus, list[int]],
+) -> None:
+    """Persist status transitions + marker-blocked transitions in one commit.
+
+    Marker-blocked rows are written with `only_if_status=old_status` (CAS)
+    so concurrent writers (submit_jobs, a second dashboard) that already
+    flipped the row to FAILED do not cause a second fail_count increment.
+    """
+    additional = [
+        {
+            "job_ids": ids,
+            "new_status": JobStatus.FAILED,
+            "error_message": MARKER_ERROR_MESSAGE,
+            "increment_fail_count": True,
+            "only_if_status": old_status,
+        }
+        for old_status, ids in marker_blocked_by_old_status.items()
+        if ids
+    ]
+    workflow.update_status_bulk_multi(status_groups, additional=additional or None)
+
+    total = sum(len(ids) for ids in marker_blocked_by_old_status.values())
+    if total:
+        print(f"  Marker-blocked: {total} job(s) reverted to FAILED")
 
 
 def _parallel_status_check(
@@ -610,15 +641,17 @@ def _parallel_status_check(
     }
     completed_for_metrics = []
 
-    # Group changed jobs by their new status. Marker-blocked jobs go through
-    # a separate update call so we can attach error_message + increment
-    # fail_count (mirrors submit_jobs._filter_marker_jobs behaviour).
+    # Group changed jobs by their new status. Marker-blocked jobs are
+    # grouped by snapshot old_status so _commit_status_changes can use
+    # only_if_status as a CAS guard against concurrent writers.
     status_groups: dict[JobStatus, list[int]] = {}
-    marker_blocked_ids: list[int] = []
+    marker_blocked_by_old_status: dict[JobStatus, list[int]] = {}
     for update in status_updates:
         if update["new_status"] != update["old_status"]:
             if update["marker_blocked"]:
-                marker_blocked_ids.append(update["job_id"])
+                marker_blocked_by_old_status.setdefault(
+                    update["old_status"], []
+                ).append(update["job_id"])
             else:
                 status_groups.setdefault(update["new_status"], []).append(
                     update["job_id"]
@@ -634,17 +667,7 @@ def _parallel_status_check(
             if extract_metrics and update["new_status"] == JobStatus.COMPLETED:
                 completed_for_metrics.append((update["job_id"], update["job_dir"]))
 
-    # Single transaction for all status groups (one commit total)
-    workflow.update_status_bulk_multi(status_groups)
-
-    if marker_blocked_ids:
-        workflow.update_status_bulk(
-            marker_blocked_ids,
-            JobStatus.FAILED,
-            increment_fail_count=True,
-            error_message="Blocked by .do_not_rerun.json marker",
-        )
-        print(f"  Marker-blocked: {len(marker_blocked_ids)} job(s) reverted to FAILED")
+    _commit_status_changes(workflow, status_groups, marker_blocked_by_old_status)
 
     return updated_counts, completed_for_metrics
 
@@ -698,9 +721,11 @@ def _sequential_status_check(
             disable=verbose,
         )
 
-    # Collect all status changes, then batch-write at the end
+    # Collect all status changes, then batch-write at the end.
+    # Marker-blocked rows are grouped by snapshot old_status so the
+    # commit helper can issue CAS-guarded updates.
     status_groups: dict[JobStatus, list[int]] = {}
-    marker_blocked_ids: list[int] = []
+    marker_blocked_by_old_status: dict[JobStatus, list[int]] = {}
 
     for i, job in enumerate(jobs_iter):
         # Format job directory name
@@ -716,7 +741,7 @@ def _sequential_status_check(
 
         # .do_not_rerun.json marker overrides other checks (see
         # _check_single_job_status for rationale).
-        marker_blocked = (job_dir / ".do_not_rerun.json").exists()
+        marker_blocked = is_marker_blocked(job_dir)
         if marker_blocked:
             new_status = JobStatus.FAILED
         else:
@@ -734,7 +759,7 @@ def _sequential_status_check(
         # Track if changed
         if new_status != job.status:
             if marker_blocked:
-                marker_blocked_ids.append(job.id)
+                marker_blocked_by_old_status.setdefault(job.status, []).append(job.id)
             else:
                 status_groups.setdefault(new_status, []).append(job.id)
             updated_counts[new_status] += 1
@@ -748,17 +773,7 @@ def _sequential_status_check(
             if extract_metrics and new_status == JobStatus.COMPLETED:
                 completed_for_metrics.append((job.id, job_dir))
 
-    # Single transaction for all status groups (one commit total)
-    workflow.update_status_bulk_multi(status_groups)
-
-    if marker_blocked_ids:
-        workflow.update_status_bulk(
-            marker_blocked_ids,
-            JobStatus.FAILED,
-            increment_fail_count=True,
-            error_message="Blocked by .do_not_rerun.json marker",
-        )
-        print(f"  Marker-blocked: {len(marker_blocked_ids)} job(s) reverted to FAILED")
+    _commit_status_changes(workflow, status_groups, marker_blocked_by_old_status)
 
     return updated_counts, completed_for_metrics
 

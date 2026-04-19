@@ -29,6 +29,7 @@ from ..utils.analysis import (
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
 from .job_dir_patterns import (
     DEFAULT_JOB_DIR_PATTERN,
     apply_job_dir_prefix,
@@ -464,18 +465,14 @@ def _filter_marker_jobs(
         # Try DB job_dir first, then pattern-based path
         marker_found = False
         if job.job_dir and not force_root_dir:
-            marker_path = Path(job.job_dir) / ".do_not_rerun.json"
-            if marker_path.exists():
-                marker_found = True
+            marker_found = is_marker_blocked(Path(job.job_dir))
         if not marker_found:
             pattern = render_job_dir_pattern(
                 job_dir_pattern,
                 orig_index=job.orig_index,
                 job_id=job.id,
             )
-            candidate = root_dir / pattern / ".do_not_rerun.json"
-            if candidate.exists():
-                marker_found = True
+            marker_found = is_marker_blocked(root_dir / pattern)
 
         if marker_found:
             skip_ids.append(job.id)
@@ -487,7 +484,7 @@ def _filter_marker_jobs(
             skip_ids,
             JobStatus.FAILED,
             increment_fail_count=True,
-            error_message="Blocked by .do_not_rerun.json marker",
+            error_message=MARKER_ERROR_MESSAGE,
         )
         print(f"Skipped {len(skip_ids)} jobs due to .do_not_rerun.json marker")
 

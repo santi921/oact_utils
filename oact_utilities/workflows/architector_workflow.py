@@ -576,6 +576,7 @@ class ArchitectorWorkflow:
     def update_status_bulk_multi(
         self,
         status_groups: dict[JobStatus, list[int]],
+        additional: list[dict] | None = None,
     ):
         """Update multiple status groups in a single transaction.
 
@@ -584,9 +585,19 @@ class ArchitectorWorkflow:
         to the same database on a parallel filesystem.
 
         Args:
-            status_groups: Mapping of new_status -> list of job IDs.
+            status_groups: Mapping of new_status -> list of job IDs. Each
+                group writes only status + updated_at (no error_message,
+                no fail_count bump).
+            additional: Optional list of extra updates to fold into the
+                same transaction. Each dict supports:
+                    - job_ids (list[int], required)
+                    - new_status (JobStatus, required)
+                    - error_message (str, optional)
+                    - increment_fail_count (bool, optional, default False)
+                    - only_if_status (JobStatus, optional) -- CAS guard:
+                      only update rows currently in this status.
         """
-        if not status_groups:
+        if not status_groups and not additional:
             return
 
         for new_status, job_ids in status_groups.items():
@@ -595,6 +606,30 @@ class ArchitectorWorkflow:
             placeholders = ",".join("?" * len(job_ids))
             query = f"UPDATE structures SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"
             self._execute_with_retry(query, tuple([new_status.value] + job_ids))
+
+        for extra in additional or ():
+            job_ids = extra["job_ids"]
+            if not job_ids:
+                continue
+            new_status = extra["new_status"]
+            set_clauses = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+            params: list = [new_status.value]
+            if extra.get("increment_fail_count"):
+                set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+            error_message = extra.get("error_message")
+            if error_message is not None:
+                set_clauses.append("error_message = ?")
+                params.append(error_message)
+            placeholders = ",".join("?" * len(job_ids))
+            where = f"id IN ({placeholders})"
+            only_if = extra.get("only_if_status")
+            extra_params: list = list(job_ids)
+            if only_if is not None:
+                where += " AND status = ?"
+                extra_params.append(only_if.value)
+            query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE {where}"
+            self._execute_with_retry(query, tuple(params + extra_params))
+
         self._commit_with_retry()
 
     def count_by_status(self) -> dict[JobStatus, int]:
