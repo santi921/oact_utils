@@ -17,6 +17,7 @@ import warnings
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TypedDict
 
 import pandas as pd
 
@@ -32,6 +33,21 @@ class JobStatus(str, Enum):
     COMPLETED = "completed"  # Job finished successfully
     FAILED = "failed"  # Job failed or crashed
     TIMEOUT = "timeout"  # Job timed out without completing
+
+
+class StatusGroupUpdate(TypedDict, total=False):
+    """Typed payload for `update_status_bulk_multi(additional=[...])`.
+
+    `job_ids` and `new_status` are logically required; the rest are optional.
+    `total=False` keeps the dict-literal call sites ergonomic while letting
+    static analysis catch typos in the key names.
+    """
+
+    job_ids: list[int]
+    new_status: JobStatus
+    error_message: str
+    increment_fail_count: bool
+    only_if_status: JobStatus
 
 
 @dataclass
@@ -576,7 +592,7 @@ class ArchitectorWorkflow:
     def update_status_bulk_multi(
         self,
         status_groups: dict[JobStatus, list[int]],
-        additional: list[dict] | None = None,
+        additional: list[StatusGroupUpdate] | None = None,
     ):
         """Update multiple status groups in a single transaction.
 
@@ -588,14 +604,9 @@ class ArchitectorWorkflow:
             status_groups: Mapping of new_status -> list of job IDs. Each
                 group writes only status + updated_at (no error_message,
                 no fail_count bump).
-            additional: Optional list of extra updates to fold into the
-                same transaction. Each dict supports:
-                    - job_ids (list[int], required)
-                    - new_status (JobStatus, required)
-                    - error_message (str, optional)
-                    - increment_fail_count (bool, optional, default False)
-                    - only_if_status (JobStatus, optional) -- CAS guard:
-                      only update rows currently in this status.
+            additional: Optional list of StatusGroupUpdate entries folded
+                into the same transaction. Useful for writes that need
+                error_message, fail_count increment, or only_if_status CAS.
         """
         if not status_groups and not additional:
             return
@@ -608,22 +619,22 @@ class ArchitectorWorkflow:
             self._execute_with_retry(query, tuple([new_status.value] + job_ids))
 
         for extra in additional or ():
-            job_ids = extra["job_ids"]
-            if not job_ids:
+            extra_job_ids = extra["job_ids"]
+            if not extra_job_ids:
                 continue
-            new_status = extra["new_status"]
+            extra_status = extra["new_status"]
             set_clauses = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
-            params: list = [new_status.value]
+            params: list = [extra_status.value]
             if extra.get("increment_fail_count"):
                 set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
             error_message = extra.get("error_message")
             if error_message is not None:
                 set_clauses.append("error_message = ?")
                 params.append(error_message)
-            placeholders = ",".join("?" * len(job_ids))
+            placeholders = ",".join("?" * len(extra_job_ids))
             where = f"id IN ({placeholders})"
             only_if = extra.get("only_if_status")
-            extra_params: list = list(job_ids)
+            extra_params: list = list(extra_job_ids)
             if only_if is not None:
                 where += " AND status = ?"
                 extra_params.append(only_if.value)

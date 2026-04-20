@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..utils.status import check_job_termination, parse_failure_reason
-from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .architector_workflow import ArchitectorWorkflow, JobStatus, StatusGroupUpdate
 from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
 from .job_dir_patterns import (
     DEFAULT_JOB_DIR_PATTERN,
@@ -539,7 +539,7 @@ def _commit_status_changes(
     so concurrent writers (submit_jobs, a second dashboard) that already
     flipped the row to FAILED do not cause a second fail_count increment.
     """
-    additional = [
+    additional: list[StatusGroupUpdate] = [
         {
             "job_ids": ids,
             "new_status": JobStatus.FAILED,
