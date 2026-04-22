@@ -343,7 +343,7 @@ def show_sella_running_progress(
     root_dir: Path,
     job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     limit: int = 20,
-    workers: int = 4,
+    workers: int = 8,
 ) -> None:
     """Show running sella jobs with their current step from sella.log.
 
@@ -354,6 +354,11 @@ def show_sella_running_progress(
 
     `job_dir_pattern` supports the existing {hostname}, {orig_index},
     {id} placeholders via render_job_dir_pattern().
+
+    `workers` defaults to 8 -- this path does three metadata ops per
+    job (exists, getmtime, read-tail) rather than one, so the shared
+    dashboard default of 4 undersubscribes on Lustre at 1000+ jobs.
+    Override with the existing ``--workers`` CLI flag.
     """
     import datetime
     from concurrent.futures import ThreadPoolExecutor, as_completed

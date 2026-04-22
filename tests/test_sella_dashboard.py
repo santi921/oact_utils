@@ -64,24 +64,22 @@ def test_read_sella_log_tail_against_fixtures(name, expected):
     assert row["fmax"] == pytest.approx(expected["fmax"], abs=1e-3)
 
 
-def test_read_sella_log_tail_missing_file(tmp_path):
-    """Non-existent sella.log returns None without raising."""
-    assert read_sella_log_tail(tmp_path / "nope.log") is None
-
-
-def test_read_sella_log_tail_header_only(tmp_path):
-    """A log with only the header row returns None."""
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(None, id="missing_file"),
+        pytest.param("", id="empty_file"),
+        pytest.param(
+            "     Step     Time          Energy         fmax         cmax       rtrust          rho\n",
+            id="header_only",
+        ),
+    ],
+)
+def test_read_sella_log_tail_none_cases(tmp_path, content):
+    """Missing / empty / header-only logs all return None."""
     log = tmp_path / "sella.log"
-    log.write_text(
-        "     Step     Time          Energy         fmax         cmax       rtrust          rho\n"
-    )
-    assert read_sella_log_tail(log) is None
-
-
-def test_read_sella_log_tail_empty_file(tmp_path):
-    """Empty file returns None."""
-    log = tmp_path / "sella.log"
-    log.write_text("")
+    if content is not None:
+        log.write_text(content)
     assert read_sella_log_tail(log) is None
 
 
@@ -275,6 +273,45 @@ def test_bulk_write_persists_sella_columns(tmp_path):
         )
         assert refetched.sella_steps == 7
         assert refetched.sella_converged == 1
+
+
+def test_bulk_write_rejects_invalid_sella_converged(tmp_path):
+    """sella_converged must be 0, 1, or None -- other values raise.
+
+    SQLite would silently coerce True/False to 1/0 and accept 42, -1,
+    or strings. The tri-state invariant downstream code relies on
+    (dashboard summary, pymatgen/AiiDA-style semantics) would be
+    broken without this guard.
+    """
+    db = _build_sample_db(tmp_path)
+
+    with ArchitectorWorkflow(db) as wf:
+        j = wf.get_jobs_by_status(JobStatus.TO_RUN)[0]
+
+        for bad_value in (2, -1, "CONVERGED", True, False):
+            with pytest.raises(ValueError, match="sella_converged"):
+                wf.update_job_metrics_bulk(
+                    [{"job_id": j.id, "sella_converged": bad_value}]
+                )
+
+
+def test_partial_index_on_optimizer_exists(tmp_path):
+    """Migration creates a partial index on the optimizer column.
+
+    The index turns has_sella_jobs()'s auto-detection from a full
+    table scan into an index lookup on SP-only campaigns.
+    """
+    db = _build_sample_db(tmp_path)
+    with ArchitectorWorkflow(db) as wf:
+        cur = wf._execute_with_retry(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type='index' AND name='idx_optimizer_sella'"
+        )
+        row = cur.fetchone()
+        assert row is not None, "idx_optimizer_sella should exist"
+        # Partial -- skips rows where optimizer IS NULL so SP-only DBs
+        # pay ~zero index overhead.
+        assert "optimizer IS NOT NULL" in row[1]
 
 
 def test_bulk_write_leaves_sella_columns_null_when_absent(tmp_path):

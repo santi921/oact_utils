@@ -185,17 +185,27 @@ class ArchitectorWorkflow:
         return conn
 
     def _ensure_schema(self) -> None:
-        """Auto-migrate schema by adding missing columns.
+        """Auto-migrate schema by adding missing columns and indexes.
 
-        Adds columns that may not exist in older databases:
-        - ``optimizer`` TEXT (added in v1)
-        - ``worker_id`` TEXT (added in v2 -- scheduler job ID for crash recovery)
+        Columns added on first open if missing:
+        - ``optimizer`` TEXT (v1)
+        - ``worker_id`` TEXT (v2 -- scheduler job ID for crash recovery)
+        - ``generator_data`` TEXT (v3 -- qtaim-gen output)
+        - ``sella_steps`` INTEGER (v4 -- total Sella opt steps)
+        - ``sella_converged`` INTEGER (v4 -- 1/0/NULL tri-state, see
+          ``update_job_metrics_bulk``)
+
+        Indexes added on first open if missing:
+        - ``idx_optimizer_sella`` partial index on ``optimizer`` -- avoids
+          full table scan when the dashboard's ``has_sella_jobs()``
+          auto-detection runs on SP-only campaigns. Partial keeps the
+          index small (covers only rows with optimizer set).
 
         Also migrates legacy ``ready`` status values to ``to_run``.
 
-        Safe under concurrent access: catches the duplicate column error
-        that arises when another process adds the column between our
-        PRAGMA check and the ALTER TABLE statement.
+        Safe under concurrent access: catches the duplicate column/index
+        errors that arise when another process adds them between our
+        PRAGMA check and the ALTER / CREATE INDEX statement.
         """
         cur = self._execute_with_retry("PRAGMA table_info(structures)")
         existing_cols = {row[1] for row in cur.fetchall()}
@@ -224,6 +234,20 @@ class ArchitectorWorkflow:
                         pass  # Another process already added the column
                     else:
                         raise
+
+        # Partial index on optimizer -- turns has_sella_jobs() from a
+        # full scan into an index lookup. "IF NOT EXISTS" makes this
+        # idempotent across concurrent openers.
+        try:
+            self._execute_with_retry(
+                "CREATE INDEX IF NOT EXISTS idx_optimizer_sella "
+                "ON structures(optimizer) WHERE optimizer IS NOT NULL"
+            )
+            self._commit_with_retry()
+        except sqlite3.OperationalError as e:
+            # "index ... already exists" races are idempotent; re-raise others.
+            if "already exists" not in str(e).lower():
+                raise
 
         # Migrate legacy "ready" status to "to_run" (idempotent).
         # Guard with a read-only count check so mature databases skip the write
@@ -547,6 +571,22 @@ class ArchitectorWorkflow:
             updates = []
             values = []
             job_id = metrics["job_id"]
+
+            # Tri-state guard: sella_converged must be 0, 1, or None.
+            # Reject booleans explicitly -- bool is a subclass of int
+            # and True == 1 / False == 0 by equality, so without the
+            # `isinstance(sc, bool)` check they would pass through and
+            # silently coerce. SQLite would happily round-trip any int
+            # value; downstream tri-state consumers (dashboard summary)
+            # would break on 2/-1/True/False/etc.
+            sc = metrics.get("sella_converged")
+            if sc is not None and (
+                isinstance(sc, bool) or not isinstance(sc, int) or sc not in (0, 1)
+            ):
+                raise ValueError(
+                    f"sella_converged must be 0, 1, or None; got {sc!r} "
+                    f"for job_id={job_id}"
+                )
 
             for col in self._BULK_METRIC_COLS:
                 if metrics.get(col) is not None:
