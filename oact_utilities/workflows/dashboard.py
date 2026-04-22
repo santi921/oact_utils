@@ -221,16 +221,26 @@ def print_sella_summary(workflow: ArchitectorWorkflow, limit: int = 20) -> None:
     # ~400KB list just to compute 3 scalars.
     #
     # sella_converged tri-state:
-    #   completed + sella_converged=1  -> CONVERGED
-    #   completed + sella_converged=0  -> NOT_CONVERGED (hit max_steps)
-    #   completed + sella_converged IS NULL -> ERROR
-    #   running                        -> RUNNING
+    #   completed + sella_converged=1        -> CONVERGED
+    #   completed + sella_converged=0        -> NOT_CONVERGED (hit max_steps)
+    #   completed + sella_converged IS NULL  -> ERROR (unparseable status)
+    #   failed / timeout                     -> ERROR
+    #   running                              -> RUNNING
+    #
+    # The "completed + NULL converged" case is a real parse error (Sella
+    # exited cleanly but sella_status.txt was missing/unreadable); it must
+    # roll into ERROR so percentages sum to 100% and no real failure mode
+    # is silently dropped.
     cur = workflow._execute_with_retry(
         """
         SELECT
           SUM(CASE WHEN status = 'completed' AND sella_converged = 1 THEN 1 ELSE 0 END),
           SUM(CASE WHEN status = 'completed' AND sella_converged = 0 THEN 1 ELSE 0 END),
-          SUM(CASE WHEN status IN ('failed','timeout') THEN 1 ELSE 0 END),
+          SUM(CASE
+                WHEN status IN ('failed','timeout')
+                  OR (status = 'completed' AND sella_converged IS NULL)
+                THEN 1 ELSE 0
+              END),
           SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),
           COUNT(*),
           AVG(CASE WHEN status = 'completed' AND sella_steps IS NOT NULL THEN sella_steps END),
@@ -363,11 +373,9 @@ def show_sella_running_progress(
     import datetime
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    running = [
-        j
-        for j in workflow.get_jobs_by_status(JobStatus.RUNNING, include_geometry=False)
-        if j.optimizer == "sella"
-    ]
+    running = workflow.get_jobs_by_status(
+        JobStatus.RUNNING, include_geometry=False, optimizer="sella"
+    )
     if not running:
         print_header("Running Sella Jobs")
         print("\nNo running sella jobs.")

@@ -236,18 +236,26 @@ class ArchitectorWorkflow:
                         raise
 
         # Partial index on optimizer -- turns has_sella_jobs() from a
-        # full scan into an index lookup. "IF NOT EXISTS" makes this
-        # idempotent across concurrent openers.
-        try:
-            self._execute_with_retry(
-                "CREATE INDEX IF NOT EXISTS idx_optimizer_sella "
-                "ON structures(optimizer) WHERE optimizer IS NOT NULL"
-            )
-            self._commit_with_retry()
-        except sqlite3.OperationalError as e:
-            # "index ... already exists" races are idempotent; re-raise others.
-            if "already exists" not in str(e).lower():
-                raise
+        # full scan into an index lookup. Gated behind a read-only check
+        # of sqlite_master so mature databases skip the write lock +
+        # fsync entirely (same pattern as the legacy-status migration
+        # below) -- avoids N * ~200ms Lustre fsyncs when many Parsl
+        # workers open the DB concurrently at campaign start.
+        cur = self._execute_with_retry(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("idx_optimizer_sella",),
+        )
+        if cur.fetchone() is None:
+            try:
+                self._execute_with_retry(
+                    "CREATE INDEX IF NOT EXISTS idx_optimizer_sella "
+                    "ON structures(optimizer) WHERE optimizer IS NOT NULL"
+                )
+                self._commit_with_retry()
+            except sqlite3.OperationalError as e:
+                # Racing concurrent opener may have created it first.
+                if "already exists" not in str(e).lower():
+                    raise
 
         # Migrate legacy "ready" status to "to_run" (idempotent).
         # Guard with a read-only count check so mature databases skip the write
@@ -408,6 +416,7 @@ class ArchitectorWorkflow:
         status: JobStatus | list[JobStatus] | None = None,
         limit: int | None = None,
         include_geometry: bool = False,
+        optimizer: str | None = None,
     ) -> list[JobRecord]:
         """Retrieve jobs filtered by status.
 
@@ -416,6 +425,11 @@ class ArchitectorWorkflow:
             limit: If set, return at most this many rows (SQL LIMIT).
             include_geometry: If True, include the geometry column (large).
                 Defaults to False for performance.
+            optimizer: If set, further filter to rows where
+                ``optimizer = ?``. Uses ``idx_optimizer_sella`` when set
+                to ``'sella'``, avoiding the Python-side list-comp filter
+                pattern that materialises every running job just to
+                discard non-sella rows.
 
         Returns:
             List of JobRecord objects matching the filter.
@@ -423,16 +437,23 @@ class ArchitectorWorkflow:
         cols = "*" if include_geometry else self._LIGHT_COLS
         suffix = f" LIMIT {int(limit)}" if limit is not None else ""
 
-        if status is None:
-            query = f"SELECT {cols} FROM structures{suffix}"
-            cur = self._execute_with_retry(query)
-        elif isinstance(status, list):
-            placeholders = ",".join("?" * len(status))
-            query = f"SELECT {cols} FROM structures WHERE status IN ({placeholders}){suffix}"
-            cur = self._execute_with_retry(query, tuple(s.value for s in status))
-        else:
-            query = f"SELECT {cols} FROM structures WHERE status = ?{suffix}"
-            cur = self._execute_with_retry(query, (status.value,))
+        clauses: list[str] = []
+        params: list = []
+        if status is not None:
+            if isinstance(status, list):
+                placeholders = ",".join("?" * len(status))
+                clauses.append(f"status IN ({placeholders})")
+                params.extend(s.value for s in status)
+            else:
+                clauses.append("status = ?")
+                params.append(status.value)
+        if optimizer is not None:
+            clauses.append("optimizer = ?")
+            params.append(optimizer)
+
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"SELECT {cols} FROM structures{where}{suffix}"
+        cur = self._execute_with_retry(query, tuple(params))
 
         rows = cur.fetchall()
         return [self._row_to_record(r) for r in rows]

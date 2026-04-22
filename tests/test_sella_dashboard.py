@@ -123,40 +123,9 @@ def test_read_sella_log_tail_restart_with_partial_second_segment(tmp_path):
     assert row["fmax"] == pytest.approx(0.06, abs=1e-3)
 
 
-def test_read_sella_log_tail_does_not_touch_trajectory():
-    """Verify the tail-reader does not read opt.traj.
-
-    ASE trajectory append-while-read is documented unsafe
-    (https://gitlab.com/ase/ase/-/issues/249). The tail-reader must
-    only read sella.log.
-
-    Inspects the function body post-docstring via AST so docstring
-    references to opt.traj (which are legitimate warnings in prose)
-    do not false-trigger the guard.
-    """
-    import ast
-    import inspect
-
-    src = inspect.getsource(read_sella_log_tail)
-    tree = ast.parse(src)
-    func = tree.body[0]
-    assert isinstance(func, ast.FunctionDef)
-
-    # Strip the docstring and re-serialize the function body.
-    body = func.body
-    if (
-        body
-        and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, ast.Constant)
-    ):
-        body = body[1:]
-    func.body = body or [ast.Pass()]
-    code_only = ast.unparse(func)
-
-    # No Trajectory class/function references in the code path.
-    assert "Trajectory" not in code_only
-    # No .traj file reads either.
-    assert ".traj" not in code_only
+# Tested by test_sella_progress_functions_do_not_touch_trajectory below,
+# which parametrises over every function in the running-progress code path
+# (including read_sella_log_tail).
 
 
 # --------------------------------------------------------------------
@@ -570,34 +539,32 @@ def test_sella_progress_row_is_typed():
     }
 
 
-def test_show_sella_running_progress_does_not_touch_trajectory():
-    """Dashboard's running-progress code path must not read opt.traj."""
-    import ast
+@pytest.mark.parametrize(
+    "import_path",
+    [
+        "oact_utilities.utils.analysis.read_sella_log_tail",
+        "oact_utilities.workflows.dashboard._probe_sella_current_step",
+        "oact_utilities.workflows.dashboard.show_sella_running_progress",
+    ],
+)
+def test_sella_progress_functions_do_not_touch_trajectory(import_path):
+    """Running-progress path must never open opt.traj.
+
+    ASE trajectory append-while-read is unsafe
+    (https://gitlab.com/ase/ase/-/issues/249). Docstrings legitimately
+    mention opt.traj as a warning, so strip them before checking.
+    """
+    import importlib
     import inspect
 
-    from oact_utilities.workflows.dashboard import (
-        _probe_sella_current_step,
-        show_sella_running_progress,
-    )
-
-    for fn in (_probe_sella_current_step, show_sella_running_progress):
-        src = inspect.getsource(fn)
-        tree = ast.parse(src)
-        func = tree.body[0]
-        assert isinstance(func, ast.FunctionDef)
-
-        body = func.body
-        if (
-            body
-            and isinstance(body[0], ast.Expr)
-            and isinstance(body[0].value, ast.Constant)
-        ):
-            body = body[1:]
-        func.body = body or [ast.Pass()]
-        code_only = ast.unparse(func)
-
-        assert "Trajectory" not in code_only, f"{fn.__name__} references Trajectory"
-        assert ".traj" not in code_only, f"{fn.__name__} references .traj"
+    mod_path, _, attr = import_path.rpartition(".")
+    fn = getattr(importlib.import_module(mod_path), attr)
+    src = inspect.getsource(fn)
+    doc = fn.__doc__
+    if doc is not None:
+        src = src.replace(doc, "", 1)
+    assert "Trajectory" not in src, f"{fn.__name__} references Trajectory"
+    assert ".traj" not in src, f"{fn.__name__} references .traj"
 
 
 def test_parse_job_metrics_sella_not_converged(tmp_path):

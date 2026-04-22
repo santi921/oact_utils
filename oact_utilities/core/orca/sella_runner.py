@@ -108,19 +108,23 @@ def run_sella_optimization(
             # resume from the last frame instead of restarting from the
             # orca.inp geometry. prior_steps is the number of Sella steps
             # already recorded in the trajectory.
+            #
+            # ase>=3.23 required: Dynamics.irun() skips the initial-frame
+            # observer write when append_trajectory=True and the traj is
+            # non-empty (see _traj_is_empty() guard). Older ASE duplicates
+            # frame 0 across restart boundaries, drifting step accounting.
             restart_atoms = None
             prior_steps = 0
             traj_path = job_path / "opt.traj"
             if traj_path.exists() and traj_path.stat().st_size > 0:
                 try:
-                    existing = Trajectory(str(traj_path), "r")
-                    n_frames = len(existing)
-                    if n_frames > 0:
-                        restart_atoms = existing[-1]
-                        # Frame 0 is the initial geometry; each later frame
-                        # corresponds to one accepted Sella step.
-                        prior_steps = max(0, n_frames - 1)
-                    existing.close()
+                    with Trajectory(str(traj_path), "r") as existing:
+                        n_frames = len(existing)
+                        if n_frames > 0:
+                            restart_atoms = existing[-1]
+                            # Frame 0 is the initial geometry; each later
+                            # frame corresponds to one accepted Sella step.
+                            prior_steps = max(0, n_frames - 1)
                 except Exception as e:
                     print(
                         f"[sella_runner] warning: could not read opt.traj for "
@@ -185,13 +189,14 @@ def run_sella_optimization(
                 if save_all_steps:
                     # Start step_NNN numbering past the last existing folder
                     # so prior directories are not overwritten on restart.
-                    existing_steps = sorted(job_path.glob("step_[0-9]*"))
-                    start_idx = 0
-                    if existing_steps:
-                        try:
-                            start_idx = int(existing_steps[-1].name.split("_")[1]) + 1
-                        except (IndexError, ValueError):
-                            start_idx = len(existing_steps)
+                    # Parse suffix numerically so sort order is correct past
+                    # step_999 (lexicographic sort puts step_1000 before step_99).
+                    existing_indices: list[int] = []
+                    for p in job_path.glob("step_*"):
+                        suffix = p.name.split("_", 1)[1]
+                        if suffix.isdigit():
+                            existing_indices.append(int(suffix))
+                    start_idx = max(existing_indices) + 1 if existing_indices else 0
                     step_counter: list[int] = [start_idx]
                     opt.attach(
                         _save_step_outputs,
