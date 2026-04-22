@@ -8,6 +8,7 @@ to check job progress.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Callable
@@ -182,6 +183,217 @@ def print_metrics_summary(workflow: ArchitectorWorkflow):
         print(f"Jobs with timing data: {len(time_data)}\n")
     else:
         print()
+
+
+def has_sella_jobs(workflow: ArchitectorWorkflow) -> bool:
+    """Return True if any row in the DB has optimizer='sella'.
+
+    Uses ``SELECT 1 ... LIMIT 1`` instead of COUNT(*) so the check is
+    cheap even on a 100k-row DB -- scans at most one matching row.
+    """
+    cur = workflow._execute_with_retry(
+        "SELECT 1 FROM structures WHERE optimizer = 'sella' LIMIT 1"
+    )
+    return cur.fetchone() is not None
+
+
+def print_sella_summary(workflow: ArchitectorWorkflow, limit: int = 20) -> None:
+    """Print sella-specific convergence counts + step statistics.
+
+    Sections:
+      - Convergence tri-state counts (CONVERGED / NOT_CONVERGED /
+        ERROR / RUNNING) for rows where optimizer='sella'
+      - Step statistics (mean, median, max) over completed sella jobs
+      - Non-converged job list (up to `limit`), so users can spot
+        tunable-parameter problems without a separate view
+    """
+    print_header("Sella Optimization Summary")
+
+    if not has_sella_jobs(workflow):
+        print("\nNo sella jobs in this database.")
+        return
+
+    # Convergence counts. sella_converged tri-state:
+    #   completed + sella_converged=1  -> CONVERGED
+    #   completed + sella_converged=0  -> NOT_CONVERGED (hit max_steps)
+    #   completed + sella_converged IS NULL -> ERROR
+    #   running                        -> RUNNING
+    cur = workflow._execute_with_retry(
+        """
+        SELECT
+          SUM(CASE WHEN status = 'completed' AND sella_converged = 1 THEN 1 ELSE 0 END),
+          SUM(CASE WHEN status = 'completed' AND sella_converged = 0 THEN 1 ELSE 0 END),
+          SUM(CASE WHEN status IN ('failed','timeout') THEN 1 ELSE 0 END),
+          SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),
+          COUNT(*)
+        FROM structures
+        WHERE optimizer = 'sella'
+        """
+    )
+    row = cur.fetchone()
+    n_conv = row[0] or 0
+    n_not_conv = row[1] or 0
+    n_error = row[2] or 0
+    n_running = row[3] or 0
+    total = row[4] or 0
+
+    print(f"\n{'State':<18} {'Count':>8} {'Percent':>10}")
+    print("-" * 40)
+    for label, count in [
+        ("CONVERGED", n_conv),
+        ("NOT_CONVERGED", n_not_conv),
+        ("ERROR", n_error),
+        ("RUNNING", n_running),
+    ]:
+        pct = 100 * count / total if total > 0 else 0
+        print(f"{label:<18} {count:>8} {pct:>9.1f}%")
+    print("-" * 40)
+    print(f"{'TOTAL':<18} {total:>8} {100.0:>9.1f}%")
+
+    # Step statistics over completed sella jobs with non-NULL sella_steps.
+    cur = workflow._execute_with_retry(
+        """
+        SELECT sella_steps FROM structures
+        WHERE optimizer = 'sella'
+          AND status = 'completed'
+          AND sella_steps IS NOT NULL
+        """
+    )
+    steps = [r[0] for r in cur.fetchall()]
+    if steps:
+        steps_sorted = sorted(steps)
+        mean = sum(steps) / len(steps)
+        median = steps_sorted[len(steps_sorted) // 2]
+        print("\nSella steps (completed jobs):")
+        print(f"  Mean:   {mean:.1f}")
+        print(f"  Median: {median}")
+        print(f"  Max:    {max(steps)}")
+        print(f"  Jobs:   {len(steps)}")
+
+    # Non-converged detail list, inline.
+    if n_not_conv > 0:
+        cur = workflow._execute_with_retry(
+            f"""
+            SELECT id, orig_index, sella_steps FROM structures
+            WHERE optimizer = 'sella'
+              AND status = 'completed'
+              AND sella_converged = 0
+            ORDER BY sella_steps DESC NULLS LAST
+            LIMIT {int(limit)}
+            """
+        )
+        nc_rows = cur.fetchall()
+        print_header(f"Non-converged sella jobs (showing up to {limit})")
+        print(f"\n{'ID':<8} {'Orig Index':<12} {'Steps':>6}")
+        print("-" * 30)
+        for job_id, orig_idx, n_steps in nc_rows:
+            steps_str = str(n_steps) if n_steps is not None else "-"
+            print(f"{job_id:<8} {orig_idx:<12} {steps_str:>6}")
+        if n_not_conv > len(nc_rows):
+            print(f"\n... and {n_not_conv - len(nc_rows)} more non-converged jobs")
+
+
+def _probe_sella_current_step(
+    job_id: int,
+    orig_index: int,
+    job_dir: Path,
+) -> dict | None:
+    """Thread-pool worker: tail-read sella.log for one running job.
+
+    Pure I/O -- no DB access. Does NOT open opt.traj (unsafe while
+    the optimizer is appending).
+    """
+    from ..utils.analysis import read_sella_log_tail
+
+    sella_log = job_dir / "sella.log"
+    if not sella_log.exists():
+        return None
+    row = read_sella_log_tail(sella_log)
+    if row is None:
+        return None
+    try:
+        mtime = os.path.getmtime(sella_log)
+    except OSError:
+        mtime = None
+    return {
+        "job_id": job_id,
+        "orig_index": orig_index,
+        "step": row["step"],
+        "fmax": row["fmax"],
+        "energy": row["energy"],
+        "mtime": mtime,
+    }
+
+
+def show_sella_running_progress(
+    workflow: ArchitectorWorkflow,
+    root_dir: Path,
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
+    limit: int = 20,
+    workers: int = 4,
+) -> None:
+    """Show running sella jobs with their current step from sella.log.
+
+    Columns: ID | Orig Index | Step | fmax | Energy | Last update
+
+    Tail-reads each running job's sella.log in a thread pool (same
+    pattern as _parallel_status_check). Never opens opt.traj.
+
+    `job_dir_pattern` supports the existing {hostname}, {orig_index},
+    {id} placeholders via render_job_dir_pattern().
+    """
+    import datetime
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    running = [
+        j
+        for j in workflow.get_jobs_by_status(JobStatus.RUNNING, include_geometry=False)
+        if j.optimizer == "sella"
+    ]
+    if not running:
+        print_header("Running Sella Jobs")
+        print("\nNo running sella jobs.")
+        return
+
+    probed: list[dict] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for j in running:
+            job_dir_name = render_job_dir_pattern(
+                job_dir_pattern, orig_index=j.orig_index, job_id=j.id
+            )
+            job_dir = Path(root_dir) / job_dir_name
+            futures[
+                executor.submit(_probe_sella_current_step, j.id, j.orig_index, job_dir)
+            ] = j
+        for fut in as_completed(futures):
+            result = fut.result()
+            if result is not None:
+                probed.append(result)
+
+    print_header(f"Running Sella Jobs (showing up to {limit})")
+    if not probed:
+        print("\nRunning sella jobs found, but none have parseable sella.log yet.")
+        return
+
+    # Sort by step descending -- high-step jobs are closest to max_steps
+    probed.sort(key=lambda r: (r["step"], r["fmax"]), reverse=True)
+
+    print(
+        f"\n{'ID':<8} {'Orig':>6} {'Step':>5} {'fmax':>10} {'Energy':>16} {'Updated'}"
+    )
+    print("-" * 70)
+    for r in probed[:limit]:
+        if r["mtime"] is not None:
+            upd = datetime.datetime.fromtimestamp(r["mtime"]).strftime("%Y-%m-%d %H:%M")
+        else:
+            upd = "-"
+        print(
+            f"{r['job_id']:<8} {r['orig_index']:>6} {r['step']:>5} "
+            f"{r['fmax']:>10.4f} {r['energy']:>16.6f} {upd}"
+        )
+    if len(probed) > limit:
+        print(f"\n... and {len(probed) - limit} more running jobs")
 
 
 def print_progress_bar(
@@ -1701,6 +1913,17 @@ def main():
         action="store_true",
         help="Profile metrics extraction to identify bottlenecks (I/O, parsing, DB)",
     )
+    parser.add_argument(
+        "--sella-view",
+        choices=["summary", "running"],
+        default=None,
+        help=(
+            "Sella-specific view. 'summary' prints convergence tri-state "
+            "counts + step statistics + non-converged list. 'running' "
+            "tail-reads sella.log for each running job to show the current "
+            "step. Requires --update <root_dir> for 'running'."
+        ),
+    )
 
     add_wandb_args(parser)
 
@@ -1896,6 +2119,29 @@ def main():
                 print(f"\n... and {len(chronic) - args.limit} more chronic failures")
         else:
             print(f"\nNo jobs have failed {args.show_chronic_failures}+ times.")
+
+    # Sella-specific view, or auto-detect hint when the DB has sella rows.
+    if args.sella_view == "summary":
+        print_sella_summary(workflow, limit=args.limit)
+    elif args.sella_view == "running":
+        if not args.update:
+            print(
+                "\nError: --sella-view running requires --update <root_dir> "
+                "to locate job directories."
+            )
+        else:
+            show_sella_running_progress(
+                workflow,
+                Path(args.update),
+                job_dir_pattern=effective_job_dir_pattern,
+                limit=args.limit,
+                workers=args.workers,
+            )
+    elif args.sella_view is None and has_sella_jobs(workflow):
+        print(
+            "\nTip: use --sella-view summary for opt-specific metrics "
+            "on this database."
+        )
 
     finish_wandb_run(wandb_run)
     workflow.close()

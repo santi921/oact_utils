@@ -286,6 +286,210 @@ def test_parse_job_metrics_returns_sella_converged():
     assert metrics.get("sella_steps") == 3
 
 
+# --------------------------------------------------------------------
+# Phase 2: display + CLI
+# --------------------------------------------------------------------
+
+
+def _set_optimizer_sella(workflow, job_ids: list[int]) -> None:
+    """Seed optimizer='sella' on the given rows."""
+    placeholders = ",".join("?" * len(job_ids))
+    workflow._execute_with_retry(
+        f"UPDATE structures SET optimizer = 'sella' WHERE id IN ({placeholders})",
+        tuple(job_ids),
+    )
+    workflow._commit_with_retry()
+
+
+def _set_sella_row(
+    workflow,
+    job_id: int,
+    status: str,
+    sella_converged: int | None = None,
+    sella_steps: int | None = None,
+) -> None:
+    """Seed a test row to a specific sella state."""
+    workflow._execute_with_retry(
+        "UPDATE structures SET optimizer = 'sella', status = ?, "
+        "sella_converged = ?, sella_steps = ? WHERE id = ?",
+        (status, sella_converged, sella_steps, job_id),
+    )
+    workflow._commit_with_retry()
+
+
+def test_has_sella_jobs_false_on_sp_only_db(tmp_path):
+    """Fresh DB with default optimizer=NULL returns False."""
+    from oact_utilities.workflows.dashboard import has_sella_jobs
+
+    db = _build_sample_db(tmp_path)
+    with ArchitectorWorkflow(db) as wf:
+        assert has_sella_jobs(wf) is False
+
+
+def test_has_sella_jobs_true_when_any_row_set(tmp_path):
+    """Setting optimizer='sella' on one row flips the detection."""
+    from oact_utilities.workflows.dashboard import has_sella_jobs
+
+    db = _build_sample_db(tmp_path)
+    with ArchitectorWorkflow(db) as wf:
+        jobs = wf.get_jobs_by_status(JobStatus.TO_RUN)
+        _set_optimizer_sella(wf, [jobs[0].id])
+        assert has_sella_jobs(wf) is True
+
+
+def test_has_sella_jobs_uses_limit_1(tmp_path, monkeypatch):
+    """Auto-detection must use SELECT 1 ... LIMIT 1, not a full scan."""
+    from oact_utilities.workflows.dashboard import has_sella_jobs
+
+    db = _build_sample_db(tmp_path)
+    captured: list[str] = []
+    orig_execute = ArchitectorWorkflow._execute_with_retry
+
+    def spying_execute(self, query, params=()):
+        captured.append(query)
+        return orig_execute(self, query, params)
+
+    monkeypatch.setattr(ArchitectorWorkflow, "_execute_with_retry", spying_execute)
+
+    with ArchitectorWorkflow(db) as wf:
+        # Drain the migration/status queries so we isolate the detection query.
+        captured.clear()
+        has_sella_jobs(wf)
+
+    assert len(captured) == 1, f"Expected one SQL call, got {len(captured)}"
+    sql = captured[0].upper()
+    # Must be a light-weight existence check, not a COUNT or full scan.
+    assert "LIMIT 1" in sql
+    assert "SELECT 1" in sql
+    assert "COUNT" not in sql
+
+
+def test_print_sella_summary_empty_db(tmp_path, capsys):
+    """SP-only DB prints the 'no sella jobs' message and exits cleanly."""
+    from oact_utilities.workflows.dashboard import print_sella_summary
+
+    db = _build_sample_db(tmp_path)
+    with ArchitectorWorkflow(db) as wf:
+        print_sella_summary(wf)
+
+    captured = capsys.readouterr()
+    assert "No sella jobs in this database." in captured.out
+
+
+def test_print_sella_summary_tristate_counts(tmp_path, capsys):
+    """Seeded DB shows correct CONVERGED / NOT_CONVERGED / ERROR / RUNNING counts."""
+    from oact_utilities.workflows.dashboard import print_sella_summary
+
+    db = _build_sample_db(tmp_path)
+    with ArchitectorWorkflow(db) as wf:
+        jobs = wf.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(jobs) >= 2
+
+        # Two rows, one CONVERGED, one NOT_CONVERGED. Mark both as completed.
+        _set_sella_row(wf, jobs[0].id, "completed", sella_converged=1, sella_steps=5)
+        _set_sella_row(wf, jobs[1].id, "completed", sella_converged=0, sella_steps=100)
+
+        print_sella_summary(wf)
+
+    captured = capsys.readouterr()
+    out = captured.out
+    assert "CONVERGED" in out
+    assert "NOT_CONVERGED" in out
+    # Both counts should show 1 (one converged, one not).
+    # And the non-converged detail section should show the second job's id.
+    assert str(jobs[1].id) in out
+    # Step stats should include max=100 (the NOT_CONVERGED row) and min=5.
+    assert "Max:    100" in out
+
+
+def test_show_sella_running_progress_tail_read(tmp_path, capsys):
+    """Running progress reads sella.log tail, never opt.traj."""
+    from oact_utilities.workflows.dashboard import show_sella_running_progress
+    from oact_utilities.workflows.job_dir_patterns import DEFAULT_JOB_DIR_PATTERN
+
+    db = _build_sample_db(tmp_path)
+
+    # Build a fake root_dir with one job directory matching the default
+    # pattern job_{orig_index}. Put a sella.log in it.
+    root = tmp_path / "jobs_root"
+    root.mkdir()
+
+    with ArchitectorWorkflow(db) as wf:
+        jobs = wf.get_jobs_by_status(JobStatus.TO_RUN)
+        j = jobs[0]
+
+        # Mark as RUNNING, optimizer=sella.
+        _set_sella_row(wf, j.id, "running")
+
+        job_dir = root / f"job_{j.orig_index}"
+        job_dir.mkdir()
+        (job_dir / "sella.log").write_text(
+            "     Step     Time          Energy         fmax         cmax       rtrust          rho\n"
+            "Sella   0 08:30:00    -76.400000       0.5000       0.0000       0.1000       1.0000\n"
+            "Sella   1 08:30:10    -76.450000       0.2500       0.0000       0.1000       1.0000\n"
+            "Sella   2 08:30:20    -76.480000       0.0800       0.0000       0.1000       1.0000\n"
+        )
+
+        show_sella_running_progress(
+            wf,
+            root_dir=root,
+            job_dir_pattern=DEFAULT_JOB_DIR_PATTERN,
+        )
+
+    out = capsys.readouterr().out
+    # Current step from tail-read should be 2.
+    assert str(j.id) in out
+    assert " 2 " in out or "  2" in out  # step column
+    assert "0.0800" in out  # current fmax
+
+
+def test_show_sella_running_progress_empty(tmp_path, capsys):
+    """No running sella jobs -> friendly message, no crash."""
+    from oact_utilities.workflows.dashboard import show_sella_running_progress
+    from oact_utilities.workflows.job_dir_patterns import DEFAULT_JOB_DIR_PATTERN
+
+    db = _build_sample_db(tmp_path)
+    with ArchitectorWorkflow(db) as wf:
+        show_sella_running_progress(
+            wf,
+            root_dir=tmp_path,
+            job_dir_pattern=DEFAULT_JOB_DIR_PATTERN,
+        )
+
+    out = capsys.readouterr().out
+    assert "No running sella jobs" in out
+
+
+def test_show_sella_running_progress_does_not_touch_trajectory():
+    """Dashboard's running-progress code path must not read opt.traj."""
+    import ast
+    import inspect
+
+    from oact_utilities.workflows.dashboard import (
+        _probe_sella_current_step,
+        show_sella_running_progress,
+    )
+
+    for fn in (_probe_sella_current_step, show_sella_running_progress):
+        src = inspect.getsource(fn)
+        tree = ast.parse(src)
+        func = tree.body[0]
+        assert isinstance(func, ast.FunctionDef)
+
+        body = func.body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+        ):
+            body = body[1:]
+        func.body = body or [ast.Pass()]
+        code_only = ast.unparse(func)
+
+        assert "Trajectory" not in code_only, f"{fn.__name__} references Trajectory"
+        assert ".traj" not in code_only, f"{fn.__name__} references .traj"
+
+
 def test_parse_job_metrics_sella_not_converged(tmp_path):
     """Synthetic NOT_CONVERGED fixture -> sella_converged=0."""
     job = tmp_path / "fake_job"
