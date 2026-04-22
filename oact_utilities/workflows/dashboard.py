@@ -311,6 +311,8 @@ def _extract_metrics_from_dir(
             "timing_warning": None,
             "_cache_hit": cache_hit,
             "generator_data": None,
+            "sella_steps": metrics.get("sella_steps"),
+            "sella_converged": metrics.get("sella_converged"),
         }
 
         if GENERATOR_AVAILABLE:
@@ -421,6 +423,10 @@ def _parallel_extract_metrics(
                 }
                 if result.get("generator_data") is not None:
                     metrics_entry["generator_data"] = result["generator_data"]
+                if result.get("sella_steps") is not None:
+                    metrics_entry["sella_steps"] = result["sella_steps"]
+                if result.get("sella_converged") is not None:
+                    metrics_entry["sella_converged"] = result["sella_converged"]
                 success_metrics.append(metrics_entry)
                 if profile and "_profile" in result:
                     profile_data.append((job_id, result["_profile"]))

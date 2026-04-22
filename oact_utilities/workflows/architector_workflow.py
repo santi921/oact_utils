@@ -73,6 +73,10 @@ class JobRecord:
     optimizer: str | None = None
     worker_id: str | None = None
     generator_data: str | None = None
+    sella_steps: int | None = None
+    sella_converged: int | None = (
+        None  # 1 = CONVERGED, 0 = NOT_CONVERGED, NULL = ERROR / non-sella
+    )
 
 
 class ArchitectorWorkflow:
@@ -207,6 +211,8 @@ class ArchitectorWorkflow:
             "optimizer": "ALTER TABLE structures ADD COLUMN optimizer TEXT DEFAULT NULL",
             "worker_id": "ALTER TABLE structures ADD COLUMN worker_id TEXT DEFAULT NULL",
             "generator_data": "ALTER TABLE structures ADD COLUMN generator_data TEXT DEFAULT NULL",
+            "sella_steps": "ALTER TABLE structures ADD COLUMN sella_steps INTEGER DEFAULT NULL",
+            "sella_converged": "ALTER TABLE structures ADD COLUMN sella_converged INTEGER DEFAULT NULL",
         }
         for col_name, alter_sql in migrations.items():
             if col_name not in existing_cols:
@@ -331,7 +337,8 @@ class ArchitectorWorkflow:
     _LIGHT_COLS = (
         "id, orig_index, elements, natoms, status, charge, spin, "
         "job_dir, max_forces, scf_steps, final_energy, error_message, "
-        "fail_count, wall_time, n_cores, optimizer, worker_id"
+        "fail_count, wall_time, n_cores, optimizer, worker_id, "
+        "sella_steps, sella_converged"
     )
 
     @staticmethod
@@ -366,6 +373,10 @@ class ArchitectorWorkflow:
             optimizer=r["optimizer"] if "optimizer" in keys else None,
             worker_id=r["worker_id"] if "worker_id" in keys else None,
             generator_data=r["generator_data"] if "generator_data" in keys else None,
+            sella_steps=r["sella_steps"] if "sella_steps" in keys else None,
+            sella_converged=(
+                r["sella_converged"] if "sella_converged" in keys else None
+            ),
         )
 
     def get_jobs_by_status(
@@ -506,7 +517,7 @@ class ArchitectorWorkflow:
 
         Each dict in metrics_list must have a 'job_id' key and may have:
         job_dir, max_forces, scf_steps, final_energy, error_message,
-        wall_time, n_cores.
+        wall_time, n_cores, generator_data, sella_steps, sella_converged.
 
         Args:
             metrics_list: List of dicts with job_id and metric values.
@@ -528,6 +539,8 @@ class ArchitectorWorkflow:
                 "wall_time",
                 "n_cores",
                 "generator_data",
+                "sella_steps",
+                "sella_converged",
             ):
                 if metrics.get(col) is not None:
                     updates.append(f"{col} = ?")
