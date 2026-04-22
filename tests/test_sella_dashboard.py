@@ -85,6 +85,46 @@ def test_read_sella_log_tail_empty_file(tmp_path):
     assert read_sella_log_tail(log) is None
 
 
+def test_read_sella_log_tail_ignores_prior_segment_after_restart(tmp_path):
+    """Fresh restart (header written, no data yet) returns None.
+
+    Before this fix, the tail-reader would report the last step of the
+    prior segment as if it were the current step, because the header
+    row was skipped and the reverse-iteration hit the prior segment's
+    last data row. The fix tracks the last header position and only
+    accepts data rows that appear after it.
+    """
+    log = tmp_path / "sella.log"
+    log.write_text(
+        "     Step     Time          Energy         fmax         cmax       rtrust          rho\n"
+        "Sella   0 08:00:00    -76.400000       0.5000       0.0000       0.1000       1.0000\n"
+        "Sella   1 08:00:10    -76.450000       0.2500       0.0000       0.1000       1.0000\n"
+        "Sella   2 08:00:20    -76.470000       0.1200       0.0000       0.1000       1.0000\n"
+        "     Step     Time          Energy         fmax         cmax       rtrust          rho\n"
+    )
+    # Prior segment last row was Sella 2; buggy reader would return that.
+    assert read_sella_log_tail(log) is None
+
+
+def test_read_sella_log_tail_restart_with_partial_second_segment(tmp_path):
+    """Restart with a few data rows after the new header returns the last new row."""
+    log = tmp_path / "sella.log"
+    log.write_text(
+        "     Step     Time          Energy         fmax         cmax       rtrust          rho\n"
+        "Sella   0 08:00:00    -76.400000       0.5000       0.0000       0.1000       1.0000\n"
+        "Sella   1 08:00:10    -76.450000       0.2500       0.0000       0.1000       1.0000\n"
+        "Sella   2 08:00:20    -76.470000       0.1200       0.0000       0.1000       1.0000\n"
+        "     Step     Time          Energy         fmax         cmax       rtrust          rho\n"
+        "Sella   0 08:05:00    -76.470000       0.1200       0.0000       0.1000       1.0000\n"
+        "Sella   1 08:05:10    -76.480000       0.0600       0.0000       0.1000       1.0000\n"
+    )
+    row = read_sella_log_tail(log)
+    assert row is not None
+    # Should be step 1 of the NEW segment, not step 2 of the old one.
+    assert row["step"] == 1
+    assert row["fmax"] == pytest.approx(0.06, abs=1e-3)
+
+
 def test_read_sella_log_tail_does_not_touch_trajectory():
     """Verify the tail-reader does not read opt.traj.
 
@@ -458,6 +498,39 @@ def test_show_sella_running_progress_empty(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "No running sella jobs" in out
+
+
+def test_sella_progress_row_is_typed():
+    """_probe_sella_current_step returns a SellaProgressRow TypedDict, not an untyped dict.
+
+    Plan review flagged the untyped dict return as "the one discipline
+    slip" since the PR introduced SellaStepRow specifically to unify
+    parser return shapes. This test pins the contract.
+    """
+    import inspect
+
+    from oact_utilities.workflows.dashboard import (
+        SellaProgressRow,
+        _probe_sella_current_step,
+    )
+
+    sig = inspect.signature(_probe_sella_current_step)
+    # dashboard.py uses `from __future__ import annotations`, so the
+    # return annotation is stored as a string. A simple substring match
+    # is sufficient to catch a regression back to `dict | None`.
+    annotation = str(sig.return_annotation)
+    assert (
+        "SellaProgressRow" in annotation
+    ), f"Expected SellaProgressRow in return annotation, got {annotation}"
+    # TypedDict has the expected keys.
+    assert set(SellaProgressRow.__annotations__.keys()) == {
+        "job_id",
+        "orig_index",
+        "step",
+        "fmax",
+        "energy",
+        "mtime",
+    }
 
 
 def test_show_sella_running_progress_does_not_touch_trajectory():

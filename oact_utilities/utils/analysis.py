@@ -1818,7 +1818,9 @@ def read_sella_log_tail(log_path: str | Path) -> SellaStepRow | None:
     ``_read_last_lines``).
 
     On a restarted log (multiple header rows), this returns the last
-    row of the last segment, which is the correct "current" row.
+    row of the last segment, which is the correct "current" row. When
+    a restart has emitted its header but no data row yet, returns None
+    rather than surfacing the last row of the prior segment.
 
     Args:
         log_path: Path to sella.log.
@@ -1830,17 +1832,28 @@ def read_sella_log_tail(log_path: str | Path) -> SellaStepRow | None:
     if not os.path.exists(log_str):
         return None
 
-    # Pull enough lines to step past a trailing header if the writer
-    # just re-initialized. maxlen=4 leaves room for the header line
-    # plus a couple of data rows.
-    lines = _read_last_lines(log_str, maxlen=4)
+    # maxlen=8 leaves headroom for a trailing header row plus a few data
+    # rows after a restart. The deque cost is O(file_size) regardless of
+    # maxlen, so there is no I/O penalty for bumping it.
+    lines = _read_last_lines(log_str, maxlen=8)
     if not lines:
         return None
 
-    for line in reversed(lines):
+    # Find the index of the last header row in this window. Any data
+    # rows at or before that index belong to a prior segment and must
+    # NOT be returned as current -- otherwise a fresh restart (header
+    # written, no data yet) would report the prior segment's last step.
+    last_header_idx = -1
+    for idx, line in enumerate(lines):
+        parts = line.split()
+        if parts and parts[0] == "Step":
+            last_header_idx = idx
+
+    # Iterate data rows that appear strictly AFTER the last header.
+    for line in reversed(lines[last_header_idx + 1 :]):
         parts = line.split()
         # Data rows start with "Sella" and have at least
-        # (Sella step time energy fmax ...). Headers start with "Step".
+        # (Sella step time energy fmax ...).
         if len(parts) < 5 or parts[0] != "Sella":
             continue
         try:

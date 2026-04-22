@@ -512,12 +512,30 @@ class ArchitectorWorkflow:
             self._execute_with_retry(query, tuple(values))
             self._commit_with_retry()
 
+    # Columns writable by update_job_metrics_bulk. Keep in sync with
+    # JobRecord / _LIGHT_COLS / _row_to_record / _ensure_schema. This
+    # is the 5th sync point flagged in plan-review; extracting it as a
+    # single source of truth prevents drift when adding columns.
+    _BULK_METRIC_COLS = (
+        "job_dir",
+        "max_forces",
+        "scf_steps",
+        "final_energy",
+        "error_message",
+        "wall_time",
+        "n_cores",
+        "generator_data",
+        "sella_steps",
+        "sella_converged",
+    )
+
     def update_job_metrics_bulk(self, metrics_list: list[dict]):
         """Update metrics for multiple jobs in a single transaction.
 
-        Each dict in metrics_list must have a 'job_id' key and may have:
-        job_dir, max_forces, scf_steps, final_energy, error_message,
-        wall_time, n_cores, generator_data, sella_steps, sella_converged.
+        Writable columns are declared in ``_BULK_METRIC_COLS``. Each
+        dict must have a 'job_id' key; any subset of the metric columns
+        may be present. Keys set to None are skipped (not written as
+        NULL) so prior values are preserved across partial updates.
 
         Args:
             metrics_list: List of dicts with job_id and metric values.
@@ -530,18 +548,7 @@ class ArchitectorWorkflow:
             values = []
             job_id = metrics["job_id"]
 
-            for col in (
-                "job_dir",
-                "max_forces",
-                "scf_steps",
-                "final_energy",
-                "error_message",
-                "wall_time",
-                "n_cores",
-                "generator_data",
-                "sella_steps",
-                "sella_converged",
-            ):
+            for col in self._BULK_METRIC_COLS:
                 if metrics.get(col) is not None:
                     updates.append(f"{col} = ?")
                     values.append(metrics[col])

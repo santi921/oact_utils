@@ -11,8 +11,9 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypedDict
 
+from ..utils.analysis import read_sella_log_tail
 from ..utils.status import check_job_termination, parse_failure_reason
 from .architector_workflow import ArchitectorWorkflow, JobStatus, StatusGroupUpdate
 from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
@@ -203,7 +204,8 @@ def print_sella_summary(workflow: ArchitectorWorkflow, limit: int = 20) -> None:
     Sections:
       - Convergence tri-state counts (CONVERGED / NOT_CONVERGED /
         ERROR / RUNNING) for rows where optimizer='sella'
-      - Step statistics (mean, median, max) over completed sella jobs
+      - Step statistics (mean, max, count) over completed sella jobs,
+        computed in-SQL so we never materialize the full step column
       - Non-converged job list (up to `limit`), so users can spot
         tunable-parameter problems without a separate view
     """
@@ -213,7 +215,12 @@ def print_sella_summary(workflow: ArchitectorWorkflow, limit: int = 20) -> None:
         print("\nNo sella jobs in this database.")
         return
 
-    # Convergence counts. sella_converged tri-state:
+    # One round-trip for tri-state counts + step aggregates. Pushing
+    # AVG/MAX/COUNT into SQL avoids pulling every completed row's
+    # sella_steps into Python, which on a 100k-row campaign would be a
+    # ~400KB list just to compute 3 scalars.
+    #
+    # sella_converged tri-state:
     #   completed + sella_converged=1  -> CONVERGED
     #   completed + sella_converged=0  -> NOT_CONVERGED (hit max_steps)
     #   completed + sella_converged IS NULL -> ERROR
@@ -225,7 +232,10 @@ def print_sella_summary(workflow: ArchitectorWorkflow, limit: int = 20) -> None:
           SUM(CASE WHEN status = 'completed' AND sella_converged = 0 THEN 1 ELSE 0 END),
           SUM(CASE WHEN status IN ('failed','timeout') THEN 1 ELSE 0 END),
           SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),
-          COUNT(*)
+          COUNT(*),
+          AVG(CASE WHEN status = 'completed' AND sella_steps IS NOT NULL THEN sella_steps END),
+          MAX(CASE WHEN status = 'completed' AND sella_steps IS NOT NULL THEN sella_steps END),
+          SUM(CASE WHEN status = 'completed' AND sella_steps IS NOT NULL THEN 1 ELSE 0 END)
         FROM structures
         WHERE optimizer = 'sella'
         """
@@ -236,6 +246,9 @@ def print_sella_summary(workflow: ArchitectorWorkflow, limit: int = 20) -> None:
     n_error = row[2] or 0
     n_running = row[3] or 0
     total = row[4] or 0
+    step_mean = row[5]  # None when there are no completed sella jobs
+    step_max = row[6]
+    step_count = row[7] or 0
 
     print(f"\n{'State':<18} {'Count':>8} {'Percent':>10}")
     print("-" * 40)
@@ -250,25 +263,11 @@ def print_sella_summary(workflow: ArchitectorWorkflow, limit: int = 20) -> None:
     print("-" * 40)
     print(f"{'TOTAL':<18} {total:>8} {100.0:>9.1f}%")
 
-    # Step statistics over completed sella jobs with non-NULL sella_steps.
-    cur = workflow._execute_with_retry(
-        """
-        SELECT sella_steps FROM structures
-        WHERE optimizer = 'sella'
-          AND status = 'completed'
-          AND sella_steps IS NOT NULL
-        """
-    )
-    steps = [r[0] for r in cur.fetchall()]
-    if steps:
-        steps_sorted = sorted(steps)
-        mean = sum(steps) / len(steps)
-        median = steps_sorted[len(steps_sorted) // 2]
+    if step_count > 0 and step_mean is not None:
         print("\nSella steps (completed jobs):")
-        print(f"  Mean:   {mean:.1f}")
-        print(f"  Median: {median}")
-        print(f"  Max:    {max(steps)}")
-        print(f"  Jobs:   {len(steps)}")
+        print(f"  Mean:   {step_mean:.1f}")
+        print(f"  Max:    {step_max}")
+        print(f"  Jobs:   {step_count}")
 
     # Non-converged detail list, inline.
     if n_not_conv > 0:
@@ -293,18 +292,32 @@ def print_sella_summary(workflow: ArchitectorWorkflow, limit: int = 20) -> None:
             print(f"\n... and {n_not_conv - len(nc_rows)} more non-converged jobs")
 
 
+class SellaProgressRow(TypedDict):
+    """Snapshot of a running sella job's current state.
+
+    Used by the running-progress dashboard view. Declared as a TypedDict
+    so callers catch key typos at static-analysis time and the return
+    shape of ``_probe_sella_current_step`` stays in sync with consumers.
+    """
+
+    job_id: int
+    orig_index: int
+    step: int
+    fmax: float
+    energy: float
+    mtime: float | None
+
+
 def _probe_sella_current_step(
     job_id: int,
     orig_index: int,
     job_dir: Path,
-) -> dict | None:
+) -> SellaProgressRow | None:
     """Thread-pool worker: tail-read sella.log for one running job.
 
     Pure I/O -- no DB access. Does NOT open opt.traj (unsafe while
     the optimizer is appending).
     """
-    from ..utils.analysis import read_sella_log_tail
-
     sella_log = job_dir / "sella.log"
     if not sella_log.exists():
         return None
@@ -312,17 +325,17 @@ def _probe_sella_current_step(
     if row is None:
         return None
     try:
-        mtime = os.path.getmtime(sella_log)
+        mtime: float | None = os.path.getmtime(sella_log)
     except OSError:
         mtime = None
-    return {
-        "job_id": job_id,
-        "orig_index": orig_index,
-        "step": row["step"],
-        "fmax": row["fmax"],
-        "energy": row["energy"],
-        "mtime": mtime,
-    }
+    return SellaProgressRow(
+        job_id=job_id,
+        orig_index=orig_index,
+        step=row["step"],
+        fmax=row["fmax"],
+        energy=row["energy"],
+        mtime=mtime,
+    )
 
 
 def show_sella_running_progress(
@@ -355,7 +368,14 @@ def show_sella_running_progress(
         print("\nNo running sella jobs.")
         return
 
-    probed: list[dict] = []
+    try:
+        from tqdm import tqdm
+
+        use_tqdm = True
+    except ImportError:
+        use_tqdm = False
+
+    probed: list[SellaProgressRow] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {}
         for j in running:
@@ -366,7 +386,16 @@ def show_sella_running_progress(
             futures[
                 executor.submit(_probe_sella_current_step, j.id, j.orig_index, job_dir)
             ] = j
-        for fut in as_completed(futures):
+
+        iterator = as_completed(futures)
+        if use_tqdm:
+            iterator = tqdm(
+                iterator,
+                total=len(futures),
+                desc="Reading sella.log tails",
+                unit="job",
+            )
+        for fut in iterator:
             result = fut.result()
             if result is not None:
                 probed.append(result)
