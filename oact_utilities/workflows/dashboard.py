@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Callable
 
 from ..utils.status import check_job_termination, parse_failure_reason
-from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .architector_workflow import ArchitectorWorkflow, JobStatus, StatusGroupUpdate
+from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
 from .job_dir_patterns import (
     DEFAULT_JOB_DIR_PATTERN,
     apply_job_dir_prefix,
@@ -483,31 +484,95 @@ def _parallel_extract_metrics(
     return len(success_metrics), len(failed_jobs)
 
 
+# Max length of failure_reason text to embed in error_message. Keeps DB
+# column size bounded even if the marker JSON carries a long traceback.
+_MARKER_REASON_MAX_LEN = 200
+
+
+def _read_marker_failure_reason(job_dir: Path) -> str | None:
+    """Return ``failure_reason`` from ``.do_not_rerun.json`` or None.
+
+    Called only when ``is_marker_blocked`` already returned True, so a
+    missing file here is an odd race (caller re-reads after that check).
+    Failures are swallowed -- the stable MARKER_ERROR_MESSAGE fallback is
+    still correct fingerprinting.
+    """
+    import json
+
+    marker_path = job_dir / ".do_not_rerun.json"
+    try:
+        with open(marker_path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    reason = data.get("failure_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    return reason.strip()
+
+
+def _compose_marker_error_message(job_dir: Path) -> str:
+    """Build the error_message for a markered job.
+
+    Uses the stable ``MARKER_ERROR_MESSAGE`` prefix so downstream filters
+    can match with ``error_message LIKE 'Blocked by .do_not_rerun.json
+    marker%'``. Appends the marker JSON's failure_reason when available
+    so dashboards/grep can see why the job was purged without opening
+    the JSON. Reason text is truncated to ``_MARKER_REASON_MAX_LEN``
+    characters to bound column width.
+    """
+    reason = _read_marker_failure_reason(job_dir)
+    if reason is None:
+        return MARKER_ERROR_MESSAGE
+    truncated = reason[:_MARKER_REASON_MAX_LEN]
+    return f"{MARKER_ERROR_MESSAGE}: {truncated}"
+
+
 def _check_single_job_status(
     job_id: int,
     orig_index: int,
     current_status: JobStatus,
+    current_error_message: str | None,
     job_dir: Path,
     check_func: Callable,
-) -> dict:
+) -> dict | None:
     """Check status of a single job (pure I/O, no DB writes).
 
     Returns:
-        Dictionary with job_id, old_status, new_status, job_dir.
+        Dictionary with job_id, old_status, new_status, job_dir, marker_blocked,
+        new_error_message, marker_needs_write, or None if job_dir does not exist.
+
+    ``new_error_message`` is the prefixed marker message (includes
+    failure_reason from .do_not_rerun.json when parseable) or None for
+    non-markered jobs. ``marker_needs_write`` is True when a marker is
+    present AND the DB's current_error_message differs from the composed
+    message -- callers use this to emit an update even when status is
+    unchanged (fingerprint refresh).
     """
     if not job_dir.exists():
         return None
 
-    result = check_func(str(job_dir))
-
-    if result == 1:
-        new_status = JobStatus.COMPLETED
-    elif result == -2:
-        new_status = JobStatus.TIMEOUT
-    elif result == -1:
+    # .do_not_rerun.json (written by clean.py --purge-failed) overrides all
+    # other checks. Without this, a purged directory (which has no orca.out)
+    # would be classified as RUNNING or TIMEOUT and could be cycled by submit.
+    marker_blocked = is_marker_blocked(job_dir)
+    new_error_message: str | None = None
+    marker_needs_write = False
+    if marker_blocked:
         new_status = JobStatus.FAILED
+        new_error_message = _compose_marker_error_message(job_dir)
+        marker_needs_write = current_error_message != new_error_message
     else:
-        new_status = JobStatus.RUNNING
+        result = check_func(str(job_dir))
+
+        if result == 1:
+            new_status = JobStatus.COMPLETED
+        elif result == -2:
+            new_status = JobStatus.TIMEOUT
+        elif result == -1:
+            new_status = JobStatus.FAILED
+        else:
+            new_status = JobStatus.RUNNING
 
     return {
         "job_id": job_id,
@@ -515,7 +580,54 @@ def _check_single_job_status(
         "old_status": current_status,
         "new_status": new_status,
         "job_dir": job_dir,
+        "marker_blocked": marker_blocked,
+        "new_error_message": new_error_message,
+        "marker_needs_write": marker_needs_write,
     }
+
+
+def _commit_status_changes(
+    workflow: ArchitectorWorkflow,
+    status_groups: dict[JobStatus, list[int]],
+    marker_updates: dict[tuple[JobStatus, str, bool], list[int]],
+) -> None:
+    """Persist status transitions + marker updates in one commit.
+
+    ``marker_updates`` is keyed by ``(old_status, error_message, bump_fail_count)``
+    and maps to the list of job ids sharing that treatment. Jobs with the
+    same key go out as one bulk UPDATE so unique-message-count (not
+    job count) drives the number of writes. Typical campaigns have few
+    distinct failure_reasons, so this stays batch-friendly.
+
+    Marker-update rows are written with ``only_if_status=old_status`` (CAS)
+    so concurrent writers (submit_jobs, a second dashboard) that already
+    flipped the row to FAILED do not cause a second fail_count increment
+    and do not clobber a fresher tag.
+    """
+    additional: list[StatusGroupUpdate] = []
+    for (old_status, error_msg, bump_fc), ids in marker_updates.items():
+        if not ids:
+            continue
+        entry: StatusGroupUpdate = {
+            "job_ids": ids,
+            "new_status": JobStatus.FAILED,
+            "error_message": error_msg,
+            "only_if_status": old_status,
+        }
+        if bump_fc:
+            entry["increment_fail_count"] = True
+        additional.append(entry)
+
+    workflow.update_status_bulk_multi(status_groups, additional=additional or None)
+
+    transitioned = sum(len(ids) for (_, _, bump), ids in marker_updates.items() if bump)
+    refreshed = sum(
+        len(ids) for (_, _, bump), ids in marker_updates.items() if not bump
+    )
+    if transitioned:
+        print(f"  Marker-blocked: {transitioned} job(s) reverted to FAILED")
+    if refreshed:
+        print(f"  Marker fingerprint refreshed: {refreshed} job(s)")
 
 
 def _parallel_status_check(
@@ -572,6 +684,7 @@ def _parallel_status_check(
                 job.id,
                 job.orig_index,
                 job.status,
+                job.error_message,
                 job_dir,
                 check_func,
             )
@@ -602,23 +715,48 @@ def _parallel_status_check(
     }
     completed_for_metrics = []
 
-    # Group changed jobs by their new status
+    # Marker-blocked jobs: emit an update when status changes OR the DB
+    # tag is stale (e.g. FAILED with a non-marker error_message). Grouped
+    # by (old_status, composed error_message, bump_fail_count) so
+    # ``_commit_status_changes`` can batch same-treatment jobs into one
+    # bulk UPDATE per group. fail_count bumps only on a real status
+    # transition; refreshes of stale tags are fingerprint-only.
     status_groups: dict[JobStatus, list[int]] = {}
+    marker_updates: dict[tuple[JobStatus, str, bool], list[int]] = {}
     for update in status_updates:
-        if update["new_status"] != update["old_status"]:
+        status_changed = update["new_status"] != update["old_status"]
+        if update["marker_blocked"]:
+            if status_changed or update["marker_needs_write"]:
+                bump_fc = status_changed
+                key = (
+                    update["old_status"],
+                    update["new_error_message"],
+                    bump_fc,
+                )
+                marker_updates.setdefault(key, []).append(update["job_id"])
+                if status_changed:
+                    updated_counts[update["new_status"]] += 1
+
+                if verbose:
+                    tag = " [marker-blocked]" if status_changed else " [marker-refresh]"
+                    print(
+                        f"  Job {update['job_id']}: {update['old_status'].value} -> "
+                        f"{update['new_status'].value}{tag}"
+                    )
+        elif status_changed:
             status_groups.setdefault(update["new_status"], []).append(update["job_id"])
             updated_counts[update["new_status"]] += 1
 
             if verbose:
                 print(
-                    f"  Job {update['job_id']}: {update['old_status'].value} -> {update['new_status'].value}"
+                    f"  Job {update['job_id']}: {update['old_status'].value} -> "
+                    f"{update['new_status'].value}"
                 )
 
             if extract_metrics and update["new_status"] == JobStatus.COMPLETED:
                 completed_for_metrics.append((update["job_id"], update["job_dir"]))
 
-    # Single transaction for all status groups (one commit total)
-    workflow.update_status_bulk_multi(status_groups)
+    _commit_status_changes(workflow, status_groups, marker_updates)
 
     return updated_counts, completed_for_metrics
 
@@ -672,8 +810,11 @@ def _sequential_status_check(
             disable=verbose,
         )
 
-    # Collect all status changes, then batch-write at the end
+    # Collect all status changes, then batch-write at the end.
+    # See _parallel_status_check for the marker_updates grouping key:
+    # (old_status, composed error_message, bump_fail_count).
     status_groups: dict[JobStatus, list[int]] = {}
+    marker_updates: dict[tuple[JobStatus, str, bool], list[int]] = {}
 
     for i, job in enumerate(jobs_iter):
         # Format job directory name
@@ -687,33 +828,57 @@ def _sequential_status_check(
         if not job_dir.exists():
             continue
 
-        # Check status
-        result = check_func(str(job_dir))
-
-        if result == 1:
-            new_status = JobStatus.COMPLETED
-        elif result == -2:
-            new_status = JobStatus.TIMEOUT
-        elif result == -1:
+        # .do_not_rerun.json marker overrides other checks (see
+        # _check_single_job_status for rationale).
+        marker_blocked = is_marker_blocked(job_dir)
+        new_error_message: str | None = None
+        marker_needs_write = False
+        if marker_blocked:
             new_status = JobStatus.FAILED
+            new_error_message = _compose_marker_error_message(job_dir)
+            marker_needs_write = job.error_message != new_error_message
         else:
-            new_status = JobStatus.RUNNING
+            result = check_func(str(job_dir))
 
-        # Track if changed
-        if new_status != job.status:
+            if result == 1:
+                new_status = JobStatus.COMPLETED
+            elif result == -2:
+                new_status = JobStatus.TIMEOUT
+            elif result == -1:
+                new_status = JobStatus.FAILED
+            else:
+                new_status = JobStatus.RUNNING
+
+        status_changed = new_status != job.status
+        if marker_blocked:
+            if status_changed or marker_needs_write:
+                assert new_error_message is not None
+                bump_fc = status_changed
+                key = (job.status, new_error_message, bump_fc)
+                marker_updates.setdefault(key, []).append(job.id)
+                if status_changed:
+                    updated_counts[new_status] += 1
+
+                if verbose:
+                    tag = " [marker-blocked]" if status_changed else " [marker-refresh]"
+                    print(
+                        f"  [{i+1}/{len(jobs)}] Job {job.id}: "
+                        f"{job.status.value} -> {new_status.value}{tag}"
+                    )
+        elif status_changed:
             status_groups.setdefault(new_status, []).append(job.id)
             updated_counts[new_status] += 1
 
             if verbose:
                 print(
-                    f"  [{i+1}/{len(jobs)}] Job {job.id}: {job.status.value} -> {new_status.value}"
+                    f"  [{i+1}/{len(jobs)}] Job {job.id}: "
+                    f"{job.status.value} -> {new_status.value}"
                 )
 
             if extract_metrics and new_status == JobStatus.COMPLETED:
                 completed_for_metrics.append((job.id, job_dir))
 
-    # Single transaction for all status groups (one commit total)
-    workflow.update_status_bulk_multi(status_groups)
+    _commit_status_changes(workflow, status_groups, marker_updates)
 
     return updated_counts, completed_for_metrics
 

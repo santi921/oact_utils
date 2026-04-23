@@ -29,6 +29,7 @@ from ..utils.analysis import (
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
 from .job_dir_patterns import (
     DEFAULT_JOB_DIR_PATTERN,
     apply_job_dir_prefix,
@@ -120,73 +121,56 @@ DEFAULT_LD_LIBRARY_PATHS = {
     "slurm": "",
 }
 
-# Number of completed jobs to accumulate before flushing to DB.
-# Reduces per-job commits on Lustre (100-500ms each) by batching.
-_BATCH_COMMIT_SIZE = 10
 
-
-def _flush_pending_updates(
+def _write_job_update(
     workflow: ArchitectorWorkflow,
-    pending: list[dict],
+    update: dict,
 ) -> None:
-    """Flush accumulated job updates to the DB in a single transaction.
+    """Write a single job's status and metrics to the DB, committed immediately.
 
-    Each entry in *pending* is a dict with keys:
-        job_id (int), status (JobStatus),
-        error_message (str | None), increment_fail_count (bool),
-        metrics (dict | None -- keys: job_dir, max_forces, scf_steps,
-                 final_energy, wall_time, n_cores).
+    Each call is its own transaction so a BUSY retry cannot roll back
+    a different job's updates (the old batching bug).
 
-    All updates share one BEGIN IMMEDIATE / COMMIT pair, cutting
-    commit overhead from O(N) to O(1) per batch.
+    Args:
+        update: Dict with keys job_id (int), status (JobStatus),
+            error_message (str | None), increment_fail_count (bool),
+            metrics (dict | None -- keys: job_dir, max_forces, scf_steps,
+                     final_energy, wall_time, n_cores).
     """
-    if not pending:
-        return
+    job_id = update["job_id"]
 
-    for u in pending:
-        job_id = u["job_id"]
+    set_clauses = [
+        "status = ?",
+        "worker_id = NULL",
+        "updated_at = CURRENT_TIMESTAMP",
+    ]
+    params: list = [update["status"].value]
 
-        # -- status update --
-        set_clauses = [
-            "status = ?",
-            "worker_id = NULL",
-            "updated_at = CURRENT_TIMESTAMP",
-        ]
-        params: list = [u["status"].value]
+    if update.get("increment_fail_count"):
+        set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
 
-        if u.get("increment_fail_count"):
-            set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+    if update.get("error_message") is not None:
+        set_clauses.append("error_message = ?")
+        params.append(update["error_message"])
 
-        if u.get("error_message") is not None:
-            set_clauses.append("error_message = ?")
-            params.append(u["error_message"])
+    # Merge metrics into the same UPDATE to use a single statement+commit.
+    metrics = update.get("metrics")
+    if metrics:
+        for col in (
+            "job_dir",
+            "max_forces",
+            "scf_steps",
+            "final_energy",
+            "wall_time",
+            "n_cores",
+        ):
+            if metrics.get(col) is not None:
+                set_clauses.append(f"{col} = ?")
+                params.append(metrics[col])
 
-        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
-        params.append(job_id)
-        workflow._execute_with_retry(query, tuple(params))
-
-        # -- metrics update (completed jobs only) --
-        metrics = u.get("metrics")
-        if metrics:
-            mcols: list[str] = []
-            mvals: list = []
-            for col in (
-                "job_dir",
-                "max_forces",
-                "scf_steps",
-                "final_energy",
-                "wall_time",
-                "n_cores",
-            ):
-                if metrics.get(col) is not None:
-                    mcols.append(f"{col} = ?")
-                    mvals.append(metrics[col])
-            if mcols:
-                mcols.append("updated_at = CURRENT_TIMESTAMP")
-                mquery = f"UPDATE structures SET {', '.join(mcols)} WHERE id = ?"
-                mvals.append(job_id)
-                workflow._execute_with_retry(mquery, tuple(mvals))
-
+    query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id = ?"
+    params.append(job_id)
+    workflow._execute_with_retry(query, tuple(params))
     workflow._commit_with_retry()
 
 
@@ -464,18 +448,14 @@ def _filter_marker_jobs(
         # Try DB job_dir first, then pattern-based path
         marker_found = False
         if job.job_dir and not force_root_dir:
-            marker_path = Path(job.job_dir) / ".do_not_rerun.json"
-            if marker_path.exists():
-                marker_found = True
+            marker_found = is_marker_blocked(Path(job.job_dir))
         if not marker_found:
             pattern = render_job_dir_pattern(
                 job_dir_pattern,
                 orig_index=job.orig_index,
                 job_id=job.id,
             )
-            candidate = root_dir / pattern / ".do_not_rerun.json"
-            if candidate.exists():
-                marker_found = True
+            marker_found = is_marker_blocked(root_dir / pattern)
 
         if marker_found:
             skip_ids.append(job.id)
@@ -487,7 +467,7 @@ def _filter_marker_jobs(
             skip_ids,
             JobStatus.FAILED,
             increment_fail_count=True,
-            error_message="Blocked by .do_not_rerun.json marker",
+            error_message=MARKER_ERROR_MESSAGE,
         )
         print(f"Skipped {len(skip_ids)} jobs due to .do_not_rerun.json marker")
 
@@ -1847,10 +1827,9 @@ def submit_batch_parsl(
                 print(f"Job {job_id} exception: {str(e)[:100]}")
                 log_job_result(wandb_run, job_id, "failed")
 
-            # Flush batch when it reaches _BATCH_COMMIT_SIZE
-            if len(pending_updates) >= _BATCH_COMMIT_SIZE:
-                _flush_pending_updates(workflow, pending_updates)
-                pending_updates.clear()
+            # Write this job's result to DB immediately (one commit per job).
+            _write_job_update(workflow, pending_updates[-1])
+            pending_updates.pop()
 
             # Check shutdown flag AFTER DB writes for this future.
             if _shutdown_requested:
@@ -1868,15 +1847,15 @@ def submit_batch_parsl(
         except Exception:
             pass
 
-        # Flush any remaining buffered updates before resetting orphans.
+        # Write any remaining updates before resetting orphans.
         # Best-effort: if this fails, _skip_finished_on_disk catches it
         # on the next submission pass.
-        if pending_updates:
+        for u in list(pending_updates):
             try:
-                _flush_pending_updates(workflow, pending_updates)
-                pending_updates.clear()
+                _write_job_update(workflow, u)
             except Exception:
                 pass
+        pending_updates.clear()
 
         # Reset orphaned jobs (still RUNNING) back to TO_RUN.
         # Use bulk update (single UPDATE + single commit) to stay well within

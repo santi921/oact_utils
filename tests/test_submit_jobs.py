@@ -11,7 +11,7 @@ from oact_utilities.workflows.submit_jobs import (
     DEFAULT_ORCA_CONFIG,
     DEFAULT_ORCA_PATHS,
     OrcaConfig,
-    _flush_pending_updates,
+    _write_job_update,
     prepare_job_directory,
     write_flux_job_file,
     write_slurm_job_file,
@@ -1320,12 +1320,12 @@ class TestOrcaExitCodeVerification:
         assert self._check_orca_output(job_dir) is None
 
 
-# --- Tests for _flush_pending_updates (Change 2: batch commits) ---
+# --- Tests for _write_job_update (per-job commit) ---
 
 
 @pytest.fixture
 def workflow_db(tmp_path):
-    """Create a workflow DB with 5 test jobs for flush tests."""
+    """Create a workflow DB with 5 test jobs for update tests."""
     from oact_utilities.utils.architector import _init_db, _insert_row
 
     db_path = tmp_path / "test.db"
@@ -1344,21 +1344,14 @@ def workflow_db(tmp_path):
     return db_path
 
 
-class TestFlushPendingUpdates:
-    """Tests for the _flush_pending_updates batch commit function."""
+class TestWriteJobUpdate:
+    """Tests for _write_job_update per-job commit function."""
 
-    def test_empty_list_is_noop(self, workflow_db):
-        """Flushing an empty list does nothing."""
+    def test_completed_job_with_metrics(self, workflow_db):
+        """Completed job gets status + metrics in one commit."""
         with ArchitectorWorkflow(workflow_db) as wf:
-            _flush_pending_updates(wf, [])
-            # All jobs still running
-            running = wf.get_jobs_by_status(JobStatus.RUNNING)
-            assert len(running) == 5
-
-    def test_completed_jobs_with_metrics(self, workflow_db):
-        """Completed jobs get status + metrics in one transaction."""
-        with ArchitectorWorkflow(workflow_db) as wf:
-            pending = [
+            _write_job_update(
+                wf,
                 {
                     "job_id": 1,
                     "status": JobStatus.COMPLETED,
@@ -1371,6 +1364,20 @@ class TestFlushPendingUpdates:
                         "n_cores": 4,
                     },
                 },
+            )
+
+            completed = wf.get_jobs_by_status(JobStatus.COMPLETED)
+            assert len(completed) == 1
+            assert completed[0].max_forces == 0.001
+            assert completed[0].wall_time == 120.0
+            assert completed[0].scf_steps == 10
+            assert completed[0].worker_id is None
+
+    def test_completed_job_partial_metrics(self, workflow_db):
+        """Completed job with only some metrics populated."""
+        with ArchitectorWorkflow(workflow_db) as wf:
+            _write_job_update(
+                wf,
                 {
                     "job_id": 2,
                     "status": JobStatus.COMPLETED,
@@ -1381,58 +1388,59 @@ class TestFlushPendingUpdates:
                         "final_energy": -2.5,
                     },
                 },
-            ]
-            _flush_pending_updates(wf, pending)
+            )
 
             completed = wf.get_jobs_by_status(JobStatus.COMPLETED)
-            assert len(completed) == 2
-            assert completed[0].max_forces == 0.001
-            assert completed[0].wall_time == 120.0
-            assert completed[1].scf_steps == 15
+            assert len(completed) == 1
+            assert completed[0].scf_steps == 15
+            assert completed[0].wall_time is None
 
-            # worker_id should be cleared
-            assert completed[0].worker_id is None
-
-    def test_failed_jobs_with_error_and_fail_count(self, workflow_db):
-        """Failed jobs get error_message and incremented fail_count."""
+    def test_failed_job_with_error_and_fail_count(self, workflow_db):
+        """Failed job gets error_message and incremented fail_count."""
         with ArchitectorWorkflow(workflow_db) as wf:
-            pending = [
+            _write_job_update(
+                wf,
                 {
                     "job_id": 1,
                     "status": JobStatus.FAILED,
                     "error_message": "SCF did not converge",
                     "increment_fail_count": True,
                 },
-            ]
-            _flush_pending_updates(wf, pending)
+            )
 
             failed = wf.get_jobs_by_status(JobStatus.FAILED)
             assert len(failed) == 1
             assert failed[0].error_message == "SCF did not converge"
             assert failed[0].fail_count == 1
 
-    def test_mixed_statuses(self, workflow_db):
-        """Mix of completed, failed, and timeout in one batch."""
+    def test_multiple_updates_independent(self, workflow_db):
+        """Each update commits independently -- no cross-job rollback."""
         with ArchitectorWorkflow(workflow_db) as wf:
-            pending = [
+            _write_job_update(
+                wf,
                 {
                     "job_id": 1,
                     "status": JobStatus.COMPLETED,
                     "metrics": {"job_dir": "/j0", "final_energy": -1.0},
                 },
+            )
+            _write_job_update(
+                wf,
                 {
                     "job_id": 2,
                     "status": JobStatus.FAILED,
                     "error_message": "memory error",
                     "increment_fail_count": True,
                 },
+            )
+            _write_job_update(
+                wf,
                 {
                     "job_id": 3,
                     "status": JobStatus.TIMEOUT,
                     "error_message": "exceeded 20h",
                 },
-            ]
-            _flush_pending_updates(wf, pending)
+            )
 
             completed = wf.get_jobs_by_status(JobStatus.COMPLETED)
             failed = wf.get_jobs_by_status(JobStatus.FAILED)

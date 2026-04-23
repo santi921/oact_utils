@@ -35,6 +35,19 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
+# Marker file written by --purge-failed. Its presence blocks the job from
+# ever being resubmitted by submit_jobs and flips the row to FAILED on
+# dashboard --update. Shared by clean.py (writer), submit_jobs.py, and
+# dashboard.py (readers).
+MARKER_FILENAME = ".do_not_rerun.json"
+MARKER_ERROR_MESSAGE = "Blocked by .do_not_rerun.json marker"
+
+
+def is_marker_blocked(job_dir: Path) -> bool:
+    """Return True if job_dir carries the do-not-rerun marker."""
+    return (job_dir / MARKER_FILENAME).exists()
+
+
 # Files that must NEVER be deleted by any cleanup pattern.
 _EXCLUSION_SET = frozenset(
     {
@@ -60,7 +73,7 @@ _EXCLUSION_SET = frozenset(
         "run_sella.py",
         "results.pkl",
         "sella_driver.log",
-        ".do_not_rerun.json",
+        MARKER_FILENAME,
     }
 )
 
@@ -223,7 +236,7 @@ def _extract_failure_info(job_dir: Path) -> dict[str, str | int | None]:
 
 def _write_marker_file(job_dir: Path, metadata: dict[str, str | int | None]) -> None:
     """Write .do_not_rerun.json marker with job metadata."""
-    marker_path = job_dir / ".do_not_rerun.json"
+    marker_path = job_dir / MARKER_FILENAME
     marker_data = {
         "generated_by": "python -m oact_utilities.workflows.clean",
         "date": datetime.now(tz=timezone.utc).isoformat(),
@@ -380,7 +393,7 @@ def _purge_failed_job(
 
     for entry in entries:
         # Skip the marker file if it already exists
-        if entry.name == ".do_not_rerun.json":
+        if entry.name == MARKER_FILENAME:
             continue
         is_dir = entry.is_dir()
         try:
