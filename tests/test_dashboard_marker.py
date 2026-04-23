@@ -69,7 +69,11 @@ def test_marker_update_transitions_to_failed(marker_workflow):
 
     assert row[0] == "failed"
     assert row[1] == 1
-    assert row[2] == MARKER_ERROR_MESSAGE
+    # Marker fingerprint: prefixed with MARKER_ERROR_MESSAGE and appended
+    # with the failure_reason from the marker JSON. Downstream filters
+    # match with LIKE 'Blocked by .do_not_rerun.json marker%'.
+    assert row[2].startswith(MARKER_ERROR_MESSAGE)
+    assert "SCF not converged" in row[2]
 
 
 def test_marker_update_is_idempotent(marker_workflow):
@@ -124,6 +128,74 @@ def test_marker_update_cas_prevents_double_increment(marker_workflow, monkeypatc
     assert row[0] == "failed"
     assert row[1] == 1, f"CAS should have no-opped; fail_count bumped to {row[1]}"
     assert row[2] == "concurrent writer"
+
+
+def test_marker_update_refreshes_stale_tag_on_failed_row(marker_workflow):
+    """Markered FAILED row with non-marker error_message gets its fingerprint fixed.
+
+    This is the real-world scenario causing the 4338-on-disk vs 121-in-DB
+    gap: a job failed with some legitimate reason (''SCF not converged''),
+    was purged into a marker, but subsequent resets / re-failures wrote
+    other error_messages over the top. --update must restore the marker
+    fingerprint without bumping fail_count (no new failure event).
+    """
+    db, jobs_root, jd = marker_workflow
+
+    # Seed: row is already FAILED from a prior run, error_message is a
+    # stale non-marker string, fail_count is at some nonzero value.
+    with ArchitectorWorkflow(db) as wf:
+        wf._execute_with_retry(
+            "UPDATE structures SET status = 'failed', "
+            "error_message = 'stale: timeout after 24h', "
+            "fail_count = 7, job_dir = ? WHERE id = 1",
+            (str(jd),),
+        )
+        wf._commit_with_retry()
+
+    with ArchitectorWorkflow(db) as wf:
+        update_all_statuses(wf, root_dir=jobs_root)
+        row = wf._execute_with_retry(
+            "SELECT status, fail_count, error_message FROM structures WHERE id = 1"
+        ).fetchone()
+
+    assert row[0] == "failed"
+    # Refresh MUST NOT bump fail_count -- no new failure event.
+    assert row[1] == 7, f"expected fail_count unchanged at 7, got {row[1]}"
+    # Error message is now the prefixed marker fingerprint.
+    assert row[2].startswith(MARKER_ERROR_MESSAGE)
+    assert "SCF not converged" in row[2]
+
+
+def test_marker_update_without_failure_reason_uses_bare_prefix(tmp_path):
+    """Marker JSON missing / empty failure_reason -> bare MARKER_ERROR_MESSAGE."""
+    csv = tmp_path / "in.csv"
+    csv.write_text("orig_index,charge,spin,aligned_csd_core\n0,0,1,Am 0 0 0\n")
+    db = create_workflow_db(
+        csv_path=str(csv),
+        db_path=str(tmp_path / "wf.db"),
+        geometry_column="aligned_csd_core",
+    )
+    jobs_root = tmp_path / "jobs"
+    jd = jobs_root / render_job_dir_pattern(
+        DEFAULT_JOB_DIR_PATTERN, orig_index=0, job_id=1
+    )
+    jd.mkdir(parents=True)
+    # Marker file exists but has no failure_reason key.
+    (jd / MARKER_FILENAME).write_text('{"generated_by": "test", "date": "now"}')
+
+    with ArchitectorWorkflow(db) as wf:
+        wf.update_status_bulk([1], JobStatus.TO_RUN)
+        wf._execute_with_retry(
+            "UPDATE structures SET job_dir = ? WHERE id = 1", (str(jd),)
+        )
+        wf._commit_with_retry()
+        update_all_statuses(wf, root_dir=jobs_root)
+        row = wf._execute_with_retry(
+            "SELECT error_message FROM structures WHERE id = 1"
+        ).fetchone()
+
+    # Bare constant (no ": <reason>" suffix) -- downstream LIKE still matches.
+    assert row[0] == MARKER_ERROR_MESSAGE
 
 
 def test_marker_update_uses_single_commit(marker_workflow, monkeypatch):
