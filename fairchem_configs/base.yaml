@@ -1,0 +1,38 @@
+
+job:
+  device_type: CUDA
+  run_dir: /projects/beye/iamin/distillation_project/fairchem_runs
+  debug: false
+  run_name: fairchem_train
+  scheduler:
+    mode: LOCAL
+    ranks_per_node: 4
+    num_nodes: 1
+    slurm:
+      partition: ghx4-interactive
+      account: beye-dtai-gh
+      mem_gb: 64
+      timeout_hr: 2
+      cpus_per_task: 16
+      qos: ~
+  logger:
+    _target_: fairchem.core.common.logger.WandBSingletonLogger.init_wandb
+    _partial_: true
+    entity: ishan-amin
+    project: open-actinides
+
+bf16: False
+
+eval_dataloader:
+  _target_: fairchem.core.components.common.dataloader_builder.get_dataloader
+  dataset: ${val_dataset}
+  batch_sampler_fn:
+    _target_: fairchem.core.datasets.samplers.max_atom_distributed_sampler.MaxAtomDistributedBatchSampler
+    _partial_: True
+    max_atoms: ${max_atoms}
+    shuffle: true
+    seed: 0
+  num_workers: 0
+  collate_fn:
+    _target_: fairchem.core.units.mlip_unit.mlip_unit.mt_collater_adapter
+    tasks: ${tasks}

@@ -1,0 +1,25 @@
+model: fairchem.core.models.uma.escn_md.eSCNMDBackbone
+max_num_elements: 120
+sphere_channels: 32
+hidden_channels: 32
+num_layers: 4
+lmax: 2
+mmax: 2
+cutoff: 5.1
+edge_channels: 32
+otf_graph: true
+max_neighbors: 30
+use_pbc: false
+use_pbc_single: false
+distance_function: gaussian
+num_distance_basis: 32
+regress_forces: true
+regress_stress: false
+direct_forces: false
+norm_type: rms_norm_sh
+act_type: gate
+ff_type: spectral
+chg_spin_emb_type: rand_emb
+cs_emb_grad: true
+dataset_list: [act, nonact]
+use_dataset_embedding: false

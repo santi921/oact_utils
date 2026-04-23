@@ -1,0 +1,130 @@
+defaults:
+  - dataset: combined_3ds
+  - element_refs: combined_3ds
+  - tasks: ef
+  - backbone: eSEN_K4L2
+  - /base
+  - _self_
+
+epochs: 30
+steps: null
+max_atoms: 1000
+
+# NERSC Perlmutter GPU settings (see also cluster/Nersc.yaml for reference)
+job:
+  device_type: CUDA
+  debug: false
+  run_dir: /pscratch/sd/i/ishan_a/open_actinides/runs
+  run_name: train_combined_3ds
+  scheduler:
+    mode: SLURM
+    ranks_per_node: 4
+    num_nodes: 2
+    slurm:
+      partition: ~
+      qos: premium
+      account: m5250_g
+      mem_gb: 0
+      timeout_hr: 24
+      cpus_per_task: 5
+      additional_parameters:
+        constraint: gpu
+        time: "24:00:00"
+  logger:
+    _target_: fairchem.core.common.logger.WandBSingletonLogger.init_wandb
+    _partial_: true
+    entity: ishan-amin
+    project: open-actinides
+
+train_dataset:
+  _target_: fairchem.core.datasets.mt_concat_dataset.create_concat_dataset
+  dataset_configs:
+    omol: ${dataset.omol_train}
+    act: ${dataset.act_train}
+    nonact: ${dataset.nonact_train}
+  combined_dataset_config:
+    sampling:
+      type: temperature
+      temperature: 1.0
+
+train_dataloader:
+  _target_: fairchem.core.components.common.dataloader_builder.get_dataloader
+  dataset: ${train_dataset}
+  batch_sampler_fn:
+    _target_: fairchem.core.datasets.samplers.max_atom_distributed_sampler.MaxAtomDistributedBatchSampler
+    _partial_: True
+    max_atoms: ${max_atoms}
+    shuffle: True
+    seed: 0
+  num_workers: 0
+  collate_fn:
+    _target_: fairchem.core.units.mlip_unit.mlip_unit.mt_collater_adapter
+    tasks: ${tasks}
+
+val_dataset:
+  _target_: fairchem.core.datasets.mt_concat_dataset.create_concat_dataset
+  dataset_configs:
+    omol: ${dataset.omol_val}
+    act: ${dataset.act_val}
+    nonact: ${dataset.nonact_val}
+  combined_dataset_config:
+    sampling:
+      type: temperature
+      temperature: 1.0
+
+eval_dataloader:
+  _target_: fairchem.core.components.common.dataloader_builder.get_dataloader
+  dataset: ${val_dataset}
+  batch_sampler_fn:
+    _target_: fairchem.core.datasets.samplers.max_atom_distributed_sampler.MaxAtomDistributedBatchSampler
+    _partial_: True
+    max_atoms: ${max_atoms}
+    shuffle: true
+    seed: 0
+  num_workers: 0
+  collate_fn:
+    _target_: fairchem.core.units.mlip_unit.mlip_unit.mt_collater_adapter
+    tasks: ${tasks}
+
+heads:
+  efs:
+    module: fairchem.core.models.uma.escn_md.MLP_EFS_Head
+
+runner:
+  _target_: fairchem.core.components.train.train_runner.TrainEvalRunner
+  train_dataloader: ${train_dataloader}
+  eval_dataloader: ${eval_dataloader}
+  train_eval_unit:
+    _target_: fairchem.core.units.mlip_unit.mlip_unit.MLIPTrainEvalUnit
+    job_config: ${job}
+    tasks: ${tasks}
+    model:
+      _target_: fairchem.core.models.base.HydraModel
+      backbone: ${backbone}
+      heads: ${heads}
+      pass_through_head_outputs: true
+    optimizer_fn:
+      _target_: torch.optim.AdamW
+      _partial_: true
+      lr: 8e-4
+      weight_decay: 1e-3
+    cosine_lr_scheduler_fn:
+      _target_: fairchem.core.units.mlip_unit.mlip_unit._get_consine_lr_scheduler
+      _partial_: true
+      warmup_factor: 0.2
+      warmup_epochs: 0.01
+      lr_min_factor: 0.01
+      epochs: ${epochs}
+      steps: ${steps}
+    print_every: 10
+    clip_grad_norm: 100
+    bf16: ${bf16}
+  max_epochs: ${epochs}
+  max_steps: ${steps}
+  evaluate_every_n_steps: null
+  callbacks:
+    - _target_: fairchem.core.common.profiler_utils.ProfilerCallback
+      job_config: ${job}
+    - _target_: fairchem.core.components.train.train_runner.TrainCheckpointCallback
+      checkpoint_every_n_steps: 30000
+      max_saved_checkpoints: 5

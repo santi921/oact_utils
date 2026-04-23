@@ -1,0 +1,15 @@
+device: CUDA
+mode: LOCAL
+ranks_per_node: 4
+num_nodes: 1
+run_dir: /projects/beye/iamin/distillation_project/fairchem_runs
+debug: False
+omol_path: /u/czhang31/data
+
+slurm:
+  partition: ghx4-interactive
+  account: beye-dtai-gh
+  mem_gb: 64
+  timeout_hr: 2
+  cpus_per_task: 16
+  qos: ~

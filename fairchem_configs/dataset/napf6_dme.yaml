@@ -1,0 +1,35 @@
+normalizer_rmsd: 0.8040668410519941
+regress_stress: true
+dataset_name: omol
+
+train_dataset:
+  splits:
+    train:
+      src: /projects/beye/iamin/distillation_project/fairchem_data/napf6_dme/train
+  format: ase_db
+  a2g_args:
+    r_energy: True
+    r_forces: True
+    r_data_keys: ['spin', 'charge']
+  no_shuffle: true
+  transforms:
+    common_transform:
+      dataset_name: ${dataset.dataset_name}
+    stress_reshape_transform:
+      dataset_name: ${dataset.dataset_name}
+
+val_dataset:
+  splits:
+    val:
+      src: /projects/beye/iamin/distillation_project/fairchem_data/napf6_dme/val
+  format: ase_db
+  a2g_args:
+    r_energy: True
+    r_forces: True
+    r_data_keys: ['spin', 'charge']
+  no_shuffle: true
+  transforms:
+    common_transform:
+      dataset_name: ${dataset.dataset_name}
+    stress_reshape_transform:
+      dataset_name: ${dataset.dataset_name}

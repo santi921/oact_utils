@@ -1,0 +1,74 @@
+normalizer_rmsd: 1.3053976527500468
+regress_stress: false
+act_train:
+  splits:
+    train:
+      src: /pscratch/sd/i/ishan_a/open_actinides/act/train
+  format: ase_db
+  a2g_args:
+    molecule_cell_size: 120.0
+    r_energy: true
+    r_forces: true
+    r_data_keys:
+    - spin
+    - charge
+  key_mapping:
+    energy: energy
+    forces: forces
+  transforms:
+    common_transform:
+      dataset_name: act
+act_val:
+  splits:
+    val:
+      src: /pscratch/sd/i/ishan_a/open_actinides/act/val
+  format: ase_db
+  a2g_args:
+    molecule_cell_size: 120.0
+    r_energy: true
+    r_forces: true
+    r_data_keys:
+    - spin
+    - charge
+  key_mapping:
+    energy: energy
+    forces: forces
+  transforms:
+    common_transform:
+      dataset_name: act
+nonact_train:
+  splits:
+    train:
+      src: /pscratch/sd/i/ishan_a/open_actinides/nonact/train
+  format: ase_db
+  a2g_args:
+    molecule_cell_size: 120.0
+    r_energy: true
+    r_forces: true
+    r_data_keys:
+    - spin
+    - charge
+  key_mapping:
+    energy: energy
+    forces: forces
+  transforms:
+    common_transform:
+      dataset_name: nonact
+nonact_val:
+  splits:
+    val:
+      src: /pscratch/sd/i/ishan_a/open_actinides/nonact/val
+  format: ase_db
+  a2g_args:
+    molecule_cell_size: 120.0
+    r_energy: true
+    r_forces: true
+    r_data_keys:
+    - spin
+    - charge
+  key_mapping:
+    energy: energy
+    forces: forces
+  transforms:
+    common_transform:
+      dataset_name: nonact

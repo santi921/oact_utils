@@ -1,0 +1,15 @@
+device: CUDA
+mode: SLURM
+ranks_per_node: 4
+num_nodes: 1
+
+slurm:
+  partition: ~
+  qos: debug
+  account: m5250_g
+  mem_gb: 80
+  timeout_hr: 1
+  cpus_per_task: 5
+  additional_parameters:
+    constraint: gpu
+    time: "00:30:00"

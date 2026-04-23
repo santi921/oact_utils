@@ -1,0 +1,105 @@
+normalizer_rmsd: 1.7865807848046893
+regress_stress: false
+
+omol_train:
+  splits:
+    train:
+      src: /pscratch/sd/i/ishan_a/OMOL/4M/train_1M
+  format: ase_db
+  a2g_args:
+    molecule_cell_size: 120.0
+    r_energy: True
+    r_forces: True
+    r_data_keys: ['spin', 'charge']
+  key_mapping:
+    energy: energy
+    forces: forces
+  transforms:
+    common_transform:
+      dataset_name: omol
+
+omol_val:
+  splits:
+    val:
+      sample_n: 1000
+      src: /pscratch/sd/i/ishan_a/OMOL/ALL/val
+  format: ase_db
+  a2g_args:
+    molecule_cell_size: 120.0
+    r_energy: True
+    r_forces: True
+    r_data_keys: ['spin', 'charge']
+  key_mapping:
+    energy: energy
+    forces: forces
+  transforms:
+    common_transform:
+      dataset_name: omol
+
+act_train:
+  splits:
+    train:
+      src: /pscratch/sd/i/ishan_a/open_actinides/act/train
+  format: ase_db
+  a2g_args:
+    molecule_cell_size: 120.0
+    r_energy: True
+    r_forces: True
+    r_data_keys: ['spin', 'charge']
+  key_mapping:
+    energy: energy
+    forces: forces
+  transforms:
+    common_transform:
+      dataset_name: act
+
+act_val:
+  splits:
+    val:
+      src: /pscratch/sd/i/ishan_a/open_actinides/act/val
+  format: ase_db
+  a2g_args:
+    molecule_cell_size: 120.0
+    r_energy: True
+    r_forces: True
+    r_data_keys: ['spin', 'charge']
+  key_mapping:
+    energy: energy
+    forces: forces
+  transforms:
+    common_transform:
+      dataset_name: act
+
+nonact_train:
+  splits:
+    train:
+      src: /pscratch/sd/i/ishan_a/open_actinides/nonact/train
+  format: ase_db
+  a2g_args:
+    molecule_cell_size: 120.0
+    r_energy: True
+    r_forces: True
+    r_data_keys: ['spin', 'charge']
+  key_mapping:
+    energy: energy
+    forces: forces
+  transforms:
+    common_transform:
+      dataset_name: nonact
+
+nonact_val:
+  splits:
+    val:
+      src: /pscratch/sd/i/ishan_a/open_actinides/nonact/val
+  format: ase_db
+  a2g_args:
+    molecule_cell_size: 120.0
+    r_energy: True
+    r_forces: True
+    r_data_keys: ['spin', 'charge']
+  key_mapping:
+    energy: energy
+    forces: forces
+  transforms:
+    common_transform:
+      dataset_name: nonact

@@ -262,10 +262,16 @@ parsl.*
 *.md
 *.parquet
 
+# Symlinked external repos
+fairchem
+
 # Local-only docs directories (plans, solutions, todos)
 docs/plans/
 docs/solutions/
 docs/todos/
+
+# Symlink to pscratch data directory
+data
 
 # also ignore .py if they are in data directory
 data/*.py
