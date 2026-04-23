@@ -17,7 +17,7 @@ import warnings
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, Literal, TypedDict
 
 import pandas as pd
 
@@ -416,7 +416,7 @@ class ArchitectorWorkflow:
         status: JobStatus | list[JobStatus] | None = None,
         limit: int | None = None,
         include_geometry: bool = False,
-        optimizer: str | None = None,
+        optimizer: Literal["orca", "sella"] | None = None,
     ) -> list[JobRecord]:
         """Retrieve jobs filtered by status.
 
@@ -438,7 +438,7 @@ class ArchitectorWorkflow:
         suffix = f" LIMIT {int(limit)}" if limit is not None else ""
 
         clauses: list[str] = []
-        params: list = []
+        params: list[Any] = []
         if status is not None:
             if isinstance(status, list):
                 placeholders = ",".join("?" * len(status))

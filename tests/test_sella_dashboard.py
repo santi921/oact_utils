@@ -165,28 +165,29 @@ def test_migration_adds_sella_columns(tmp_path):
 
 
 def test_migration_is_idempotent(tmp_path, monkeypatch):
-    """Second open runs zero ALTER statements (columns already exist)."""
+    """Second open runs zero ALTER and zero CREATE INDEX statements.
+
+    Both are gated behind read-only existence checks (PRAGMA table_info
+    for columns, SELECT from sqlite_master for the partial index) so
+    mature DBs do not pay the commit() fsync on every open. Concurrent
+    Parsl workers at campaign start would otherwise each take a write
+    lock and sync on Lustre.
+    """
     db = _build_sample_db(tmp_path)
 
-    # First open creates the columns.
+    # First open creates the columns + index.
     with ArchitectorWorkflow(db):
         pass
 
-    # Count ALTER statements on the second open. Wrap _execute_with_retry
-    # on the instance; patching at the class level is brittle because the
-    # method is bound in __init__ via _ensure_schema.
-    alter_count = {"n": 0}
-
-    original_init = ArchitectorWorkflow.__init__
-
-    def counting_init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-
+    counts = {"alter": 0, "create_index": 0}
     orig_execute = ArchitectorWorkflow._execute_with_retry
 
     def spying_execute(self, query, params=()):
-        if query.lstrip().upper().startswith("ALTER"):
-            alter_count["n"] += 1
+        head = query.lstrip().upper()
+        if head.startswith("ALTER"):
+            counts["alter"] += 1
+        elif head.startswith("CREATE INDEX"):
+            counts["create_index"] += 1
         return orig_execute(self, query, params)
 
     monkeypatch.setattr(ArchitectorWorkflow, "_execute_with_retry", spying_execute)
@@ -195,8 +196,11 @@ def test_migration_is_idempotent(tmp_path, monkeypatch):
         pass
 
     assert (
-        alter_count["n"] == 0
-    ), f"Expected zero ALTER on second open, saw {alter_count['n']}"
+        counts["alter"] == 0
+    ), f"Expected zero ALTER on second open, saw {counts['alter']}"
+    assert (
+        counts["create_index"] == 0
+    ), f"Expected zero CREATE INDEX on second open, saw {counts['create_index']}"
 
 
 def test_job_record_exposes_new_fields(tmp_path):
@@ -448,6 +452,65 @@ def test_print_sella_summary_tristate_counts(tmp_path, capsys):
     assert "Max:    100" in out
 
 
+def test_print_sella_summary_completed_null_converged_is_error(tmp_path, capsys):
+    """`status=completed AND sella_converged IS NULL` rolls into ERROR bucket.
+
+    Regression test for the round-3 fix: Sella-ran-but-sella_status.txt-
+    unparseable was previously silently dropped, so bucket percentages
+    did not sum to 100% and real parse errors were invisible. Must now
+    appear as ERROR.
+    """
+    from oact_utilities.workflows.dashboard import print_sella_summary
+
+    db = _build_sample_db(tmp_path)
+    with ArchitectorWorkflow(db) as wf:
+        jobs = wf.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(jobs) >= 2
+        # One CONVERGED baseline + one completed-with-NULL-converged (parse error).
+        _set_sella_row(wf, jobs[0].id, "completed", sella_converged=1, sella_steps=5)
+        _set_sella_row(wf, jobs[1].id, "completed", sella_converged=None)
+
+        print_sella_summary(wf)
+
+    out = capsys.readouterr().out
+    # Parse the four bucket lines and verify they sum to TOTAL (100%).
+    # Each line looks like: "CONVERGED       1      50.0%"
+    bucket_counts = {}
+    for label in ("CONVERGED", "NOT_CONVERGED", "ERROR", "RUNNING"):
+        line = next(ln for ln in out.splitlines() if ln.startswith(label))
+        bucket_counts[label] = int(line.split()[1])
+
+    assert bucket_counts["CONVERGED"] == 1
+    assert (
+        bucket_counts["ERROR"] == 1
+    ), "completed + sella_converged=NULL must land in ERROR, not be dropped"
+    assert (
+        sum(bucket_counts.values()) == 2
+    ), f"Bucket counts {bucket_counts} must cover all sella rows (2)"
+
+
+def test_get_jobs_by_status_optimizer_filter(tmp_path):
+    """`optimizer='sella'` kwarg filters at SQL layer, not in Python."""
+    db = _build_sample_db(tmp_path)
+    with ArchitectorWorkflow(db) as wf:
+        jobs = wf.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(jobs) >= 2
+        # Mark one row as sella, leave the other as NULL optimizer (SP).
+        _set_sella_row(wf, jobs[0].id, "to_run")
+
+        all_to_run = wf.get_jobs_by_status(JobStatus.TO_RUN)
+        sella_only = wf.get_jobs_by_status(JobStatus.TO_RUN, optimizer="sella")
+
+        assert len(all_to_run) == len(jobs)
+        assert len(sella_only) == 1
+        assert sella_only[0].id == jobs[0].id
+        assert sella_only[0].optimizer == "sella"
+
+        # Unknown optimizer filters to zero rows (does not error, no SQL injection).
+        none_match = wf.get_jobs_by_status(JobStatus.TO_RUN, optimizer="nonexistent")
+        assert none_match == []
+
+
 def test_show_sella_running_progress_tail_read(tmp_path, capsys):
     """Running progress reads sella.log tail, never opt.traj."""
     from oact_utilities.workflows.dashboard import show_sella_running_progress
@@ -552,19 +615,24 @@ def test_sella_progress_functions_do_not_touch_trajectory(import_path):
 
     ASE trajectory append-while-read is unsafe
     (https://gitlab.com/ase/ase/-/issues/249). Docstrings legitimately
-    mention opt.traj as a warning, so strip them before checking.
+    mention opt.traj as a warning, so strip them via AST before checking
+    (string-replace on fn.__doc__ is whitespace-fragile: PEP-257 dedents
+    __doc__ while getsource() keeps source indentation).
     """
+    import ast
     import importlib
     import inspect
 
     mod_path, _, attr = import_path.rpartition(".")
     fn = getattr(importlib.import_module(mod_path), attr)
-    src = inspect.getsource(fn)
-    doc = fn.__doc__
-    if doc is not None:
-        src = src.replace(doc, "", 1)
-    assert "Trajectory" not in src, f"{fn.__name__} references Trajectory"
-    assert ".traj" not in src, f"{fn.__name__} references .traj"
+    tree = ast.parse(inspect.getsource(fn))
+    func = tree.body[0]
+    assert isinstance(func, ast.FunctionDef)
+    if ast.get_docstring(func) is not None:
+        func.body = func.body[1:] or [ast.Pass()]
+    code_only = ast.unparse(func)
+    assert "Trajectory" not in code_only, f"{fn.__name__} references Trajectory"
+    assert ".traj" not in code_only, f"{fn.__name__} references .traj"
 
 
 def test_parse_job_metrics_sella_not_converged(tmp_path):
