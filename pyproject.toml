@@ -6,7 +6,10 @@ authors = [
     { name = "Santiago Vargas", email = "santiagovargas921@gmail.com" }
 ]
 requires-python = ">=3.11"
-dependencies = ["sella", "ase", "periodictable", "pandas", "parsl>=2024.1", "tqdm>=4.0"]
+# ase>=3.23 required: Dynamics.irun() added the _traj_is_empty() guard
+# that prevents duplicate frame-0 writes on append_trajectory restarts.
+# See oact_utilities/core/orca/sella_runner.py for why this matters.
+dependencies = ["sella", "ase>=3.23", "periodictable", "pandas", "parsl>=2024.1", "tqdm>=4.0"]
 
 [build-system]
 requires = ["setuptools>=61.0"]

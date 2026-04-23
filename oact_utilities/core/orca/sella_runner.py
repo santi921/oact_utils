@@ -87,6 +87,7 @@ def run_sella_optimization(
     # submit_jobs.py when only write_sella_runner_shim is needed.
     from ase.calculators.orca import ORCA, OrcaProfile
     from ase.io import write
+    from ase.io.trajectory import Trajectory
     from sella import Sella
 
     job_path = Path(job_dir).resolve()
@@ -99,11 +100,51 @@ def run_sella_optimization(
         os.chdir(job_path)
 
         try:
-            # Read initial geometry from orca.inp using our parser
-            # (ASE orca-input format not available in all versions)
-            atoms = read_geom_from_inp_file(
-                str(job_path / "orca.inp"), ase_format_tf=True
-            )
+            traj_file = str(job_path / "opt.traj")
+            log_file = str(job_path / "sella.log")
+            status_file = job_path / "sella_status.txt"
+
+            # Detect restart: if opt.traj already has optimization frames,
+            # resume from the last frame instead of restarting from the
+            # orca.inp geometry. prior_steps is the number of Sella steps
+            # already recorded in the trajectory.
+            #
+            # ase>=3.23 required: Dynamics.irun() skips the initial-frame
+            # observer write when append_trajectory=True and the traj is
+            # non-empty (see _traj_is_empty() guard). Older ASE duplicates
+            # frame 0 across restart boundaries, drifting step accounting.
+            restart_atoms = None
+            prior_steps = 0
+            traj_path = job_path / "opt.traj"
+            if traj_path.exists() and traj_path.stat().st_size > 0:
+                try:
+                    with Trajectory(str(traj_path), "r") as existing:
+                        n_frames = len(existing)
+                        if n_frames > 0:
+                            restart_atoms = existing[-1]
+                            # Frame 0 is the initial geometry; each later
+                            # frame corresponds to one accepted Sella step.
+                            prior_steps = max(0, n_frames - 1)
+                except Exception as e:
+                    print(
+                        f"[sella_runner] warning: could not read opt.traj for "
+                        f"restart ({e}); starting from orca.inp"
+                    )
+                    restart_atoms = None
+                    prior_steps = 0
+
+            if restart_atoms is not None and prior_steps > 0:
+                atoms = restart_atoms
+                print(
+                    f"[sella_runner] resuming from opt.traj: {prior_steps} "
+                    f"prior step(s) found, continuing from last frame"
+                )
+            else:
+                # Read initial geometry from orca.inp using our parser
+                # (ASE orca-input format not available in all versions)
+                atoms = read_geom_from_inp_file(
+                    str(job_path / "orca.inp"), ase_format_tf=True
+                )
 
             # Set up ORCA calculator for energy+gradient evaluations
             calc = ORCA(
@@ -115,12 +156,13 @@ def run_sella_optimization(
                 directory=str(job_path),
             )
 
-            # If orca.engrad + orca.out already exist (seeded from prior SP),
-            # pre-populate the calculator's results cache so Sella skips the
-            # redundant step-0 EnGrad call and goes straight to step 1.
+            # Step-0 preseed: only safe on first launch (no prior steps).
+            # On restart the engrad/out on disk are from the last ORCA call
+            # which may not correspond to the resumed geometry, so skip
+            # preseeding and let Sella compute one fresh gradient.
             engrad_path = job_path / "orca.engrad"
             out_path = job_path / "orca.out"
-            if engrad_path.exists() and out_path.exists():
+            if prior_steps == 0 and engrad_path.exists() and out_path.exists():
                 try:
                     calc.results = calc.template.read_results(job_path)
                     calc.atoms = atoms.copy()
@@ -134,10 +176,6 @@ def run_sella_optimization(
 
             atoms.calc = calc
 
-            traj_file = str(job_path / "opt.traj")
-            log_file = str(job_path / "sella.log")
-            status_file = job_path / "sella_status.txt"
-
             try:
                 opt = Sella(
                     atoms,
@@ -149,7 +187,17 @@ def run_sella_optimization(
                 )
 
                 if save_all_steps:
-                    step_counter: list[int] = [0]
+                    # Start step_NNN numbering past the last existing folder
+                    # so prior directories are not overwritten on restart.
+                    # Parse suffix numerically so sort order is correct past
+                    # step_999 (lexicographic sort puts step_1000 before step_99).
+                    existing_indices: list[int] = []
+                    for p in job_path.glob("step_*"):
+                        suffix = p.name.split("_", 1)[1]
+                        if suffix.isdigit():
+                            existing_indices.append(int(suffix))
+                    start_idx = max(existing_indices) + 1 if existing_indices else 0
+                    step_counter: list[int] = [start_idx]
                     opt.attach(
                         _save_step_outputs,
                         interval=1,
@@ -157,8 +205,13 @@ def run_sella_optimization(
                         step_counter=step_counter,
                     )
 
-                converged = opt.run(fmax=fmax, steps=max_steps)
-                n_steps = opt.nsteps
+                # Budget remaining steps against the global max so a restart
+                # cannot exceed the original ceiling. If the prior run
+                # already hit the cap, allow one more step to re-check
+                # convergence at the resumed geometry.
+                steps_remaining = max(1, max_steps - prior_steps)
+                converged = opt.run(fmax=fmax, steps=steps_remaining)
+                n_steps = opt.nsteps + prior_steps
 
                 # Get final max force
                 forces = atoms.get_forces()
