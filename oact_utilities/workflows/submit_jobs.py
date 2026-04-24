@@ -12,6 +12,7 @@ import os
 import random
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -1485,19 +1486,34 @@ def submit_batch_parsl(
     _scheduler_job_id = (
         os.environ.get("SLURM_JOB_ID")
         or os.environ.get("FLUX_JOB_ID")
-        or f"pid_{os.getpid()}"
+        or f"pid_{socket.gethostname()}_{os.getpid()}"
     )
 
     # Claim jobs atomically BEFORE slow directory preparation to prevent
     # concurrent submitters from grabbing the same jobs (TOCTOU fix).
-    # Sets worker_id in the same UPDATE/commit for crash traceability.
-    submitted_ids = [j.id for j in jobs_to_submit]
+    # claim_jobs returns the subset this coordinator actually won, so any
+    # ids lost to a race with another coordinator are filtered out before
+    # we prepare directories or submit to Parsl.
+    desired_ids = [j.id for j in jobs_to_submit]
     if not dry_run:
-        workflow.mark_jobs_as_running(submitted_ids, worker_id=_scheduler_job_id)
+        claimed_ids = set(workflow.claim_jobs(desired_ids, worker_id=_scheduler_job_id))
+        lost = len(desired_ids) - len(claimed_ids)
+        if lost:
+            print(
+                f"Skipping {lost} jobs claimed by another coordinator "
+                f"(worker_id={_scheduler_job_id})"
+            )
+        jobs_to_submit = [j for j in jobs_to_submit if j.id in claimed_ids]
+        if not jobs_to_submit:
+            print("No jobs available after claim race")
+            return []
+        submitted_ids = [j.id for j in jobs_to_submit]
         print(
             f"Claimed {len(submitted_ids)} jobs as RUNNING "
             f"(worker_id={_scheduler_job_id})"
         )
+    else:
+        submitted_ids = desired_ids
 
     print(f"\nPreparing {len(jobs_to_submit)} jobs for Parsl submission...")
 
@@ -1642,8 +1658,15 @@ def submit_batch_parsl(
     except Exception as e:
         print(f"Failed to initialize Parsl: {e}")
         print("Check your conda environment and ORCA installation")
-        # Reset claimed jobs back to TO_RUN since we can't run them
-        workflow.update_status_bulk(submitted_ids, JobStatus.TO_RUN, worker_id=None)
+        # Reset claimed jobs back to TO_RUN since we can't run them.
+        # only_if_worker_id guards against clobbering another coordinator
+        # that may have re-claimed these ids if anything went wrong upstream.
+        workflow.update_status_bulk(
+            submitted_ids,
+            JobStatus.TO_RUN,
+            worker_id=None,
+            only_if_worker_id=_scheduler_job_id,
+        )
         print(f"Reset {len(submitted_ids)} claimed jobs back to TO_RUN")
         return []
 
@@ -1687,7 +1710,12 @@ def submit_batch_parsl(
         print("Shutdown requested during setup -- skipping submission")
         # Falls through to the finally block which resets orphans
         signal.signal(signal.SIGTERM, _original_sigterm)
-        workflow.update_status_bulk(submitted_ids, JobStatus.TO_RUN, worker_id=None)
+        workflow.update_status_bulk(
+            submitted_ids,
+            JobStatus.TO_RUN,
+            worker_id=None,
+            only_if_worker_id=_scheduler_job_id,
+        )
         print(f"Reset {len(submitted_ids)} jobs back to TO_RUN")
         return submitted_ids
 
@@ -1865,7 +1893,10 @@ def submit_batch_parsl(
         if orphaned_ids:
             try:
                 workflow.update_status_bulk(
-                    orphaned_ids, JobStatus.TO_RUN, worker_id=None
+                    orphaned_ids,
+                    JobStatus.TO_RUN,
+                    worker_id=None,
+                    only_if_worker_id=_scheduler_job_id,
                 )
             except Exception:
                 # Fallback: try individually if bulk fails
@@ -2000,11 +2031,35 @@ def submit_batch(
         return []
 
     # Claim jobs atomically BEFORE slow directory preparation to prevent
-    # concurrent submitters from grabbing the same jobs (TOCTOU fix).
-    all_claimed_ids = [j.id for j in jobs_to_submit]
+    # concurrent submitters from grabbing the same jobs. Generate a
+    # coordinator-unique worker_id so claim_jobs can disambiguate winners
+    # from rows a different coordinator already owns. Then filter
+    # jobs_to_submit to the winning subset so losers don't get sbatch'd.
+    _scheduler_job_id = (
+        os.environ.get("SLURM_JOB_ID")
+        or os.environ.get("FLUX_JOB_ID")
+        or f"pid_{socket.gethostname()}_{os.getpid()}"
+    )
     if not dry_run:
-        workflow.mark_jobs_as_running(all_claimed_ids)
-        print(f"Claimed {len(all_claimed_ids)} jobs as RUNNING in database")
+        desired_ids = [j.id for j in jobs_to_submit]
+        claimed_ids = set(workflow.claim_jobs(desired_ids, worker_id=_scheduler_job_id))
+        lost = len(desired_ids) - len(claimed_ids)
+        if lost:
+            print(
+                f"Skipping {lost} jobs claimed by another coordinator "
+                f"(worker_id={_scheduler_job_id})"
+            )
+        jobs_to_submit = [j for j in jobs_to_submit if j.id in claimed_ids]
+        if not jobs_to_submit:
+            print("No jobs available after claim race")
+            return []
+        all_claimed_ids = [j.id for j in jobs_to_submit]
+        print(
+            f"Claimed {len(all_claimed_ids)} jobs as RUNNING "
+            f"(worker_id={_scheduler_job_id})"
+        )
+    else:
+        all_claimed_ids = [j.id for j in jobs_to_submit]
 
     submitted_ids = []
     job_dir_map: dict[int, Path] = {}  # job_id -> job_dir for batch commit

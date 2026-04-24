@@ -1451,3 +1451,117 @@ class TestWriteJobUpdate:
             assert len(failed) == 1
             assert len(timeout) == 1
             assert len(running) == 2  # jobs 4 and 5 unchanged
+
+
+class TestSubmitBatchClaimFiltering:
+    """submit_batch must only submit the subset of ids that claim_jobs won."""
+
+    def _seed_db(self, db_path, n):
+        from oact_utilities.utils.architector import _init_db, _insert_row
+
+        conn = _init_db(db_path)
+        for i in range(n):
+            _insert_row(
+                conn,
+                orig_index=i,
+                elements="H;H",
+                natoms=2,
+                geometry="H 0.0 0.0 0.0\nH 0.0 0.0 0.74",
+                status="to_run",
+                charge=0,
+                spin=1,
+            )
+        conn.commit()
+        conn.close()
+
+    def test_traditional_path_skips_jobs_lost_to_claim(self, tmp_path, monkeypatch):
+        """submit_batch only sbatches ids that claim_jobs returned."""
+        import subprocess as _subprocess
+
+        from oact_utilities.workflows import submit_jobs as sj_mod
+
+        db_path = tmp_path / "test.db"
+        self._seed_db(db_path, 5)
+        root_dir = tmp_path / "jobs"
+
+        with ArchitectorWorkflow(db_path) as workflow:
+            winners = [1, 3]
+            monkeypatch.setattr(
+                ArchitectorWorkflow,
+                "claim_jobs",
+                lambda self, ids, worker_id: list(winners),
+            )
+
+            prepared: list[int] = []
+
+            def fake_prepare(job, *args, **kwargs):
+                prepared.append(job.id)
+                job_dir = root_dir / f"job_{job.orig_index}"
+                job_dir.mkdir(parents=True, exist_ok=True)
+                return job_dir
+
+            monkeypatch.setattr(sj_mod, "prepare_job_directory", fake_prepare)
+
+            def fake_write_flux(job_dir, **kwargs):
+                script = job_dir / "flux_job.flux"
+                script.write_text("#!/bin/sh\necho fake\n")
+                return script
+
+            monkeypatch.setattr(sj_mod, "write_flux_job_file", fake_write_flux)
+
+            submitted_cmds: list[list[str]] = []
+
+            def fake_run(cmd, **kwargs):
+                submitted_cmds.append(list(cmd))
+                return _subprocess.CompletedProcess(
+                    cmd, 0, stdout="fakejob\n", stderr=""
+                )
+
+            monkeypatch.setattr(sj_mod.subprocess, "run", fake_run)
+
+            submitted = sj_mod.submit_batch(
+                workflow,
+                root_dir,
+                batch_size=5,
+                scheduler="flux",
+                randomize=False,
+                dry_run=False,
+            )
+
+        assert sorted(submitted) == winners
+        assert sorted(prepared) == winners
+        assert len(submitted_cmds) == len(winners)
+
+    def test_traditional_path_aborts_when_claim_empty(self, tmp_path, monkeypatch):
+        """If claim_jobs loses every id, no directories are prepared."""
+        from oact_utilities.workflows import submit_jobs as sj_mod
+
+        db_path = tmp_path / "test.db"
+        self._seed_db(db_path, 3)
+        root_dir = tmp_path / "jobs"
+
+        with ArchitectorWorkflow(db_path) as workflow:
+            monkeypatch.setattr(
+                ArchitectorWorkflow,
+                "claim_jobs",
+                lambda self, ids, worker_id: [],
+            )
+            prepare_calls = {"n": 0}
+
+            def boom(*args, **kwargs):
+                prepare_calls["n"] += 1
+                raise AssertionError("prepare_job_directory should not run")
+
+            monkeypatch.setattr(sj_mod, "prepare_job_directory", boom)
+
+            submitted = sj_mod.submit_batch(
+                workflow,
+                root_dir,
+                batch_size=5,
+                scheduler="flux",
+                randomize=False,
+                dry_run=False,
+            )
+
+        assert submitted == []
+        assert prepare_calls["n"] == 0
