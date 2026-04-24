@@ -12,6 +12,7 @@ import os
 import random
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -1485,7 +1486,7 @@ def submit_batch_parsl(
     _scheduler_job_id = (
         os.environ.get("SLURM_JOB_ID")
         or os.environ.get("FLUX_JOB_ID")
-        or f"pid_{os.getpid()}"
+        or f"pid_{socket.gethostname()}_{os.getpid()}"
     )
 
     # Claim jobs atomically BEFORE slow directory preparation to prevent
@@ -2037,7 +2038,7 @@ def submit_batch(
     _scheduler_job_id = (
         os.environ.get("SLURM_JOB_ID")
         or os.environ.get("FLUX_JOB_ID")
-        or f"pid_{os.getpid()}"
+        or f"pid_{socket.gethostname()}_{os.getpid()}"
     )
     if not dry_run:
         desired_ids = [j.id for j in jobs_to_submit]
