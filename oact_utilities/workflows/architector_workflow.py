@@ -141,19 +141,27 @@ class ArchitectorWorkflow:
         # sqlite3.connect() itself succeeded.  The connection-level busy timeout
         # does not cover the period before the first execute, so we retry the
         # whole setup with exponential backoff.
+        #
+        # Optimization: `PRAGMA journal_mode=DELETE` acquires a reserved/exclusive
+        # lock even when the DB is already in DELETE mode, which contends with
+        # active writers (e.g. Parsl workers).  Read the current mode first with
+        # a read-only PRAGMA and skip the write when already correct.
         conn: sqlite3.Connection | None = None
         for attempt in range(10):
             try:
                 conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
                 conn.row_factory = sqlite3.Row
-                row = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
-                if row and row[0].lower() != "delete":
-                    warnings.warn(
-                        f"Failed to switch {self.db_path} to DELETE journal mode "
-                        f"(current mode: {row[0]}). Another process may hold "
-                        "the database open in WAL mode.",
-                        stacklevel=2,
-                    )
+                current = conn.execute("PRAGMA journal_mode").fetchone()
+                current_mode = current[0].lower() if current else ""
+                if current_mode != "delete":
+                    row = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+                    if row and row[0].lower() != "delete":
+                        warnings.warn(
+                            f"Failed to switch {self.db_path} to DELETE journal mode "
+                            f"(current mode: {row[0]}). Another process may hold "
+                            "the database open in WAL mode.",
+                            stacklevel=2,
+                        )
                 break
             except sqlite3.OperationalError as e:
                 if conn is not None:
