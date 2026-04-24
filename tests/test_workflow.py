@@ -932,6 +932,128 @@ def test_worker_id_bulk_reset(tmp_path):
         assert all(j.worker_id == "flux_abc123" for j in still_running)
 
 
+def _seed_to_run_db(db_path, n):
+    """Helper: create a fresh DB with n rows in TO_RUN."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    for i in range(n):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="to_run",
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_claim_jobs_returns_winning_subset(tmp_path):
+    """claim_jobs flips TO_RUN -> RUNNING, returns the ids now owned."""
+    db_path = tmp_path / "test.db"
+    _seed_to_run_db(db_path, 10)
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        claimed = workflow.claim_jobs([1, 2, 3, 4, 5], worker_id="coord_A")
+        assert sorted(claimed) == [1, 2, 3, 4, 5]
+
+        running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        assert len(running) == 5
+        assert {j.id for j in running} == {1, 2, 3, 4, 5}
+        assert all(j.worker_id == "coord_A" for j in running)
+
+        still_to_run = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert {j.id for j in still_to_run} == {6, 7, 8, 9, 10}
+
+
+def test_claim_jobs_disjoint_under_race(tmp_path):
+    """Two coordinators claiming overlapping ids get disjoint subsets."""
+    db_path = tmp_path / "test.db"
+    _seed_to_run_db(db_path, 10)
+
+    overlapping = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    with ArchitectorWorkflow(db_path) as coord_a:
+        with ArchitectorWorkflow(db_path) as coord_b:
+            claim_a = set(coord_a.claim_jobs(overlapping, worker_id="A"))
+            claim_b = set(coord_b.claim_jobs(overlapping, worker_id="B"))
+
+    assert claim_a.isdisjoint(claim_b)
+    assert claim_a | claim_b == set(overlapping)
+    # First caller wins all of them because the second call sees no TO_RUN rows.
+    assert claim_a == set(overlapping)
+    assert claim_b == set()
+
+
+def test_claim_jobs_ignores_non_to_run(tmp_path):
+    """claim_jobs only returns rows that were TO_RUN at UPDATE time."""
+    db_path = tmp_path / "test.db"
+    _seed_to_run_db(db_path, 6)
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Pre-set 1,2 to COMPLETED and 3 to RUNNING with another worker_id.
+        workflow.update_status_bulk([1, 2], JobStatus.COMPLETED)
+        workflow.mark_jobs_as_running([3], worker_id="other_coord")
+
+        claimed = workflow.claim_jobs([1, 2, 3, 4, 5, 6], worker_id="me")
+        assert sorted(claimed) == [4, 5, 6]
+
+        # Row 3 still owned by other_coord, not me.
+        running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        owners = {j.id: j.worker_id for j in running}
+        assert owners[3] == "other_coord"
+        assert owners[4] == "me"
+
+
+def test_claim_jobs_rejects_empty_worker_id(tmp_path):
+    """Empty or None worker_id raises ValueError -- it is the ownership token."""
+    db_path = tmp_path / "test.db"
+    _seed_to_run_db(db_path, 1)
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        with pytest.raises(ValueError):
+            workflow.claim_jobs([1], worker_id="")
+        with pytest.raises(ValueError):
+            workflow.claim_jobs([1], worker_id=None)  # type: ignore[arg-type]
+
+
+def test_claim_jobs_empty_list_is_noop(tmp_path):
+    """claim_jobs([]) returns [] without touching the database."""
+    db_path = tmp_path / "test.db"
+    _seed_to_run_db(db_path, 3)
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert workflow.claim_jobs([], worker_id="me") == []
+        # No rows transitioned.
+        assert len(workflow.get_jobs_by_status(JobStatus.TO_RUN)) == 3
+
+
+def test_update_status_bulk_only_if_worker_id(tmp_path):
+    """only_if_worker_id guards the UPDATE to rows owned by this coord."""
+    db_path = tmp_path / "test.db"
+    _seed_to_run_db(db_path, 4)
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.mark_jobs_as_running([1, 2], worker_id="A")
+        workflow.mark_jobs_as_running([3, 4], worker_id="B")
+
+        # Coordinator A tries to reset all four -- should only reset its own.
+        workflow.update_status_bulk(
+            [1, 2, 3, 4],
+            JobStatus.TO_RUN,
+            worker_id=None,
+            only_if_worker_id="A",
+        )
+
+        to_run = {j.id for j in workflow.get_jobs_by_status(JobStatus.TO_RUN)}
+        running = {
+            j.id: j.worker_id for j in workflow.get_jobs_by_status(JobStatus.RUNNING)
+        }
+        assert to_run == {1, 2}
+        assert running == {3: "B", 4: "B"}
+
+
 def test_ensure_schema_migrates_worker_id(tmp_path):
     """_ensure_schema adds worker_id column to old databases."""
     import sqlite3

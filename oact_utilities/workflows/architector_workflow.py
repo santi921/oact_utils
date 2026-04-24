@@ -557,6 +557,7 @@ class ArchitectorWorkflow:
         error_message: str | None = None,
         worker_id: object = _SENTINEL,
         only_if_status: JobStatus | None = None,
+        only_if_worker_id: str | None = None,
     ):
         """Update status for multiple jobs at once.
 
@@ -570,6 +571,10 @@ class ArchitectorWorkflow:
             only_if_status: If provided, only update jobs currently in this
                 status. Use this when claiming jobs to prevent two concurrent
                 workers from double-assigning the same job.
+            only_if_worker_id: If provided, only update rows whose current
+                worker_id matches. Use this on reset paths so a coordinator
+                cannot accidentally clobber another coordinator's live
+                claims during shutdown or cleanup.
         """
         if not job_ids:
             return
@@ -590,10 +595,14 @@ class ArchitectorWorkflow:
 
         placeholders = ",".join("?" * len(job_ids))
         where = f"id IN ({placeholders})"
+        extra: list = []
         if only_if_status is not None:
             where += " AND status = ?"
+            extra.append(only_if_status.value)
+        if only_if_worker_id is not None:
+            where += " AND worker_id = ?"
+            extra.append(only_if_worker_id)
         query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE {where}"
-        extra = [only_if_status.value] if only_if_status is not None else []
         self._execute_with_retry(query, tuple(params + job_ids + extra))
         self._commit_with_retry()
 
@@ -680,6 +689,10 @@ class ArchitectorWorkflow:
     def mark_jobs_as_running(self, job_ids: list[int], worker_id: str | None = None):
         """Mark jobs as running (e.g., after submission to HPC queue).
 
+        Prefer :meth:`claim_jobs` at submission time: it returns the subset
+        of ids actually won, so the caller can avoid double-submitting jobs
+        that another coordinator claimed concurrently.
+
         Args:
             job_ids: List of job database IDs.
             worker_id: Optional scheduler job ID to associate with these jobs
@@ -691,6 +704,65 @@ class ArchitectorWorkflow:
             worker_id=worker_id,
             only_if_status=JobStatus.TO_RUN,
         )
+
+    def claim_jobs(self, job_ids: list[int], worker_id: str) -> list[int]:
+        """Atomically claim TO_RUN jobs for a specific worker.
+
+        Performs a conditional UPDATE that only transitions rows currently in
+        TO_RUN, tagging them with ``worker_id``. Then SELECTs back the subset
+        of ``job_ids`` whose ``worker_id`` equals the caller's, which is the
+        set this coordinator now owns.
+
+        Use at submission time when multiple coordinators may point at the
+        same database. Callers must filter their local job list to the
+        returned subset before preparing directories or submitting to the
+        scheduler, otherwise jobs lost to a race will be double-submitted.
+
+        Args:
+            job_ids: Candidate database IDs this coordinator wants to claim.
+            worker_id: Non-empty ownership token (e.g. ``SLURM_JOB_ID``,
+                ``FLUX_JOB_ID``, or ``f"pid_{os.getpid()}"``). Required so the
+                post-UPDATE SELECT can distinguish winners from pre-existing
+                RUNNING rows owned by other coordinators.
+
+        Returns:
+            The subset of ``job_ids`` now owned by ``worker_id``. Order is
+            not guaranteed; treat as a set.
+
+        Raises:
+            ValueError: If ``worker_id`` is None or empty.
+        """
+        if not worker_id:
+            raise ValueError("claim_jobs requires a non-empty worker_id")
+        if not job_ids:
+            return []
+
+        placeholders = ",".join("?" * len(job_ids))
+        update_query = (
+            f"UPDATE structures "
+            f"SET status = ?, worker_id = ?, updated_at = CURRENT_TIMESTAMP "
+            f"WHERE id IN ({placeholders}) AND status = ?"
+        )
+        update_params: list = [
+            JobStatus.RUNNING.value,
+            worker_id,
+            *job_ids,
+            JobStatus.TO_RUN.value,
+        ]
+        self._execute_with_retry(update_query, tuple(update_params))
+        self._commit_with_retry()
+
+        select_query = (
+            f"SELECT id FROM structures "
+            f"WHERE id IN ({placeholders}) AND status = ? AND worker_id = ?"
+        )
+        select_params: list = [
+            *job_ids,
+            JobStatus.RUNNING.value,
+            worker_id,
+        ]
+        cur = self._execute_with_retry(select_query, tuple(select_params))
+        return [row[0] for row in cur.fetchall()]
 
     def reset_failed_jobs(
         self, max_fail_count: int | None = None, include_timeout: bool = False
