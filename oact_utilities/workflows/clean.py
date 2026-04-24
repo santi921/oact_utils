@@ -356,12 +356,17 @@ def _purge_failed_job(
         return matched, bytes_freed, errors
 
     # TOCTOU re-check: confirm job is still failed in DB.
-    # Uses a short-lived read-only connection with DELETE mode (never WAL)
-    # to avoid poisoning the DB with stale -wal/-shm files on Lustre/VAST.
+    # Uses a short-lived connection with DELETE mode (never WAL) to avoid
+    # poisoning the DB with stale -wal/-shm files on Lustre/VAST. Reads the
+    # current journal_mode first (shared lock) and only writes if it differs;
+    # the write-form PRAGMA takes a reserved lock that contends badly with
+    # active Parsl writers when N workers call this concurrently.
     try:
         with sqlite3.connect(str(db_path), timeout=5.0) as conn:
-            conn.execute("PRAGMA journal_mode=DELETE")
             conn.execute("PRAGMA busy_timeout=5000")
+            current = conn.execute("PRAGMA journal_mode").fetchone()
+            if not current or current[0].lower() != "delete":
+                conn.execute("PRAGMA journal_mode=DELETE")
             cur = conn.execute("SELECT status FROM structures WHERE id = ?", (job_id,))
             row = cur.fetchone()
     except Exception as e:
