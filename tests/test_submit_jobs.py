@@ -10,11 +10,16 @@ from oact_utilities.workflows.architector_workflow import ArchitectorWorkflow, J
 from oact_utilities.workflows.submit_jobs import (
     DEFAULT_ORCA_CONFIG,
     DEFAULT_ORCA_PATHS,
+    SANDIA_DEFAULT_ACCOUNT,
+    SANDIA_DEFAULT_OPENMPI_MODULE,
+    SANDIA_DEFAULT_PARTITION,
+    SANDIA_DEFAULT_QOS,
     OrcaConfig,
     _write_job_update,
     prepare_job_directory,
     write_flux_job_file,
     write_slurm_job_file,
+    write_slurm_sandia_job_file,
 )
 
 PARSL_INSTALLED = importlib.util.find_spec("parsl") is not None
@@ -528,6 +533,142 @@ class TestWriteSlurmJobFile:
         content = slurm_script.read_text()
         # Default slurm LD_LIBRARY_PATH is empty, so no export line should appear
         assert "export LD_LIBRARY_PATH=:" not in content
+
+
+class TestWriteSlurmSandiaJobFile:
+    """Tests for write_slurm_sandia_job_file (CTS1/TLCC2)."""
+
+    def test_creates_script_with_correct_name(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir)
+
+        assert script.exists()
+        assert script.name == "slurm_job.sh"
+
+    def test_script_is_executable(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir)
+
+        assert script.stat().st_mode & 0o755
+
+    def test_uses_partition_not_constraint(self, tmp_path):
+        """Sandia writer must use --partition (not --constraint=standard)."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir, partition="attaway")
+        content = script.read_text()
+
+        assert "#SBATCH --partition=attaway" in content
+        assert "--constraint" not in content
+
+    def test_uses_module_load_not_conda(self, tmp_path):
+        """Sandia writer must module-load OpenMPI; conda activation is wrong here."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir)
+        content = script.read_text()
+
+        assert f"module load {SANDIA_DEFAULT_OPENMPI_MODULE}" in content
+        assert "conda activate" not in content
+
+    def test_sets_ompi_mca_env(self, tmp_path):
+        """Sandia writer forces TCP/vader transport via OMPI_MCA env."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir)
+        content = script.read_text()
+
+        assert "export OMPI_MCA_pml=ob1" in content
+        assert "export OMPI_MCA_mtl=^psm2" in content
+        assert "export OMPI_MCA_btl=tcp,self,vader" in content
+
+    def test_derives_mpi_root_at_runtime(self, tmp_path):
+        """LD_LIBRARY_PATH is derived from $(which mpirun) after module load."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir)
+        content = script.read_text()
+
+        assert "export MPI_ROOT=$(dirname $(dirname $(which mpirun)))" in content
+        assert "export LD_LIBRARY_PATH=${MPI_ROOT}/lib:$LD_LIBRARY_PATH" in content
+
+    def test_default_ntasks_per_node_is_36(self, tmp_path):
+        """CTS1 nodes have 36 cores; default reflects that."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir)
+        content = script.read_text()
+
+        assert "#SBATCH --ntasks-per-node=36" in content
+
+    def test_custom_ntasks_per_node(self, tmp_path):
+        """TLCC2 has 16 cores; n_cores override should propagate."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir, n_cores=16)
+        content = script.read_text()
+
+        assert "#SBATCH --ntasks-per-node=16" in content
+
+    def test_account_and_qos_in_script(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir, account="fy250086", qos="normal")
+        content = script.read_text()
+
+        assert "#SBATCH --account=fy250086" in content
+        assert "#SBATCH --qos=normal" in content
+
+    def test_default_orca_path_is_in_orca_paths(self):
+        """DEFAULT_ORCA_PATHS must have a 'sandia' entry pointing to a real-looking path."""
+        assert "sandia" in DEFAULT_ORCA_PATHS
+        assert DEFAULT_ORCA_PATHS["sandia"].endswith("/orca")
+
+    def test_orca_command_appears_with_input(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        orca_path = "/home/svargas/orca_6_1_0_linux_x86-64_shared_openmpi418/orca"
+        script = write_slurm_sandia_job_file(job_dir, orca_path=orca_path)
+        content = script.read_text()
+
+        assert f"{orca_path} orca.inp" in content
+
+    def test_sella_optimizer_runs_python_shim(self, tmp_path):
+        """When optimizer=sella, the script runs the Sella shim instead of ORCA."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir, optimizer="sella")
+        content = script.read_text()
+
+        assert "python run_sella.py" in content
+        assert (
+            " orca.inp" not in content.split("python run_sella.py")[0].split("\n")[-1]
+        )
+
+    def test_sandia_defaults_match_constants(self, tmp_path):
+        """Defaults written into the script match the exported constants."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_sandia_job_file(job_dir)
+        content = script.read_text()
+
+        assert f"#SBATCH --partition={SANDIA_DEFAULT_PARTITION}" in content
+        assert f"#SBATCH --qos={SANDIA_DEFAULT_QOS}" in content
+        assert f"#SBATCH --account={SANDIA_DEFAULT_ACCOUNT}" in content
 
 
 class TestFluxSellaJobFile:

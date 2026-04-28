@@ -114,12 +114,22 @@ DEFAULT_ORCA_PATHS = {
     "flux": "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
     "macos_arm64_openmpi411": "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
     "slurm": "orca",
+    "sandia": "/home/svargas/orca_6_1_0_linux_x86-64_shared_openmpi418/orca",
 }
 
 DEFAULT_LD_LIBRARY_PATHS = {
     "flux": "/usr/WS1/vargas58/miniconda3/envs/py10mpi/lib",
     "slurm": "",
 }
+
+# Sandia CTS1/TLCC2 defaults. The 'aue' OpenMPI module is the build that
+# matches ORCA's shared-library build; the MPI MCA settings disable
+# PSM2/Omni-Path because some compute partitions misroute traffic on it.
+SANDIA_DEFAULT_OPENMPI_MODULE = "aue/openmpi/4.1.6-gcc-12.3.0"
+SANDIA_DEFAULT_PARTITION = "attaway"
+SANDIA_DEFAULT_QOS = "normal"
+SANDIA_DEFAULT_ACCOUNT = "fy250086"
+SANDIA_DEFAULT_NTASKS_PER_NODE = 36  # cts1=36; tlcc2=16
 
 
 def _write_job_update(
@@ -412,6 +422,91 @@ def write_slurm_job_file(
         f.writelines(lines)
 
     # Make executable
+    slurm_script.chmod(0o755)
+
+    return slurm_script
+
+
+def write_slurm_sandia_job_file(
+    job_dir: Path,
+    n_cores: int = SANDIA_DEFAULT_NTASKS_PER_NODE,
+    n_hours: int = 48,
+    qos: str = SANDIA_DEFAULT_QOS,
+    partition: str = SANDIA_DEFAULT_PARTITION,
+    account: str = SANDIA_DEFAULT_ACCOUNT,
+    orca_path: str = DEFAULT_ORCA_PATHS["sandia"],
+    openmpi_module: str = SANDIA_DEFAULT_OPENMPI_MODULE,
+    input_file: str = "orca.inp",
+    optimizer: str | None = None,
+    job_name: str = "orca",
+) -> Path:
+    """Write a SLURM job submission script for Sandia CTS1/TLCC2 systems.
+
+    Differs from ``write_slurm_job_file`` in three ways:
+
+    - Uses ``module load`` for OpenMPI instead of ``conda activate``.
+    - Sets ``OMPI_MCA_*`` env vars to force TCP/vader transport (PSM2/Omni-Path
+      can misroute on some Sandia partitions; can be re-enabled later if
+      benchmarks show TCP is the bottleneck).
+    - Uses ``--partition`` instead of ``--constraint`` and derives
+      ``LD_LIBRARY_PATH`` from ``mpirun`` at job runtime.
+
+    Args:
+        job_dir: Directory where the job file will be written.
+        n_cores: Tasks per node. CTS1 nodes have 36 cores; TLCC2 have 16.
+        n_hours: Wall-time in hours.
+        qos: SLURM QOS (long, large, priority, normal).
+        partition: SLURM partition.
+        account: SLURM account.
+        orca_path: Absolute path to the ORCA executable (the binary itself, not
+            its parent directory).
+        openmpi_module: ``module load`` argument matching ORCA's shared build.
+        input_file: ORCA input file name.
+        optimizer: Optimizer engine ("orca", "sella", or None for single-point).
+        job_name: Slurm job name.
+
+    Returns:
+        Path to the created SLURM job file.
+    """
+    job_dir_abs = job_dir.resolve()
+    slurm_script = job_dir_abs / "slurm_job.sh"
+
+    if optimizer == "sella":
+        run_cmd = "python run_sella.py > sella_driver.log 2>&1\n"
+    else:
+        run_cmd = f"{orca_path} {input_file}\n"
+
+    lines = [
+        "#!/bin/bash\n",
+        f"#SBATCH --job-name={job_name}\n",
+        "#SBATCH --nodes=1\n",
+        f"#SBATCH --ntasks-per-node={n_cores}\n",
+        f"#SBATCH --time={n_hours}:00:00\n",
+        f"#SBATCH --qos={qos}\n",
+        f"#SBATCH --output={job_dir_abs}/orca_%j.out\n",
+        f"#SBATCH --error={job_dir_abs}/orca_%j.err\n",
+        f"#SBATCH --account={account}\n",
+        f"#SBATCH --partition={partition}\n",
+        "\n",
+        "# Load the aue OpenMPI that matches ORCA's shared build\n",
+        f"module load {openmpi_module}\n",
+        "\n",
+        "# Point to the correct libmpi at runtime\n",
+        "export MPI_ROOT=$(dirname $(dirname $(which mpirun)))\n",
+        "export LD_LIBRARY_PATH=${MPI_ROOT}/lib:$LD_LIBRARY_PATH\n",
+        "\n",
+        "# MPI transport: force TCP/vader; PSM2/Omni-Path can misroute on some partitions\n",
+        "export OMPI_MCA_pml=ob1\n",
+        "export OMPI_MCA_mtl=^psm2\n",
+        "export OMPI_MCA_btl=tcp,self,vader\n",
+        "\n",
+        f"cd {job_dir_abs}\n",
+        run_cmd,
+    ]
+
+    with open(slurm_script, "w") as f:
+        f.writelines(lines)
+
     slurm_script.chmod(0o755)
 
     return slurm_script
@@ -1919,6 +2014,9 @@ def submit_batch(
     max_fail_count: int | None = None,
     randomize: bool = True,
     reroot: bool = False,
+    site: str = "default",
+    partition: str | None = None,
+    openmpi_module: str = SANDIA_DEFAULT_OPENMPI_MODULE,
 ) -> list[int]:
     """Submit a batch of ready jobs to the HPC scheduler.
 
@@ -1943,6 +2041,14 @@ def submit_batch(
         reroot: If True, ignore job_dir paths stored in the database and
             always construct paths from root_dir + job_dir_pattern. Useful
             when the database has been relocated.
+        site: HPC site flavor selecting the job-script writer. ``"default"``
+            uses the standard SLURM/Flux writers (conda + constraint=standard).
+            ``"sandia"`` selects ``write_slurm_sandia_job_file`` which uses
+            ``module load`` + OMPI MCA env + ``--partition``. Only valid with
+            ``scheduler="slurm"``.
+        partition: SLURM partition (only used when ``site="sandia"``). When
+            ``None``, the Sandia default partition is used.
+        openmpi_module: ``module load`` argument for the Sandia writer.
 
     Returns:
         List of job IDs that were submitted.
@@ -1950,12 +2056,16 @@ def submit_batch(
     root_dir = Path(root_dir)
     root_dir.mkdir(parents=True, exist_ok=True)
 
-    # Merge config with defaults and set scheduler-specific orca_path if not provided
+    # Merge config with defaults and set scheduler/site-specific orca_path
     config: OrcaConfig = {**DEFAULT_ORCA_CONFIG, **(orca_config or {})}
     if "orca_path" not in config or config.get("orca_path") is None:
-        config["orca_path"] = DEFAULT_ORCA_PATHS.get(
-            scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
-        )
+        site_lower = site.lower()
+        if site_lower == "sandia":
+            config["orca_path"] = DEFAULT_ORCA_PATHS["sandia"]
+        else:
+            config["orca_path"] = DEFAULT_ORCA_PATHS.get(
+                scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
+            )
 
     jobs_to_submit = filter_jobs_for_submission(
         workflow,
@@ -2044,17 +2154,30 @@ def submit_batch(
                 submit_cmd = ["flux", "batch", job_script.name]
 
             elif scheduler.lower() == "slurm":
-                job_script = write_slurm_job_file(
-                    job_dir,
-                    n_cores=n_cores,
-                    n_hours=n_hours,
-                    queue=queue,
-                    allocation=allocation,
-                    orca_path=orca_path,
-                    conda_env=conda_env,
-                    optimizer=optimizer,
-                    ld_library_path=ld_library_path,
-                )
+                if site.lower() == "sandia":
+                    job_script = write_slurm_sandia_job_file(
+                        job_dir,
+                        n_cores=n_cores,
+                        n_hours=n_hours,
+                        qos=queue,
+                        partition=partition or SANDIA_DEFAULT_PARTITION,
+                        account=allocation,
+                        orca_path=orca_path,
+                        openmpi_module=openmpi_module,
+                        optimizer=optimizer,
+                    )
+                else:
+                    job_script = write_slurm_job_file(
+                        job_dir,
+                        n_cores=n_cores,
+                        n_hours=n_hours,
+                        queue=queue,
+                        allocation=allocation,
+                        orca_path=orca_path,
+                        conda_env=conda_env,
+                        optimizer=optimizer,
+                        ld_library_path=ld_library_path,
+                    )
                 submit_cmd = ["sbatch", job_script.name]
             else:
                 raise ValueError(f"Unknown scheduler: {scheduler}")
@@ -2182,6 +2305,33 @@ def main():
         "--ld-library-path",
         default=None,
         help="Override LD_LIBRARY_PATH in generated job scripts",
+    )
+    parser.add_argument(
+        "--hpc-site",
+        choices=["default", "sandia"],
+        default="default",
+        help=(
+            "HPC site flavor. 'default' uses the standard SLURM/Flux script "
+            "(conda + constraint=standard). 'sandia' (CTS1/TLCC2) uses "
+            "module load + OMPI MCA env + --partition. Only valid with "
+            "--scheduler slurm."
+        ),
+    )
+    parser.add_argument(
+        "--partition",
+        default=None,
+        help=(
+            "SLURM partition (only used with --hpc-site sandia; defaults to "
+            f"{SANDIA_DEFAULT_PARTITION})."
+        ),
+    )
+    parser.add_argument(
+        "--openmpi-module",
+        default=SANDIA_DEFAULT_OPENMPI_MODULE,
+        help=(
+            "module load argument matching ORCA's shared build "
+            f"(only used with --hpc-site sandia; default: {SANDIA_DEFAULT_OPENMPI_MODULE})."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -2407,6 +2557,23 @@ def main():
             "--cpus-per-node must be >= max_workers * cores_per_worker in Slurm/PBS Pro mode"
         )
 
+    # Validate HPC site args
+    if args.hpc_site == "sandia":
+        if args.scheduler != "slurm":
+            parser.error("--hpc-site sandia requires --scheduler slurm")
+        if args.use_parsl:
+            parser.error(
+                "--hpc-site sandia is not yet supported with --use-parsl. "
+                "Use traditional submission mode (omit --use-parsl)."
+            )
+        # Swap LLNL-specific defaults for Sandia equivalents when not overridden.
+        # The argparse default for --queue is the LLNL value "pbatch" and for
+        # --allocation is "dnn-sim"; both fail outright at sbatch time on Sandia.
+        if args.queue == "pbatch":
+            args.queue = SANDIA_DEFAULT_QOS
+        if args.allocation == "dnn-sim":
+            args.allocation = SANDIA_DEFAULT_ACCOUNT
+
     # Validate optimizer-specific args
     if args.optimizer == "orca" and args.max_opt_steps is not None:
         parser.error("--max-opt-steps is only valid with --optimizer sella")
@@ -2534,6 +2701,9 @@ def main():
             max_fail_count=args.max_fail_count,
             randomize=True,
             reroot=args.reroot,
+            site=args.hpc_site,
+            partition=args.partition,
+            openmpi_module=args.openmpi_module,
         )
 
     print(f"\nTotal jobs submitted: {len(submitted_ids)}")
