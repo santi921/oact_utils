@@ -1,0 +1,3 @@
+status: CONVERGED
+steps: 5
+final_fmax: 0.043032

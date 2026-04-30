@@ -268,6 +268,12 @@ docs/plans/
 docs/solutions/
 docs/todos/
 
+# Test fixtures under examples/sella_water_example/ must be tracked
+# (overrides *.log, *json, *txt, *traj ignores above for this fixture only)
+!examples/sella_water_example/**/*.log
+!examples/sella_water_example/**/*.json
+!examples/sella_water_example/**/sella_status.txt
+
 # also ignore .py if they are in data directory
 data/*.py
 # ignore everything in data except /data/basis_sets/

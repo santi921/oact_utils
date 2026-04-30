@@ -2468,6 +2468,20 @@ def main():
     if args.wandb_project and not args.use_parsl:
         parser.error("--wandb-project requires --use-parsl")
 
+    # Guard (Sella only): require the user to explicitly confirm pathing.
+    # Sella workflows seed job directories with files from a prior run, so
+    # silently falling back to stored job_dir values (or to the default
+    # job_dir pattern) can route jobs to the wrong place and abandon the
+    # seed files. Force the user to pass --reroot so they have also
+    # consciously set root_dir and --job-dir-pattern for this submission.
+    if args.optimizer == "sella" and not args.reroot:
+        parser.error(
+            "--optimizer sella requires --reroot. Confirm root_dir and "
+            "--job-dir-pattern match your seeded job directories "
+            "(e.g. --job-dir-pattern 'orig_index_{orig_index}' for DBs "
+            "produced by prepare_seeded_sella_db), then pass --reroot."
+        )
+
     # Submit based on mode
     if args.use_parsl:
         # Initialize W&B run if requested

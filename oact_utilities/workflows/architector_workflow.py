@@ -17,7 +17,7 @@ import warnings
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, Literal, TypedDict
 
 import pandas as pd
 
@@ -73,6 +73,10 @@ class JobRecord:
     optimizer: str | None = None
     worker_id: str | None = None
     generator_data: str | None = None
+    sella_steps: int | None = None
+    sella_converged: int | None = (
+        None  # 1 = CONVERGED, 0 = NOT_CONVERGED, NULL = ERROR / non-sella
+    )
 
 
 class ArchitectorWorkflow:
@@ -189,17 +193,27 @@ class ArchitectorWorkflow:
         return conn
 
     def _ensure_schema(self) -> None:
-        """Auto-migrate schema by adding missing columns.
+        """Auto-migrate schema by adding missing columns and indexes.
 
-        Adds columns that may not exist in older databases:
-        - ``optimizer`` TEXT (added in v1)
-        - ``worker_id`` TEXT (added in v2 -- scheduler job ID for crash recovery)
+        Columns added on first open if missing:
+        - ``optimizer`` TEXT (v1)
+        - ``worker_id`` TEXT (v2 -- scheduler job ID for crash recovery)
+        - ``generator_data`` TEXT (v3 -- qtaim-gen output)
+        - ``sella_steps`` INTEGER (v4 -- total Sella opt steps)
+        - ``sella_converged`` INTEGER (v4 -- 1/0/NULL tri-state, see
+          ``update_job_metrics_bulk``)
+
+        Indexes added on first open if missing:
+        - ``idx_optimizer_sella`` partial index on ``optimizer`` -- avoids
+          full table scan when the dashboard's ``has_sella_jobs()``
+          auto-detection runs on SP-only campaigns. Partial keeps the
+          index small (covers only rows with optimizer set).
 
         Also migrates legacy ``ready`` status values to ``to_run``.
 
-        Safe under concurrent access: catches the duplicate column error
-        that arises when another process adds the column between our
-        PRAGMA check and the ALTER TABLE statement.
+        Safe under concurrent access: catches the duplicate column/index
+        errors that arise when another process adds them between our
+        PRAGMA check and the ALTER / CREATE INDEX statement.
         """
         cur = self._execute_with_retry("PRAGMA table_info(structures)")
         existing_cols = {row[1] for row in cur.fetchall()}
@@ -215,6 +229,8 @@ class ArchitectorWorkflow:
             "optimizer": "ALTER TABLE structures ADD COLUMN optimizer TEXT DEFAULT NULL",
             "worker_id": "ALTER TABLE structures ADD COLUMN worker_id TEXT DEFAULT NULL",
             "generator_data": "ALTER TABLE structures ADD COLUMN generator_data TEXT DEFAULT NULL",
+            "sella_steps": "ALTER TABLE structures ADD COLUMN sella_steps INTEGER DEFAULT NULL",
+            "sella_converged": "ALTER TABLE structures ADD COLUMN sella_converged INTEGER DEFAULT NULL",
         }
         for col_name, alter_sql in migrations.items():
             if col_name not in existing_cols:
@@ -226,6 +242,28 @@ class ArchitectorWorkflow:
                         pass  # Another process already added the column
                     else:
                         raise
+
+        # Partial index on optimizer -- turns has_sella_jobs() from a
+        # full scan into an index lookup. Gated behind a read-only check
+        # of sqlite_master so mature databases skip the write lock +
+        # fsync entirely (same pattern as the legacy-status migration
+        # below) -- avoids N * ~200ms Lustre fsyncs when many Parsl
+        # workers open the DB concurrently at campaign start.
+        cur = self._execute_with_retry(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("idx_optimizer_sella",),
+        )
+        if cur.fetchone() is None:
+            try:
+                self._execute_with_retry(
+                    "CREATE INDEX IF NOT EXISTS idx_optimizer_sella "
+                    "ON structures(optimizer) WHERE optimizer IS NOT NULL"
+                )
+                self._commit_with_retry()
+            except sqlite3.OperationalError as e:
+                # Racing concurrent opener may have created it first.
+                if "already exists" not in str(e).lower():
+                    raise
 
         # Migrate legacy "ready" status to "to_run" (idempotent).
         # Guard with a read-only count check so mature databases skip the write
@@ -339,7 +377,8 @@ class ArchitectorWorkflow:
     _LIGHT_COLS = (
         "id, orig_index, elements, natoms, status, charge, spin, "
         "job_dir, max_forces, scf_steps, final_energy, error_message, "
-        "fail_count, wall_time, n_cores, optimizer, worker_id"
+        "fail_count, wall_time, n_cores, optimizer, worker_id, "
+        "sella_steps, sella_converged"
     )
 
     @staticmethod
@@ -374,6 +413,10 @@ class ArchitectorWorkflow:
             optimizer=r["optimizer"] if "optimizer" in keys else None,
             worker_id=r["worker_id"] if "worker_id" in keys else None,
             generator_data=r["generator_data"] if "generator_data" in keys else None,
+            sella_steps=r["sella_steps"] if "sella_steps" in keys else None,
+            sella_converged=(
+                r["sella_converged"] if "sella_converged" in keys else None
+            ),
         )
 
     def get_jobs_by_status(
@@ -381,6 +424,7 @@ class ArchitectorWorkflow:
         status: JobStatus | list[JobStatus] | None = None,
         limit: int | None = None,
         include_geometry: bool = False,
+        optimizer: Literal["orca", "sella"] | None = None,
     ) -> list[JobRecord]:
         """Retrieve jobs filtered by status.
 
@@ -389,6 +433,11 @@ class ArchitectorWorkflow:
             limit: If set, return at most this many rows (SQL LIMIT).
             include_geometry: If True, include the geometry column (large).
                 Defaults to False for performance.
+            optimizer: If set, further filter to rows where
+                ``optimizer = ?``. Uses ``idx_optimizer_sella`` when set
+                to ``'sella'``, avoiding the Python-side list-comp filter
+                pattern that materialises every running job just to
+                discard non-sella rows.
 
         Returns:
             List of JobRecord objects matching the filter.
@@ -396,16 +445,23 @@ class ArchitectorWorkflow:
         cols = "*" if include_geometry else self._LIGHT_COLS
         suffix = f" LIMIT {int(limit)}" if limit is not None else ""
 
-        if status is None:
-            query = f"SELECT {cols} FROM structures{suffix}"
-            cur = self._execute_with_retry(query)
-        elif isinstance(status, list):
-            placeholders = ",".join("?" * len(status))
-            query = f"SELECT {cols} FROM structures WHERE status IN ({placeholders}){suffix}"
-            cur = self._execute_with_retry(query, tuple(s.value for s in status))
-        else:
-            query = f"SELECT {cols} FROM structures WHERE status = ?{suffix}"
-            cur = self._execute_with_retry(query, (status.value,))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            if isinstance(status, list):
+                placeholders = ",".join("?" * len(status))
+                clauses.append(f"status IN ({placeholders})")
+                params.extend(s.value for s in status)
+            else:
+                clauses.append("status = ?")
+                params.append(status.value)
+        if optimizer is not None:
+            clauses.append("optimizer = ?")
+            params.append(optimizer)
+
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"SELECT {cols} FROM structures{where}{suffix}"
+        cur = self._execute_with_retry(query, tuple(params))
 
         rows = cur.fetchall()
         return [self._row_to_record(r) for r in rows]
@@ -509,12 +565,30 @@ class ArchitectorWorkflow:
             self._execute_with_retry(query, tuple(values))
             self._commit_with_retry()
 
+    # Columns writable by update_job_metrics_bulk. Keep in sync with
+    # JobRecord / _LIGHT_COLS / _row_to_record / _ensure_schema. This
+    # is the 5th sync point flagged in plan-review; extracting it as a
+    # single source of truth prevents drift when adding columns.
+    _BULK_METRIC_COLS = (
+        "job_dir",
+        "max_forces",
+        "scf_steps",
+        "final_energy",
+        "error_message",
+        "wall_time",
+        "n_cores",
+        "generator_data",
+        "sella_steps",
+        "sella_converged",
+    )
+
     def update_job_metrics_bulk(self, metrics_list: list[dict]):
         """Update metrics for multiple jobs in a single transaction.
 
-        Each dict in metrics_list must have a 'job_id' key and may have:
-        job_dir, max_forces, scf_steps, final_energy, error_message,
-        wall_time, n_cores.
+        Writable columns are declared in ``_BULK_METRIC_COLS``. Each
+        dict must have a 'job_id' key; any subset of the metric columns
+        may be present. Keys set to None are skipped (not written as
+        NULL) so prior values are preserved across partial updates.
 
         Args:
             metrics_list: List of dicts with job_id and metric values.
@@ -527,16 +601,23 @@ class ArchitectorWorkflow:
             values = []
             job_id = metrics["job_id"]
 
-            for col in (
-                "job_dir",
-                "max_forces",
-                "scf_steps",
-                "final_energy",
-                "error_message",
-                "wall_time",
-                "n_cores",
-                "generator_data",
+            # Tri-state guard: sella_converged must be 0, 1, or None.
+            # Reject booleans explicitly -- bool is a subclass of int
+            # and True == 1 / False == 0 by equality, so without the
+            # `isinstance(sc, bool)` check they would pass through and
+            # silently coerce. SQLite would happily round-trip any int
+            # value; downstream tri-state consumers (dashboard summary)
+            # would break on 2/-1/True/False/etc.
+            sc = metrics.get("sella_converged")
+            if sc is not None and (
+                isinstance(sc, bool) or not isinstance(sc, int) or sc not in (0, 1)
             ):
+                raise ValueError(
+                    f"sella_converged must be 0, 1, or None; got {sc!r} "
+                    f"for job_id={job_id}"
+                )
+
+            for col in self._BULK_METRIC_COLS:
                 if metrics.get(col) is not None:
                     updates.append(f"{col} = ?")
                     values.append(metrics[col])

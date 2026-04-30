@@ -8,7 +8,7 @@ import time as time_mod
 import warnings
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import numpy as np
 from ase.io.trajectory import TrajectoryReader
@@ -26,6 +26,7 @@ from oact_utilities.utils.create import (
 )
 from oact_utilities.utils.status import (
     _is_orca_atom_scf,
+    _read_last_lines,
     check_file_termination,
     check_job_termination,
     check_sella_complete,
@@ -1695,7 +1696,8 @@ def parse_job_metrics(
 
         if (job_dir / "run_sella.py").exists() and sella_status_file.exists():
             sella_status = _parse_sella_status(sella_status_file)
-            sella_converged = sella_status.get("status") == "CONVERGED"
+            status_value = sella_status.get("status")
+            sella_converged = status_value == "CONVERGED"
 
             # Override success/termination based on Sella convergence
             result["success"] = sella_converged
@@ -1708,6 +1710,14 @@ def parse_job_metrics(
             # Pull total steps from sella_status.txt (avoids extra file read)
             if sella_status.get("steps") is not None:
                 result["sella_steps"] = sella_status["steps"]
+
+            # Tri-state convergence for DB column:
+            #   1 = CONVERGED, 0 = NOT_CONVERGED, None = ERROR or missing file
+            if status_value == "CONVERGED":
+                result["sella_converged"] = 1
+            elif status_value == "NOT_CONVERGED":
+                result["sella_converged"] = 0
+            # ERROR / unknown -> leave as None (will be NULL in DB)
 
             # Note: scf_steps and wall_time from orca.out reflect only the
             # last Sella ORCA call, not the full optimization.
@@ -1726,6 +1736,7 @@ def parse_job_metrics(
             "wall_time": result.get("wall_time"),
             "time_dict": result.get("time_dict"),
             "sella_steps": result.get("sella_steps"),
+            "sella_converged": result.get("sella_converged"),
         }
 
         # Write cache for subsequent calls (silent on failure)
@@ -1777,6 +1788,83 @@ def _parse_sella_status(status_file: Path) -> dict[str, str | float | int]:
             elif key == "message":
                 result["message"] = value
     return result
+
+
+class SellaStepRow(TypedDict):
+    """One data row from sella.log.
+
+    Shared shape for any parser that returns per-step sella data. Use
+    singular ``step`` (scalar) consistently -- the existing
+    ``parse_sella_log`` returns ``steps`` (list), and the two keys must
+    not collide in caller code.
+    """
+
+    step: int
+    energy: float
+    fmax: float
+
+
+def read_sella_log_tail(log_path: str | Path) -> SellaStepRow | None:
+    """Return the last data row of sella.log as a SellaStepRow.
+
+    Used for "where is this opt right now?" progress display of running
+    sella jobs. Reads only the trailing lines via
+    ``utils.status._read_last_lines``; does not touch ``opt.traj`` (ASE
+    trajectory append-while-read is unsafe -- see ase/ase#249).
+
+    Skips header rows (those starting with ``Step``). Returns None when
+    the file is missing, empty, or contains only headers. Tolerates
+    encoding errors via ``errors='replace'`` (inherited from
+    ``_read_last_lines``).
+
+    On a restarted log (multiple header rows), this returns the last
+    row of the last segment, which is the correct "current" row. When
+    a restart has emitted its header but no data row yet, returns None
+    rather than surfacing the last row of the prior segment.
+
+    Args:
+        log_path: Path to sella.log.
+
+    Returns:
+        ``SellaStepRow`` with keys {step, energy, fmax}, or None.
+    """
+    log_str = str(log_path)
+    if not os.path.exists(log_str):
+        return None
+
+    # maxlen=8 leaves headroom for a trailing header row plus a few data
+    # rows after a restart. The deque cost is O(file_size) regardless of
+    # maxlen, so there is no I/O penalty for bumping it.
+    lines = _read_last_lines(log_str, maxlen=8)
+    if not lines:
+        return None
+
+    # Find the index of the last header row in this window. Any data
+    # rows at or before that index belong to a prior segment and must
+    # NOT be returned as current -- otherwise a fresh restart (header
+    # written, no data yet) would report the prior segment's last step.
+    last_header_idx = -1
+    for idx, line in enumerate(lines):
+        parts = line.split()
+        if parts and parts[0] == "Step":
+            last_header_idx = idx
+
+    # Iterate data rows that appear strictly AFTER the last header.
+    for line in reversed(lines[last_header_idx + 1 :]):
+        parts = line.split()
+        # Data rows start with "Sella" and have at least
+        # (Sella step time energy fmax ...).
+        if len(parts) < 5 or parts[0] != "Sella":
+            continue
+        try:
+            return SellaStepRow(
+                step=int(parts[1]),
+                energy=float(parts[3]),
+                fmax=float(parts[4]),
+            )
+        except (ValueError, IndexError):
+            continue
+    return None
 
 
 def parse_sella_log(sella_log_file: str, filter: bool = False) -> dict:

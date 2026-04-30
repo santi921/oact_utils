@@ -163,3 +163,125 @@ class TestSellaRunnerPreseed:
             )
 
         mock_opt.run.assert_called_once()
+
+
+def _write_opt_traj(job_dir: Path, n_frames: int) -> None:
+    """Write a minimal opt.traj with n_frames H2 geometries."""
+    from ase import Atoms
+    from ase.io.trajectory import Trajectory
+
+    traj = Trajectory(str(job_dir / "opt.traj"), "w")
+    for i in range(n_frames):
+        # Slightly vary bond length so frames are distinguishable
+        a = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74 + 0.01 * i]])
+        traj.write(a)
+    traj.close()
+
+
+def _run_and_capture(job_dir: Path, max_steps: int = 100):
+    """Run with mocks and return (mock_calc, mock_opt, sella_constructor_args)."""
+    fake_results = {"energy": -1.234567890000, "forces": np.zeros((2, 3))}
+
+    mock_calc = MagicMock()
+    mock_calc.template.read_results.return_value = fake_results
+    mock_opt = MagicMock()
+    mock_opt.nsteps = 2
+    mock_opt.run.return_value = True
+
+    sella_init = MagicMock(return_value=mock_opt)
+    mock_inp_atoms = _make_mock_atoms()
+
+    with (
+        patch(
+            "oact_utilities.core.orca.sella_runner.read_geom_from_inp_file",
+            return_value=mock_inp_atoms,
+        ),
+        patch("ase.calculators.orca.ORCA", return_value=mock_calc),
+        patch("ase.calculators.orca.OrcaProfile"),
+        patch("sella.Sella", sella_init),
+        patch("ase.io.write"),
+    ):
+        from oact_utilities.core.orca.sella_runner import run_sella_optimization
+
+        run_sella_optimization(
+            job_dir=str(job_dir),
+            charge=0,
+            mult=1,
+            orcasimpleinput="! wB97M-V def2-TZVPD EnGrad",
+            orcablocks="%pal nprocs 4 end",
+            max_steps=max_steps,
+        )
+
+    return mock_calc, mock_opt, sella_init, mock_inp_atoms
+
+
+class TestSellaRunnerRestart:
+    def test_restart_reduces_step_budget(self, tmp_path):
+        """Prior steps in opt.traj reduce steps_remaining passed to opt.run()."""
+        _write_orca_inp(tmp_path)
+        _write_opt_traj(tmp_path, n_frames=5)  # frame 0 + 4 steps
+
+        _, mock_opt, _, _ = _run_and_capture(tmp_path, max_steps=100)
+
+        call = mock_opt.run.call_args
+        assert call.kwargs["steps"] == 100 - 4
+
+    def test_restart_skips_preseed(self, tmp_path):
+        """On restart, the engrad preseed is skipped even if files exist."""
+        _write_orca_inp(tmp_path)
+        _write_seed_files(tmp_path)
+        _write_opt_traj(tmp_path, n_frames=3)  # 2 prior steps
+
+        mock_calc, _, _, _ = _run_and_capture(tmp_path)
+
+        mock_calc.template.read_results.assert_not_called()
+
+    def test_restart_uses_last_frame_not_inp(self, tmp_path):
+        """When restart fires, orca.inp geometry is NOT the atoms handed to Sella."""
+        _write_orca_inp(tmp_path)
+        _write_opt_traj(tmp_path, n_frames=4)
+
+        _, _, sella_init, mock_inp_atoms = _run_and_capture(tmp_path)
+
+        sella_atoms_arg = sella_init.call_args.args[0]
+        assert sella_atoms_arg is not mock_inp_atoms
+
+    def test_single_frame_traj_treated_as_fresh(self, tmp_path):
+        """opt.traj with only the initial frame is not a restart."""
+        _write_orca_inp(tmp_path)
+        _write_seed_files(tmp_path)
+        _write_opt_traj(tmp_path, n_frames=1)
+
+        mock_calc, mock_opt, _, _ = _run_and_capture(tmp_path, max_steps=50)
+
+        mock_calc.template.read_results.assert_called_once()
+        assert mock_opt.run.call_args.kwargs["steps"] == 50
+
+    def test_no_traj_is_fresh_run(self, tmp_path):
+        """No opt.traj means fresh run: full step budget, orca.inp geometry."""
+        _write_orca_inp(tmp_path)
+
+        _, mock_opt, _, _ = _run_and_capture(tmp_path, max_steps=75)
+
+        assert mock_opt.run.call_args.kwargs["steps"] == 75
+
+    def test_corrupt_traj_falls_back_to_fresh(self, tmp_path):
+        """Unreadable opt.traj does not crash; runner falls back to orca.inp."""
+        _write_orca_inp(tmp_path)
+        (tmp_path / "opt.traj").write_bytes(b"\x00\x01\x02not a trajectory")
+
+        _, mock_opt, sella_init, mock_inp_atoms = _run_and_capture(
+            tmp_path, max_steps=20
+        )
+
+        assert mock_opt.run.call_args.kwargs["steps"] == 20
+        assert sella_init.call_args.args[0] is mock_inp_atoms
+
+    def test_step_budget_floored_at_one(self, tmp_path):
+        """If prior_steps >= max_steps, allow one more step to check convergence."""
+        _write_orca_inp(tmp_path)
+        _write_opt_traj(tmp_path, n_frames=51)  # 50 prior steps
+
+        _, mock_opt, _, _ = _run_and_capture(tmp_path, max_steps=50)
+
+        assert mock_opt.run.call_args.kwargs["steps"] == 1
