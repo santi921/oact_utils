@@ -15,6 +15,8 @@ from oact_utilities.workflows.submit_jobs import (
     SANDIA_DEFAULT_PARTITION,
     SANDIA_DEFAULT_QOS,
     OrcaConfig,
+    _build_parsl_sandia_worker_init,
+    _build_parsl_sandia_worker_init_multi_block,
     _write_job_update,
     prepare_job_directory,
     write_flux_job_file,
@@ -669,6 +671,112 @@ class TestWriteSlurmSandiaJobFile:
         assert f"#SBATCH --partition={SANDIA_DEFAULT_PARTITION}" in content
         assert f"#SBATCH --qos={SANDIA_DEFAULT_QOS}" in content
         assert f"#SBATCH --account={SANDIA_DEFAULT_ACCOUNT}" in content
+
+
+class TestBuildParslSandiaWorkerInit:
+    """Tests for the minimal Sandia Parsl worker_init.
+
+    Workers inherit module-loaded MPI / OMPI MCA env from the salloc'd
+    coordinator shell, so the worker_init must NOT re-do module load (that
+    would risk Lmod-not-defined errors and LD_LIBRARY_PATH duplication).
+    """
+
+    def test_no_module_load(self):
+        out = _build_parsl_sandia_worker_init(orca_path=None)
+        assert "module load" not in out
+
+    def test_no_conda_activate(self):
+        out = _build_parsl_sandia_worker_init(orca_path=None)
+        assert "conda activate" not in out
+
+    def test_no_ld_library_path_munging(self):
+        """Worker must not stomp the inherited LD_LIBRARY_PATH."""
+        out = _build_parsl_sandia_worker_init(orca_path=None)
+        assert "LD_LIBRARY_PATH" not in out
+
+    def test_no_ompi_mca_overrides(self):
+        """OMPI MCA settings come from the salloc shell, not worker_init."""
+        out = _build_parsl_sandia_worker_init(orca_path=None)
+        assert "OMPI_MCA" not in out
+
+    def test_includes_jax_and_omp_defaults(self):
+        out = _build_parsl_sandia_worker_init(orca_path=None)
+        assert "JAX_PLATFORMS=cpu" in out
+        assert "OMP_NUM_THREADS=1" in out
+
+    def test_orca_bin_dir_prepended_to_path(self):
+        out = _build_parsl_sandia_worker_init(
+            orca_path="/home/svargas/orca_6_1_0_linux_x86-64_shared_openmpi418/orca"
+        )
+        assert (
+            "export PATH=/home/svargas/orca_6_1_0_linux_x86-64_shared_openmpi418:$PATH"
+            in out
+        )
+
+    def test_no_path_export_when_orca_path_relative(self):
+        out = _build_parsl_sandia_worker_init(orca_path="orca")
+        assert "export PATH=" not in out
+
+
+class TestBuildParslSandiaWorkerInitMultiBlock:
+    """Tests for the Sandia Parsl SlurmProvider worker_init.
+
+    Each Parsl block is a fresh sbatch allocation with no inherited modules,
+    so the worker_init must do the full bootstrap itself: module load,
+    MPI_ROOT derivation, LD_LIBRARY_PATH, OMPI MCA settings.
+    """
+
+    def test_module_load_present(self):
+        out = _build_parsl_sandia_worker_init_multi_block(
+            openmpi_module="aue/openmpi/4.1.6-gcc-12.3.0"
+        )
+        assert "module load aue/openmpi/4.1.6-gcc-12.3.0\n" in out
+
+    def test_mpi_root_derivation(self):
+        out = _build_parsl_sandia_worker_init_multi_block()
+        assert "export MPI_ROOT=$(dirname $(dirname $(which mpirun)))\n" in out
+
+    def test_default_ld_library_path(self):
+        out = _build_parsl_sandia_worker_init_multi_block()
+        assert "export LD_LIBRARY_PATH=${MPI_ROOT}/lib:$LD_LIBRARY_PATH\n" in out
+
+    def test_ld_library_path_override(self):
+        out = _build_parsl_sandia_worker_init_multi_block(ld_library_path="/foo/lib")
+        assert "export LD_LIBRARY_PATH=/foo/lib:$LD_LIBRARY_PATH\n" in out
+        assert "${MPI_ROOT}/lib" not in out
+
+    def test_ompi_mca_exports(self):
+        out = _build_parsl_sandia_worker_init_multi_block()
+        assert "export OMPI_MCA_pml=ob1\n" in out
+        assert "export OMPI_MCA_mtl=^psm2\n" in out
+        assert "export OMPI_MCA_btl=tcp,self,vader\n" in out
+
+    def test_module_load_before_mpi_root(self):
+        """which mpirun only resolves after module load -- ordering matters."""
+        out = _build_parsl_sandia_worker_init_multi_block()
+        assert out.index("module load") < out.index("MPI_ROOT")
+
+    def test_orca_bin_dir_prepended_to_path(self):
+        out = _build_parsl_sandia_worker_init_multi_block(
+            orca_path="/home/svargas/orca_6_1_0_linux_x86-64_shared_openmpi418/orca"
+        )
+        assert (
+            "export PATH=/home/svargas/orca_6_1_0_linux_x86-64_shared_openmpi418:$PATH"
+            in out
+        )
+
+    def test_no_path_export_when_orca_path_none(self):
+        out = _build_parsl_sandia_worker_init_multi_block(orca_path=None)
+        assert "export PATH=" not in out
+
+    def test_no_path_export_when_orca_path_relative(self):
+        out = _build_parsl_sandia_worker_init_multi_block(orca_path="orca")
+        assert "export PATH=" not in out
+
+    def test_jax_and_omp_defaults(self):
+        out = _build_parsl_sandia_worker_init_multi_block()
+        assert "export JAX_PLATFORMS=cpu\n" in out
+        assert "export OMP_NUM_THREADS=1\n" in out
 
 
 class TestFluxSellaJobFile:
@@ -1592,3 +1700,255 @@ class TestWriteJobUpdate:
             assert len(failed) == 1
             assert len(timeout) == 1
             assert len(running) == 2  # jobs 4 and 5 unchanged
+
+
+class TestSubmitBatchSandiaDeprecation:
+    """Per-job sbatch path on Sandia must surface a FutureWarning."""
+
+    def test_warning_fires_once_per_batch(self, monkeypatch):
+        from oact_utilities.workflows import submit_jobs as mod
+
+        mock_jobs = [MagicMock(id=i) for i in (1, 2, 3)]
+        for job in mock_jobs:
+            job.fail_count = 0
+
+        monkeypatch.setattr(
+            mod, "filter_jobs_for_submission", lambda *a, **k: list(mock_jobs)
+        )
+        monkeypatch.setattr(mod, "_filter_marker_jobs", lambda jobs, *a, **k: jobs)
+        # Halt before per-job loop work so we only exercise the warn site.
+        monkeypatch.setattr(
+            mod,
+            "prepare_job_directory",
+            lambda *a, **k: (_ for _ in ()).throw(StopIteration()),
+        )
+
+        wf = MagicMock()
+
+        with pytest.warns(FutureWarning, match="Per-job sbatch on Sandia"):
+            mod.submit_batch(
+                workflow=wf,
+                root_dir="/tmp/oact_test_warn",
+                batch_size=3,
+                scheduler="slurm",
+                site="sandia",
+                dry_run=True,
+            )
+
+    def test_warning_does_not_fire_for_non_sandia(self, monkeypatch):
+        import warnings as warnings_mod
+
+        from oact_utilities.workflows import submit_jobs as mod
+
+        mock_jobs = [MagicMock(id=1, fail_count=0)]
+        monkeypatch.setattr(
+            mod, "filter_jobs_for_submission", lambda *a, **k: list(mock_jobs)
+        )
+        monkeypatch.setattr(mod, "_filter_marker_jobs", lambda jobs, *a, **k: jobs)
+        monkeypatch.setattr(
+            mod,
+            "prepare_job_directory",
+            lambda *a, **k: (_ for _ in ()).throw(StopIteration()),
+        )
+
+        wf = MagicMock()
+
+        with warnings_mod.catch_warnings(record=True) as captured:
+            warnings_mod.simplefilter("always")
+            try:
+                mod.submit_batch(
+                    workflow=wf,
+                    root_dir="/tmp/oact_test_warn",
+                    batch_size=1,
+                    scheduler="flux",
+                    site="default",
+                    dry_run=True,
+                )
+            except StopIteration:
+                pass
+        assert not any(
+            issubclass(w.category, FutureWarning)
+            and "Per-job sbatch on Sandia" in str(w.message)
+            for w in captured
+        )
+
+
+@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
+class TestBuildParslConfigSandia:
+    """Tests for build_parsl_config_sandia (Sandia SLURM multi-block path)."""
+
+    def test_single_node_uses_simple_launcher(self):
+        from parsl.launchers import SimpleLauncher
+
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_sandia
+
+        config = build_parsl_config_sandia(nodes_per_block=1)
+        provider = config.executors[0].provider
+        assert isinstance(provider.launcher, SimpleLauncher)
+
+    def test_multi_node_uses_srun_launcher(self):
+        from parsl.launchers import SrunLauncher
+
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_sandia
+
+        config = build_parsl_config_sandia(nodes_per_block=4)
+        provider = config.executors[0].provider
+        assert isinstance(provider.launcher, SrunLauncher)
+
+    def test_partition_always_in_scheduler_options(self):
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_sandia
+
+        for nodes in (1, 4):
+            config = build_parsl_config_sandia(
+                nodes_per_block=nodes, partition="attaway"
+            )
+            provider = config.executors[0].provider
+            assert "#SBATCH --partition=attaway" in provider.scheduler_options
+
+    def test_single_node_emits_ntasks_default(self):
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_sandia
+
+        config = build_parsl_config_sandia(
+            max_workers=3, cores_per_worker=12, nodes_per_block=1
+        )
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node=36" in provider.scheduler_options
+        assert "--cpus-per-task=1" in provider.scheduler_options
+
+    def test_multi_node_omits_ntasks_unless_override(self):
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_sandia
+
+        config = build_parsl_config_sandia(nodes_per_block=4)
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node" not in provider.scheduler_options
+
+    def test_multi_node_includes_ntasks_when_cpus_per_node_override(self):
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_sandia
+
+        config = build_parsl_config_sandia(
+            max_workers=3,
+            cores_per_worker=12,
+            cpus_per_node=72,
+            nodes_per_block=4,
+        )
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node=72" in provider.scheduler_options
+        assert "--cpus-per-task=1" in provider.scheduler_options
+
+    def test_undersized_cpus_per_node_raises(self):
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_sandia
+
+        with pytest.raises(ValueError, match="cpus_per_node must be >="):
+            build_parsl_config_sandia(
+                max_workers=3, cores_per_worker=12, cpus_per_node=12
+            )
+
+    def test_worker_init_contents(self):
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_sandia
+
+        config = build_parsl_config_sandia(
+            openmpi_module="aue/openmpi/4.1.6-gcc-12.3.0"
+        )
+        worker_init = config.executors[0].provider.worker_init
+        assert "module load aue/openmpi/4.1.6-gcc-12.3.0" in worker_init
+        assert "OMPI_MCA_pml=ob1" in worker_init
+        assert "OMPI_MCA_mtl=^psm2" in worker_init
+        assert "OMPI_MCA_btl=tcp,self,vader" in worker_init
+        assert "MPI_ROOT=$(dirname $(dirname $(which mpirun)))" in worker_init
+        assert "JAX_PLATFORMS=cpu" in worker_init
+        assert "OMP_NUM_THREADS=1" in worker_init
+
+    def test_walltime_format(self):
+        """Both single- and double-digit hours must zero-pad correctly.
+
+        Guards against someone simplifying ``{:02d}`` to ``{}``.
+        """
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_sandia
+
+        assert (
+            build_parsl_config_sandia(walltime_hours=2).executors[0].provider.walltime
+            == "02:00:00"
+        )
+        assert (
+            build_parsl_config_sandia(walltime_hours=10).executors[0].provider.walltime
+            == "10:00:00"
+        )
+
+
+@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
+class TestSubmitBatchParslSandiaRouting:
+    """Tests that submit_batch_parsl dispatches to the right Sandia builder."""
+
+    def _run(self, monkeypatch, *, nodes_per_block, max_blocks):
+        """Drive submit_batch_parsl through dispatch.
+
+        The routing decision happens before parsl.load. We stub parsl.load
+        to raise so the function exits early via its existing try/except
+        path -- it catches the RuntimeError, resets claimed jobs, and
+        returns []. Either way the builder call has already been recorded.
+        """
+        import parsl
+
+        from oact_utilities.workflows import submit_jobs as mod
+
+        slurm_calls: list[dict] = []
+        local_calls: list[dict] = []
+
+        mock_job = MagicMock()
+        mock_job.id = 1
+        wf = MagicMock()
+
+        monkeypatch.setattr(
+            mod, "filter_jobs_for_submission", lambda *a, **k: [mock_job]
+        )
+        monkeypatch.setattr(mod, "_filter_marker_jobs", lambda jobs, *a, **k: jobs)
+        monkeypatch.setattr(
+            mod, "prepare_job_directory", lambda *a, **k: Path("/tmp/x")
+        )
+        monkeypatch.setattr(
+            mod,
+            "build_parsl_config_sandia",
+            lambda **k: slurm_calls.append(k) or MagicMock(),
+        )
+        monkeypatch.setattr(
+            mod,
+            "build_parsl_config_sandia_local",
+            lambda **k: local_calls.append(k) or MagicMock(),
+        )
+        monkeypatch.setattr(parsl, "clear", lambda: None)
+        monkeypatch.setattr(
+            parsl,
+            "load",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop")),
+        )
+
+        mod.submit_batch_parsl(
+            workflow=wf,
+            root_dir="/tmp/oact_test_routing",
+            num_jobs=1,
+            nodes_per_block=nodes_per_block,
+            max_blocks=max_blocks,
+            site="sandia",
+        )
+        return slurm_calls, local_calls
+
+    def test_multi_node_routes_to_slurm_builder(self, monkeypatch):
+        slurm_calls, local_calls = self._run(
+            monkeypatch, nodes_per_block=2, max_blocks=1
+        )
+        assert len(slurm_calls) == 1
+        assert len(local_calls) == 0
+
+    def test_multi_block_routes_to_slurm_builder(self, monkeypatch):
+        slurm_calls, local_calls = self._run(
+            monkeypatch, nodes_per_block=1, max_blocks=4
+        )
+        assert len(slurm_calls) == 1
+        assert len(local_calls) == 0
+
+    def test_single_block_single_node_routes_to_local_builder(self, monkeypatch):
+        slurm_calls, local_calls = self._run(
+            monkeypatch, nodes_per_block=1, max_blocks=1
+        )
+        assert len(local_calls) == 1
+        assert len(slurm_calls) == 0
