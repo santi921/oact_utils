@@ -74,6 +74,7 @@ python -m oact_utilities.workflows.submit_jobs \
     --n-cores "${CORES_PER_WORKER}" \
     --job-timeout "${JOB_TIMEOUT}" \
     --max-fail-count "${MAX_FAIL_COUNT}" \
+    --max-blocks 1 \
     --orca-path "${ORCA_PATH}" \
     --functional "${FUNCTIONAL}" \
     --simple-input "${SIMPLE_INPUT}" \
