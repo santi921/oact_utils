@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Literal, TypedDict
 
@@ -130,6 +131,11 @@ SANDIA_DEFAULT_PARTITION = "attaway"
 SANDIA_DEFAULT_QOS = "normal"
 SANDIA_DEFAULT_ACCOUNT = "fy250086"
 SANDIA_DEFAULT_NTASKS_PER_NODE = 36  # cts1=36; tlcc2=16
+SANDIA_DEFAULT_OMPI_MCA = {
+    "OMPI_MCA_pml": "ob1",
+    "OMPI_MCA_mtl": "^psm2",
+    "OMPI_MCA_btl": "tcp,self,vader",
+}
 
 
 def _write_job_update(
@@ -1036,6 +1042,283 @@ def _build_parsl_worker_init(
     )
 
 
+def _build_parsl_sandia_worker_init(
+    orca_path: str | None = None,
+) -> str:
+    """Build minimal worker_init for Parsl workers on Sandia CTS1/TLCC2.
+
+    LocalProvider forks workers from the coordinator's shell, so they inherit
+    the module-loaded OpenMPI, ``OMPI_MCA_*`` settings, and ``LD_LIBRARY_PATH``
+    that the user prepared in their salloc'd shell before launching python.
+    No ``module load`` here -- doing it in a non-login subprocess shell can
+    fail (Lmod's ``module`` shell function isn't always defined) and risks
+    polluting ``LD_LIBRARY_PATH`` with duplicates.
+
+    User contract: launch python from inside an existing SLURM allocation,
+    e.g. ``salloc -N1 -p attaway -A fy250086 -t 8:00:00`` followed by
+    ``module load aue/openmpi/4.1.6-gcc-12.3.0`` and the OMPI MCA exports.
+    """
+    orca_bin_dir = (
+        os.path.dirname(orca_path) if orca_path and os.path.isabs(orca_path) else None
+    )
+    path_line = (
+        f"export PATH={orca_bin_dir}:$PATH\n" if orca_bin_dir is not None else ""
+    )
+
+    return f"{path_line}" "export JAX_PLATFORMS=cpu\n" "export OMP_NUM_THREADS=1\n"
+
+
+def _build_parsl_sandia_worker_init_multi_block(
+    orca_path: str | None = None,
+    openmpi_module: str = SANDIA_DEFAULT_OPENMPI_MODULE,
+    ld_library_path: str | None = None,
+) -> str:
+    """Build worker_init for Parsl SlurmProvider blocks on Sandia CTS1/TLCC2.
+
+    Each Parsl block is its own ``sbatch`` allocation, so the manager process
+    starts in a fresh non-login shell with no modules loaded. This worker_init
+    must do the full bootstrap itself: ``module load`` OpenMPI, derive
+    ``MPI_ROOT`` from ``which mpirun`` (only resolves after the module load),
+    set ``LD_LIBRARY_PATH``, and export the Sandia-specific OMPI MCA settings
+    that disable PSM2/Omni-Path on misrouting partitions.
+
+    Order matters -- ``MPI_ROOT=$(dirname $(dirname $(which mpirun)))`` only
+    resolves after ``module load``.
+
+    Args:
+        orca_path: Absolute path to the ORCA executable. Its parent directory
+            is prepended to ``PATH``.
+        openmpi_module: ``module load`` argument matching ORCA's shared build.
+        ld_library_path: Override for ``LD_LIBRARY_PATH``. When given, prepended
+            verbatim (no ``$MPI_ROOT`` interpolation). When omitted, the default
+            ``${MPI_ROOT}/lib`` is used.
+
+    Returns:
+        Multi-line shell script for use as ``worker_init``.
+    """
+    if ld_library_path is not None:
+        ld_line = f"export LD_LIBRARY_PATH={ld_library_path}:$LD_LIBRARY_PATH\n"
+    else:
+        ld_line = "export LD_LIBRARY_PATH=${MPI_ROOT}/lib:$LD_LIBRARY_PATH\n"
+
+    mca_lines = "".join(
+        f"export {key}={value}\n" for key, value in SANDIA_DEFAULT_OMPI_MCA.items()
+    )
+
+    orca_bin_dir = (
+        os.path.dirname(orca_path) if orca_path and os.path.isabs(orca_path) else None
+    )
+    path_line = (
+        f"export PATH={orca_bin_dir}:$PATH\n" if orca_bin_dir is not None else ""
+    )
+
+    return (
+        f"module load {openmpi_module}\n"
+        "export MPI_ROOT=$(dirname $(dirname $(which mpirun)))\n"
+        f"{ld_line}"
+        f"{mca_lines}"
+        f"{path_line}"
+        "export JAX_PLATFORMS=cpu\n"
+        "export OMP_NUM_THREADS=1\n"
+    )
+
+
+def build_parsl_config_sandia_local(
+    max_workers: int = 3,
+    cores_per_worker: int = 12,
+    orca_path: str | None = None,
+    enable_monitoring: bool = True,
+):
+    """Build Parsl Config for Sandia CTS1/TLCC2 single-node execution.
+
+    Uses LocalProvider with a minimal worker_init. The coordinator must be
+    launched from inside an existing SLURM allocation that has already
+    ``module load``-ed OpenMPI and exported the OMPI_MCA env. LocalProvider
+    forks workers from the coordinator shell, so they inherit that env.
+
+    Args:
+        max_workers: Concurrent workers per node. Defaults to 3 (12*3=36 cores
+            on a CTS1 attaway node).
+        cores_per_worker: CPU cores per worker.
+        orca_path: Absolute path to the ORCA executable. Its parent directory
+            is prepended to PATH on workers so ORCA's bundled helpers resolve
+            without the user having to add it to PATH manually.
+        enable_monitoring: Attach Parsl MonitoringHub.
+
+    Returns:
+        Parsl Config object.
+    """
+    if not PARSL_AVAILABLE:
+        raise ImportError(
+            "Parsl is not installed. Please install with: pip install 'parsl>=2024.1'"
+        )
+
+    from parsl.config import Config
+    from parsl.executors import HighThroughputExecutor
+    from parsl.providers import LocalProvider
+
+    runtime_address = _get_parsl_runtime_address()
+    worker_init = _build_parsl_sandia_worker_init(
+        orca_path=orca_path,
+    )
+
+    provider = LocalProvider(
+        worker_init=worker_init,
+    )
+
+    executor = HighThroughputExecutor(
+        label="sandia_local_htex",
+        address=runtime_address,
+        cores_per_worker=cores_per_worker,
+        max_workers_per_node=max_workers,
+        cpu_affinity="block",
+        provider=provider,
+    )
+
+    run_dir = _build_parsl_run_dir()
+    monitoring = (
+        _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+        if enable_monitoring
+        else None
+    )
+
+    return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
+
+
+def build_parsl_config_sandia(
+    max_workers: int = 3,
+    cores_per_worker: int = 12,
+    cpus_per_node: int | None = None,
+    nodes_per_block: int = 1,
+    max_blocks: int = 10,
+    init_blocks: int = 2,
+    min_blocks: int = 1,
+    walltime_hours: int = 8,
+    qos: str = SANDIA_DEFAULT_QOS,
+    account: str = SANDIA_DEFAULT_ACCOUNT,
+    partition: str = SANDIA_DEFAULT_PARTITION,
+    openmpi_module: str = SANDIA_DEFAULT_OPENMPI_MODULE,
+    orca_path: str | None = None,
+    ld_library_path: str | None = None,
+    enable_monitoring: bool = True,
+):
+    """Build Parsl Config for Sandia CTS1/TLCC2 multi-node execution.
+
+    Uses ``SlurmProvider`` to auto-provision worker nodes. Each block is a
+    SLURM job with ``nodes_per_block`` nodes; each node runs ``max_workers``
+    ORCA workers concurrently. The coordinator process owns the workflow
+    SQLite, so scaling out via blocks does not multiply DB writers (the
+    failure mode that motivates this builder over per-job ``sbatch``).
+
+    Args:
+        max_workers: Concurrent workers per node.
+        cores_per_worker: CPU cores per worker (must match ORCA nprocs).
+        cpus_per_node: Scheduler CPU cores requested per node. When omitted,
+            defaults to ``max_workers * cores_per_worker``. For multi-node,
+            ``exclusive=True`` already reserves whole nodes; an explicit
+            override adds an ``--ntasks-per-node`` request.
+        nodes_per_block: Nodes per SLURM block. >1 selects ``SrunLauncher``.
+        max_blocks: Maximum SLURM blocks Parsl will provision.
+        init_blocks: Blocks requested at startup.
+        min_blocks: Minimum blocks to keep alive.
+        walltime_hours: Walltime per block allocation in hours.
+        qos: SLURM QOS (Sandia values: normal/long/large/priority).
+        account: SLURM account.
+        partition: SLURM partition. Sandia partitions are mandatory; emitted
+            into ``scheduler_options`` (LLNL uses ``--constraint`` instead).
+        openmpi_module: ``module load`` argument for the OpenMPI build that
+            matches ORCA's shared libraries.
+        orca_path: Absolute path to the ORCA executable. Its parent directory
+            is prepended to ``PATH`` on workers so ORCA's bundled MPI helpers
+            resolve before any system mpirun.
+        ld_library_path: Override for ``LD_LIBRARY_PATH`` on workers. When
+            omitted, defaults to ``${MPI_ROOT}/lib`` derived at runtime from
+            the loaded OpenMPI module.
+        enable_monitoring: Attach Parsl ``MonitoringHub``.
+
+    Returns:
+        Parsl ``Config`` object.
+    """
+    if not PARSL_AVAILABLE:
+        raise ImportError(
+            "Parsl is not installed. Please install with: pip install 'parsl>=2024.1'"
+        )
+
+    from parsl.config import Config
+    from parsl.executors import HighThroughputExecutor
+    from parsl.providers import SlurmProvider
+
+    runtime_address = _get_parsl_runtime_address()
+    worker_init = _build_parsl_sandia_worker_init_multi_block(
+        orca_path=orca_path,
+        openmpi_module=openmpi_module,
+        ld_library_path=ld_library_path,
+    )
+
+    active_cores_per_node = max_workers * cores_per_worker
+    requested_cpus_per_node = cpus_per_node or active_cores_per_node
+    if requested_cpus_per_node < active_cores_per_node:
+        raise ValueError(
+            "cpus_per_node must be >= max_workers * cores_per_worker "
+            f"({active_cores_per_node})"
+        )
+
+    # Sandia partitions are mandatory; LLNL's build_parsl_config_slurm uses
+    # --constraint instead, so this line is the only structural divergence.
+    partition_line = f"#SBATCH --partition={partition}\n"
+    ntasks_lines = (
+        f"#SBATCH --ntasks-per-node={requested_cpus_per_node}\n"
+        f"#SBATCH --cpus-per-task=1\n"
+    )
+
+    if nodes_per_block > 1:
+        from parsl.launchers import SrunLauncher
+
+        launcher = SrunLauncher()
+        if cpus_per_node is not None:
+            scheduler_options = partition_line + ntasks_lines
+        else:
+            scheduler_options = partition_line
+    else:
+        from parsl.launchers import SimpleLauncher
+
+        launcher = SimpleLauncher()
+        scheduler_options = partition_line + ntasks_lines
+
+    provider = SlurmProvider(
+        qos=qos,
+        account=account,
+        nodes_per_block=nodes_per_block,
+        init_blocks=init_blocks,
+        min_blocks=min_blocks,
+        max_blocks=max_blocks,
+        walltime=f"{walltime_hours:02d}:00:00",
+        worker_init=worker_init,
+        scheduler_options=scheduler_options,
+        exclusive=True,
+        launcher=launcher,
+        parallelism=1.0,
+    )
+
+    executor = HighThroughputExecutor(
+        label="sandia_htex",
+        address=runtime_address,
+        cores_per_worker=cores_per_worker,
+        max_workers_per_node=max_workers,
+        cpu_affinity="block",
+        provider=provider,
+    )
+
+    run_dir = _build_parsl_run_dir()
+    monitoring = (
+        _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+        if enable_monitoring
+        else None
+    )
+
+    return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
+
+
 def _build_parsl_htex_launch_cmd(python_executable: str | None = None) -> str:
     """Build an HTEX manager launch command using an absolute Python path.
 
@@ -1454,6 +1737,9 @@ def submit_batch_parsl(
     enable_monitoring: bool = True,
     wandb_run: Any | None = None,
     reroot: bool = False,
+    site: str = "default",
+    partition: str | None = None,
+    openmpi_module: str = SANDIA_DEFAULT_OPENMPI_MODULE,
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -1529,9 +1815,12 @@ def submit_batch_parsl(
     # Merge ORCA config
     config: OrcaConfig = {**DEFAULT_ORCA_CONFIG, **(orca_config or {})}
     if "orca_path" not in config or config.get("orca_path") is None:
-        config["orca_path"] = DEFAULT_ORCA_PATHS.get(
-            scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
-        )
+        if site.lower() == "sandia":
+            config["orca_path"] = DEFAULT_ORCA_PATHS["sandia"]
+        else:
+            config["orca_path"] = DEFAULT_ORCA_PATHS.get(
+                scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
+            )
 
     # Filter jobs for submission (DB status only)
     jobs_to_submit = filter_jobs_for_submission(
@@ -1642,8 +1931,52 @@ def submit_batch_parsl(
         print(f"  Cores per worker: {cores_per_worker}")
         return [j.id for j in jobs_to_submit]
 
-    # Build Parsl configuration
-    if scheduler.lower() == "slurm":
+    # Build Parsl configuration. Sandia dispatches to SlurmProvider when the
+    # caller asks for multi-block scale-out, or to LocalProvider when running
+    # inside an existing salloc allocation (single block, single node).
+    use_multi_block = nodes_per_block > 1 or max_blocks > 1
+    if site.lower() == "sandia":
+        if use_multi_block:
+            total_nodes = max_blocks * nodes_per_block
+            total_workers = total_nodes * max_workers
+            print(
+                f"\nParsl Sandia SLURM config: {max_blocks} blocks x {nodes_per_block} "
+                f"nodes/block x {max_workers} workers/node "
+                f"= {total_workers} max concurrent jobs"
+            )
+            parsl_config = build_parsl_config_sandia(
+                max_workers=max_workers,
+                cores_per_worker=cores_per_worker,
+                cpus_per_node=cpus_per_node,
+                nodes_per_block=nodes_per_block,
+                max_blocks=max_blocks,
+                init_blocks=init_blocks,
+                min_blocks=min_blocks,
+                walltime_hours=walltime_hours,
+                qos=qos,
+                account=account,
+                partition=partition or SANDIA_DEFAULT_PARTITION,
+                openmpi_module=openmpi_module,
+                orca_path=config.get("orca_path"),
+                ld_library_path=ld_library_path,
+                enable_monitoring=enable_monitoring,
+            )
+        else:
+            print(
+                f"\nParsl Sandia (single-node LocalProvider): "
+                f"{max_workers} workers x {cores_per_worker} cores "
+                f"= {max_workers * cores_per_worker} concurrent cores. "
+                f"Coordinator must already be inside a SLURM allocation "
+                f"(e.g. salloc -N1 -p attaway -A {SANDIA_DEFAULT_ACCOUNT}). "
+                f"Job timeout: {timeout_seconds}s"
+            )
+            parsl_config = build_parsl_config_sandia_local(
+                max_workers=max_workers,
+                cores_per_worker=cores_per_worker,
+                orca_path=config.get("orca_path"),
+                enable_monitoring=enable_monitoring,
+            )
+    elif scheduler.lower() == "slurm":
         total_nodes = max_blocks * nodes_per_block
         total_workers = total_nodes * max_workers
         print(
@@ -2109,6 +2442,17 @@ def submit_batch(
         print("No jobs available after disk check")
         return []
 
+    if site.lower() == "sandia" and scheduler.lower() == "slurm":
+        warnings.warn(
+            "Per-job sbatch on Sandia is deprecated. Many concurrent "
+            "submit_jobs.py processes can corrupt the workflow SQLite on "
+            "Lustre. Switch to --use-parsl with --nodes-per-block / "
+            "--max-blocks. This path will be removed once the Parsl "
+            "multi-block path is validated on real hardware.",
+            FutureWarning,
+            stacklevel=2,
+        )
+
     # Claim jobs atomically BEFORE slow directory preparation to prevent
     # concurrent submitters from grabbing the same jobs (TOCTOU fix).
     all_claimed_ids = [j.id for j in jobs_to_submit]
@@ -2559,12 +2903,9 @@ def main():
 
     # Validate HPC site args
     if args.hpc_site == "sandia":
-        if args.scheduler != "slurm":
-            parser.error("--hpc-site sandia requires --scheduler slurm")
-        if args.use_parsl:
+        if not args.use_parsl and args.scheduler != "slurm":
             parser.error(
-                "--hpc-site sandia is not yet supported with --use-parsl. "
-                "Use traditional submission mode (omit --use-parsl)."
+                "--hpc-site sandia (traditional mode) requires --scheduler slurm"
             )
         # Swap LLNL-specific defaults for Sandia equivalents when not overridden.
         # The argparse default for --queue is the LLNL value "pbatch" and for
@@ -2681,6 +3022,9 @@ def main():
             enable_monitoring=not args.no_parsl_monitoring,
             wandb_run=wandb_run,
             reroot=args.reroot,
+            site=args.hpc_site,
+            partition=args.partition,
+            openmpi_module=args.openmpi_module,
         )
     else:
         # Traditional mode: one job script per job
