@@ -249,7 +249,14 @@ def write_sella_runner_shim(
         #!/usr/bin/env python
         \"\"\"Generated Sella runner. Reads sella_config.json for parameters.\"\"\"
         import json
+        import os
+        import sys
         from pathlib import Path
+
+        repo_root = os.environ.get("OACT_UTILITIES_REPO_ROOT")
+        if repo_root:
+            sys.path.insert(0, repo_root)
+
         from oact_utilities.core.orca.sella_runner import run_sella_optimization
 
         config = json.loads(Path("sella_config.json").read_text())

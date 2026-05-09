@@ -1219,6 +1219,15 @@ class TestBuildParslConfigSlurm:
             provider = config.executors[0].provider
             assert "export PATH=" not in provider.worker_init
 
+    def test_worker_init_exports_repo_root(self):
+        """Worker init exports repo-root hints for package imports."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm()
+        provider = config.executors[0].provider
+        assert "export OACT_UTILITIES_REPO_ROOT=" in provider.worker_init
+        assert "export PYTHONPATH=" in provider.worker_init
+
     def test_monitoring_enabled_by_default(self):
         """MonitoringHub is attached by default."""
         from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
@@ -1242,6 +1251,19 @@ class TestBuildParslConfigSlurm:
         config = build_parsl_config_slurm()
         provider = config.executors[0].provider
         assert provider.cmd_timeout == 1800
+
+    def test_slurm_executor_launch_cmd_exports_repo_root(self):
+        """Slurm HTEX launch injects repo-root env into worker startup."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm()
+        executor = config.executors[0]
+        assert "OACT_UTILITIES_REPO_ROOT=" in executor.launch_cmd
+        assert "PYTHONPATH=" in executor.launch_cmd
+        assert "/miniconda3/envs/py10mpi/bin/python -m " in executor.launch_cmd
+        assert " -m parsl.executors.high_throughput.process_worker_pool " in (
+            executor.launch_cmd
+        )
 
 
 @pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
@@ -1344,6 +1366,9 @@ class TestBuildParslConfigPbsPro:
 
         config = build_parsl_config_pbspro()
         executor = config.executors[0]
+        assert "OACT_UTILITIES_REPO_ROOT=" in executor.launch_cmd
+        assert "PYTHONPATH=" in executor.launch_cmd
+        assert "/miniconda3/envs/py10mpi/bin/python -m " in executor.launch_cmd
         assert " -m parsl.executors.high_throughput.process_worker_pool " in (
             executor.launch_cmd
         )

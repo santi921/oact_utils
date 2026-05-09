@@ -920,7 +920,6 @@ if PARSL_AVAILABLE:
         import time
         from pathlib import Path
         from types import SimpleNamespace
-        from oact_utilities.workflows.submit_jobs import prepare_job_directory
 
         if job_payload is not None:
             if root_dir is None:
@@ -1248,6 +1247,11 @@ def _build_parsl_monitoring(run_dir: str, hub_address: str):
     )
 
 
+def _get_repo_root() -> Path:
+    """Return the repository root that contains the ``oact_utilities`` package."""
+    return Path(__file__).resolve().parents[2]
+
+
 def _build_parsl_worker_init(
     scheduler: str,
     conda_env: str,
@@ -1257,7 +1261,7 @@ def _build_parsl_worker_init(
     mpirun_path: str | None = None,
 ) -> str:
     """Build worker initialization commands for Parsl-launched workers."""
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _get_repo_root()
     ld_lib = ld_library_path
     if ld_lib is None:
         if scheduler == "flux":
@@ -1282,6 +1286,7 @@ def _build_parsl_worker_init(
     path_entries = list(dict.fromkeys(path_entries))
     path_line = f"export PATH={':'.join(path_entries)}:$PATH\n" if path_entries else ""
     ld_line = f"export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH\n" if ld_lib else ""
+    repo_root_line = f"export OACT_UTILITIES_REPO_ROOT={repo_root}\n"
     pythonpath_line = f"export PYTHONPATH={repo_root}:$PYTHONPATH\n"
 
     return (
@@ -1289,13 +1294,24 @@ def _build_parsl_worker_init(
         f"conda activate {conda_env}\n"
         f"{path_line}"
         f"{ld_line}"
+        f"{repo_root_line}"
         f"{pythonpath_line}"
         "export JAX_PLATFORMS=cpu\n"
         "export OMP_NUM_THREADS=1\n"
     )
 
 
-def _build_parsl_htex_launch_cmd(python_executable: str | None = None) -> str:
+def _get_parsl_worker_python(conda_base: str, conda_env: str) -> str:
+    """Return the absolute Python path for the requested worker conda env."""
+    if conda_env == "base":
+        return str(Path(conda_base) / "bin" / "python")
+    return str(Path(conda_base) / "envs" / conda_env / "bin" / "python")
+
+
+def _build_parsl_htex_launch_cmd(
+    python_executable: str | None = None,
+    repo_root: str | Path | None = None,
+) -> str:
     """Build an HTEX manager launch command using an absolute Python path.
 
     Parsl's default HTEX launch command relies on the ``process_worker_pool.py``
@@ -1311,7 +1327,12 @@ def _build_parsl_htex_launch_cmd(python_executable: str | None = None) -> str:
     from parsl.executors.high_throughput.executor import DEFAULT_LAUNCH_CMD
 
     python_cmd = shlex.quote(python_executable or sys.executable)
-    entrypoint = f"{python_cmd} -m parsl.executors.high_throughput.process_worker_pool"
+    resolved_repo_root = shlex.quote(str(repo_root or _get_repo_root()))
+    entrypoint = (
+        f"env OACT_UTILITIES_REPO_ROOT={resolved_repo_root} "
+        f"PYTHONPATH={resolved_repo_root}:$PYTHONPATH "
+        f"{python_cmd} -m parsl.executors.high_throughput.process_worker_pool"
+    )
 
     if "process_worker_pool.py" in DEFAULT_LAUNCH_CMD:
         return DEFAULT_LAUNCH_CMD.replace("process_worker_pool.py", entrypoint, 1)
@@ -1409,6 +1430,9 @@ def build_parsl_config_flux(
     executor = HighThroughputExecutor(
         label="flux_htex",
         address=runtime_address,
+        launch_cmd=_build_parsl_htex_launch_cmd(
+            python_executable=_get_parsl_worker_python(conda_base, conda_env)
+        ),
         cores_per_worker=cores_per_worker,
         max_workers_per_node=max_workers,
         cpu_affinity="block",
@@ -1562,6 +1586,9 @@ def build_parsl_config_slurm(
     executor = HighThroughputExecutor(
         label="slurm_htex",
         address=runtime_address,
+        launch_cmd=_build_parsl_htex_launch_cmd(
+            python_executable=_get_parsl_worker_python(conda_base, conda_env)
+        ),
         cores_per_worker=cores_per_worker,
         max_workers_per_node=max_workers,
         cpu_affinity="block",
@@ -1700,7 +1727,9 @@ def build_parsl_config_pbspro(
     executor = HighThroughputExecutor(
         label="pbspro_htex",
         address=runtime_address,
-        launch_cmd=_build_parsl_htex_launch_cmd(),
+        launch_cmd=_build_parsl_htex_launch_cmd(
+            python_executable=_get_parsl_worker_python(conda_base, conda_env)
+        ),
         cores_per_worker=cores_per_worker,
         max_workers_per_node=max_workers,
         cpu_affinity="block",
@@ -1815,6 +1844,15 @@ def submit_batch_parsl(
 
     root_dir = Path(root_dir)
     root_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_root = str(_get_repo_root())
+    os.environ["OACT_UTILITIES_REPO_ROOT"] = repo_root
+    existing_pythonpath = os.environ.get("PYTHONPATH")
+    pythonpath_entries = existing_pythonpath.split(":") if existing_pythonpath else []
+    if repo_root not in pythonpath_entries:
+        os.environ["PYTHONPATH"] = (
+            f"{repo_root}:{existing_pythonpath}" if existing_pythonpath else repo_root
+        )
 
     # Auto-correct n_cores to match cores_per_worker for proper resource allocation
     if n_cores != cores_per_worker:
