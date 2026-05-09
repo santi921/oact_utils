@@ -1342,6 +1342,13 @@ def _validate_worker_setup_func(setup_func: Callable | None) -> None:
         )
 
 
+def _format_parsl_walltime(walltime_hours: int | float) -> str:
+    """Format Parsl provider walltime as HH:MM:SS."""
+    if isinstance(walltime_hours, float):
+        return f"00:{int(60 * walltime_hours):02d}:00"
+    return f"{walltime_hours:02d}:00:00"
+
+
 def build_parsl_config_flux(
     max_workers: int = 4,
     cores_per_worker: int = 16,
@@ -1542,7 +1549,7 @@ def build_parsl_config_slurm(
         init_blocks=init_blocks,
         min_blocks=min_blocks,
         max_blocks=max_blocks,
-        walltime=f"{walltime_hours:02d}:00:00",
+        walltime=_format_parsl_walltime(walltime_hours),
         worker_init=worker_init,
         scheduler_options=scheduler_options,
         exclusive=True,
@@ -1681,7 +1688,7 @@ def build_parsl_config_pbspro(
         init_blocks=init_blocks,
         min_blocks=min_blocks,
         max_blocks=max_blocks,
-        walltime=f"{walltime_hours:02d}:00:00",
+        walltime=_format_parsl_walltime(walltime_hours),
         worker_init=worker_init,
         launcher=launcher,
         parallelism=1.0,
