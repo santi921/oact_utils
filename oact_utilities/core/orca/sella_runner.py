@@ -114,6 +114,24 @@ def run_sella_optimization(
                 orcablocks=orcablocks,
                 directory=str(job_path),
             )
+
+            # If orca.engrad + orca.out already exist (seeded from prior SP),
+            # pre-populate the calculator's results cache so Sella skips the
+            # redundant step-0 EnGrad call and goes straight to step 1.
+            engrad_path = job_path / "orca.engrad"
+            out_path = job_path / "orca.out"
+            if engrad_path.exists() and out_path.exists():
+                try:
+                    calc.results = calc.template.read_results(job_path)
+                    calc.atoms = atoms.copy()
+                    print(
+                        "[sella_runner] seeded from existing orca.engrad (step 0 skipped)"
+                    )
+                except Exception as e:
+                    print(
+                        f"[sella_runner] warning: could not pre-seed from orca.engrad: {e}"
+                    )
+
             atoms.calc = calc
 
             traj_file = str(job_path / "opt.traj")

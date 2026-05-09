@@ -32,6 +32,85 @@ from oact_utilities.utils.status import (
     pull_log_file,
 )
 
+try:
+    from qtaim_gen.source.core.parse_orca import (
+        find_orca_output_file,
+        parse_orca_output,
+        write_orca_json,
+    )
+
+    GENERATOR_AVAILABLE = True
+except ImportError:
+    find_orca_output_file = None  # type: ignore[assignment]
+    parse_orca_output = None  # type: ignore[assignment]
+    write_orca_json = None  # type: ignore[assignment]
+    GENERATOR_AVAILABLE = False
+
+
+def _sanitize_for_json(obj: object) -> object:
+    """Recursively convert numpy types and non-finite floats for JSON serialization.
+
+    np.float64 is a subclass of Python float, so a JSONEncoder.default() override
+    never sees it - the encoder handles it as a plain float first, emitting NaN/Inf
+    tokens that are invalid JSON. A recursive preprocessor avoids that entirely.
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return [_sanitize_for_json(v) for v in obj.tolist()]
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        f = float(obj)
+        return None if (f != f or f == float("inf") or f == float("-inf")) else f
+    return obj
+
+
+def parse_generator_data(
+    job_dir: str | Path,
+    recompute: bool = False,
+) -> str | None:
+    """Parse ORCA .out file using qtaim_generator and return a JSON string.
+
+    Uses generator_metrics.json in the job directory as a disk cache.
+    Returns None if qtaim_generator is not installed, the output file is
+    missing, or parsing fails.
+
+    Args:
+        job_dir: Path to the job directory containing the ORCA output file.
+        recompute: If True, ignore the existing cache and re-parse.
+
+    Returns:
+        JSON string of parsed QTAIM data, or None.
+    """
+    if not GENERATOR_AVAILABLE:
+        return None
+
+    job_dir = Path(job_dir)
+    cache_file = job_dir / "generator_metrics.json"
+
+    if cache_file.exists() and not recompute:
+        return cache_file.read_text()
+
+    try:
+        out_path = find_orca_output_file(str(job_dir))
+    except Exception:
+        return None
+
+    if out_path is None:
+        return None
+
+    try:
+        result = parse_orca_output(out_path)
+        json_str = json.dumps(_sanitize_for_json(result))
+        cache_file.write_text(json_str)
+        return json_str
+    except Exception as exc:
+        warnings.warn(f"generator parse failed for {job_dir}: {exc}", stacklevel=2)
+        return None
+
 
 def _validate_file_path(file_path: str | Path, check_exists: bool = True) -> Path:
     """Validate file path to prevent directory traversal attacks.

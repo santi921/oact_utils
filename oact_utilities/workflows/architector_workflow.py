@@ -17,10 +17,11 @@ import warnings
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TypedDict
 
 import pandas as pd
 
-from ..utils.architector import create_workflow_db
+from ..utils.architector import create_workflow_db, parse_xyz_elements
 
 
 class JobStatus(str, Enum):
@@ -32,6 +33,21 @@ class JobStatus(str, Enum):
     COMPLETED = "completed"  # Job finished successfully
     FAILED = "failed"  # Job failed or crashed
     TIMEOUT = "timeout"  # Job timed out without completing
+
+
+class StatusGroupUpdate(TypedDict, total=False):
+    """Typed payload for `update_status_bulk_multi(additional=[...])`.
+
+    `job_ids` and `new_status` are logically required; the rest are optional.
+    `total=False` keeps the dict-literal call sites ergonomic while letting
+    static analysis catch typos in the key names.
+    """
+
+    job_ids: list[int]
+    new_status: JobStatus
+    error_message: str
+    increment_fail_count: bool
+    only_if_status: JobStatus
 
 
 @dataclass
@@ -56,6 +72,7 @@ class JobRecord:
     n_cores: int | None = None
     optimizer: str | None = None
     worker_id: str | None = None
+    generator_data: str | None = None
 
 
 class ArchitectorWorkflow:
@@ -124,12 +141,27 @@ class ArchitectorWorkflow:
         # sqlite3.connect() itself succeeded.  The connection-level busy timeout
         # does not cover the period before the first execute, so we retry the
         # whole setup with exponential backoff.
+        #
+        # Optimization: `PRAGMA journal_mode=DELETE` acquires a reserved/exclusive
+        # lock even when the DB is already in DELETE mode, which contends with
+        # active writers (e.g. Parsl workers).  Read the current mode first with
+        # a read-only PRAGMA and skip the write when already correct.
         conn: sqlite3.Connection | None = None
         for attempt in range(10):
             try:
                 conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
                 conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA journal_mode=DELETE")
+                current = conn.execute("PRAGMA journal_mode").fetchone()
+                current_mode = current[0].lower() if current else ""
+                if current_mode != "delete":
+                    row = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+                    if row and row[0].lower() != "delete":
+                        warnings.warn(
+                            f"Failed to switch {self.db_path} to DELETE journal mode "
+                            f"(current mode: {row[0]}). Another process may hold "
+                            "the database open in WAL mode.",
+                            stacklevel=2,
+                        )
                 break
             except sqlite3.OperationalError as e:
                 if conn is not None:
@@ -182,6 +214,7 @@ class ArchitectorWorkflow:
         migrations = {
             "optimizer": "ALTER TABLE structures ADD COLUMN optimizer TEXT DEFAULT NULL",
             "worker_id": "ALTER TABLE structures ADD COLUMN worker_id TEXT DEFAULT NULL",
+            "generator_data": "ALTER TABLE structures ADD COLUMN generator_data TEXT DEFAULT NULL",
         }
         for col_name, alter_sql in migrations.items():
             if col_name not in existing_cols:
@@ -213,17 +246,14 @@ class ArchitectorWorkflow:
     def _is_retryable(e: sqlite3.OperationalError) -> bool:
         """Check if an OperationalError is a transient lock/busy error."""
         msg = str(e).lower()
-        return any(
-            token in msg
-            for token in ("lock", "busy", "locking protocol", "database is locked")
-        )
+        return any(token in msg for token in ("lock", "busy"))
 
     def _execute_with_retry(
         self,
         query: str,
         params: tuple = (),
         max_retries: int | None = None,
-    ):
+    ) -> sqlite3.Cursor:
         """Execute a query with retry logic for handling database locks.
 
         Uses exponential backoff with jitter to handle concurrent access
@@ -242,7 +272,11 @@ class ArchitectorWorkflow:
         """
         if max_retries is None:
             max_retries = self.max_retries
-        is_write = query.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+        is_write = (
+            query.lstrip()
+            .upper()
+            .startswith(("INSERT", "UPDATE", "DELETE", "REPLACE", "ALTER"))
+        )
         for attempt in range(max_retries):
             try:
                 cur = self.conn.cursor()
@@ -339,6 +373,7 @@ class ArchitectorWorkflow:
             n_cores=r["n_cores"] if "n_cores" in keys else None,
             optimizer=r["optimizer"] if "optimizer" in keys else None,
             worker_id=r["worker_id"] if "worker_id" in keys else None,
+            generator_data=r["generator_data"] if "generator_data" in keys else None,
         )
 
     def get_jobs_by_status(
@@ -424,6 +459,7 @@ class ArchitectorWorkflow:
         error_message: str | None = None,
         wall_time: float | None = None,
         n_cores: int | None = None,
+        generator_data: str | None = None,
     ):
         """Update job metrics (forces, SCF steps, etc).
 
@@ -436,6 +472,7 @@ class ArchitectorWorkflow:
             error_message: Error message if job failed.
             wall_time: Total wall time in seconds.
             n_cores: Number of CPU cores used.
+            generator_data: JSON string from qtaim_generator parse_orca_output.
         """
         updates = []
         values = []
@@ -461,6 +498,9 @@ class ArchitectorWorkflow:
         if n_cores is not None:
             updates.append("n_cores = ?")
             values.append(n_cores)
+        if generator_data is not None:
+            updates.append("generator_data = ?")
+            values.append(generator_data)
 
         if updates:
             updates.append("updated_at = CURRENT_TIMESTAMP")
@@ -495,6 +535,7 @@ class ArchitectorWorkflow:
                 "error_message",
                 "wall_time",
                 "n_cores",
+                "generator_data",
             ):
                 if metrics.get(col) is not None:
                     updates.append(f"{col} = ?")
@@ -515,6 +556,7 @@ class ArchitectorWorkflow:
         increment_fail_count: bool = False,
         error_message: str | None = None,
         worker_id: object = _SENTINEL,
+        only_if_status: JobStatus | None = None,
     ):
         """Update status for multiple jobs at once.
 
@@ -525,6 +567,9 @@ class ArchitectorWorkflow:
             error_message: If provided, set error_message for all jobs.
             worker_id: If provided, set worker_id for all jobs. Pass None to
                 clear it. Omit (default sentinel) to leave unchanged.
+            only_if_status: If provided, only update jobs currently in this
+                status. Use this when claiming jobs to prevent two concurrent
+                workers from double-assigning the same job.
         """
         if not job_ids:
             return
@@ -544,13 +589,18 @@ class ArchitectorWorkflow:
             params.append(worker_id)
 
         placeholders = ",".join("?" * len(job_ids))
-        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE id IN ({placeholders})"
-        self._execute_with_retry(query, tuple(params + job_ids))
+        where = f"id IN ({placeholders})"
+        if only_if_status is not None:
+            where += " AND status = ?"
+        query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE {where}"
+        extra = [only_if_status.value] if only_if_status is not None else []
+        self._execute_with_retry(query, tuple(params + job_ids + extra))
         self._commit_with_retry()
 
     def update_status_bulk_multi(
         self,
         status_groups: dict[JobStatus, list[int]],
+        additional: list[StatusGroupUpdate] | None = None,
     ):
         """Update multiple status groups in a single transaction.
 
@@ -559,9 +609,14 @@ class ArchitectorWorkflow:
         to the same database on a parallel filesystem.
 
         Args:
-            status_groups: Mapping of new_status -> list of job IDs.
+            status_groups: Mapping of new_status -> list of job IDs. Each
+                group writes only status + updated_at (no error_message,
+                no fail_count bump).
+            additional: Optional list of StatusGroupUpdate entries folded
+                into the same transaction. Useful for writes that need
+                error_message, fail_count increment, or only_if_status CAS.
         """
-        if not status_groups:
+        if not status_groups and not additional:
             return
 
         for new_status, job_ids in status_groups.items():
@@ -570,6 +625,30 @@ class ArchitectorWorkflow:
             placeholders = ",".join("?" * len(job_ids))
             query = f"UPDATE structures SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"
             self._execute_with_retry(query, tuple([new_status.value] + job_ids))
+
+        for extra in additional or ():
+            extra_job_ids = extra["job_ids"]
+            if not extra_job_ids:
+                continue
+            extra_status = extra["new_status"]
+            set_clauses = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+            params: list = [extra_status.value]
+            if extra.get("increment_fail_count"):
+                set_clauses.append("fail_count = COALESCE(fail_count, 0) + 1")
+            error_message = extra.get("error_message")
+            if error_message is not None:
+                set_clauses.append("error_message = ?")
+                params.append(error_message)
+            placeholders = ",".join("?" * len(extra_job_ids))
+            where = f"id IN ({placeholders})"
+            only_if = extra.get("only_if_status")
+            extra_params: list = list(extra_job_ids)
+            if only_if is not None:
+                where += " AND status = ?"
+                extra_params.append(only_if.value)
+            query = f"UPDATE structures SET {', '.join(set_clauses)} WHERE {where}"
+            self._execute_with_retry(query, tuple(params + extra_params))
+
         self._commit_with_retry()
 
     def count_by_status(self) -> dict[JobStatus, int]:
@@ -606,7 +685,12 @@ class ArchitectorWorkflow:
             worker_id: Optional scheduler job ID to associate with these jobs
                 (e.g., SLURM_JOB_ID or FLUX_JOB_ID). Used for crash recovery.
         """
-        self.update_status_bulk(job_ids, JobStatus.RUNNING, worker_id=worker_id)
+        self.update_status_bulk(
+            job_ids,
+            JobStatus.RUNNING,
+            worker_id=worker_id,
+            only_if_status=JobStatus.TO_RUN,
+        )
 
     def claim_jobs_for_submission(
         self,
@@ -869,6 +953,170 @@ def create_workflow(
 
     workflow = ArchitectorWorkflow(db_path_ret)
     return db_path_ret, workflow
+
+
+def create_split_workflows(
+    csv_path: str | Path,
+    db_dir: str | Path,
+    db_name: str,
+    split_names: list[str],
+    fractions: list[float] | None = None,
+    by_natoms: list[int] | None = None,
+    by_column: str | None = None,
+    by_values: list[str] | None = None,
+    geometry_column: str = "aligned_csd_core",
+    charge_column: str | None = "charge",
+    spin_column: str | None = "uhf",
+    batch_size: int = 10000,
+    extra_columns: dict[str, str] | None = None,
+    seed: int = 42,
+) -> list[tuple[Path, ArchitectorWorkflow]]:
+    """Create multiple workflow DBs from a single CSV by splitting rows across named shards.
+
+    Reads the CSV once, assigns each row to a shard, then writes one fully-independent
+    SQLite workflow DB per shard. Each child DB can be submitted to a different HPC
+    cluster or handed to a collaborator.
+
+    Args:
+        csv_path: Path to the architector CSV file.
+        db_dir: Directory where child DBs will be written.
+        db_name: Base name for child DBs. Output files are named
+            ``{db_dir}/{db_name}_{split_name}.db``.
+        split_names: Names for each shard (e.g. ``["tuo", "dod"]``). Determines
+            the number of shards.
+        fractions: Per-shard fractions for random splitting (must sum to 1.0 and
+            have the same length as ``split_names``). If neither ``fractions``,
+            ``by_natoms``, nor ``by_column`` is given, rows are split equally at
+            random.
+        by_natoms: Atom-count boundaries for size-based splitting. Must have
+            ``len(split_names) - 1`` values. Example: ``[60, 100]`` with
+            ``split_names=["small","medium","large"]`` routes natoms < 60 to
+            "small", 60-99 to "medium", and >= 100 to "large".
+        by_column: CSV column name to split on (e.g. ``"metal"``). Must be used
+            together with ``by_values``.
+        by_values: Values for ``by_column`` routing. Must have
+            ``len(split_names) - 1`` entries; rows not matching any value go to
+            the last shard.
+        geometry_column: CSV column containing XYZ geometry strings.
+        charge_column: CSV column containing molecular charges.
+        spin_column: CSV column containing spin multiplicity (2S+1).
+        batch_size: Rows per batch when writing each child DB.
+        extra_columns: Extra CSV columns to store in each DB, e.g.
+            ``{"metal": "TEXT"}``.
+        seed: Random seed for reproducible shuffling (used by random/weighted
+            split strategies).
+
+    Returns:
+        List of ``(db_path, ArchitectorWorkflow)`` tuples, one per shard, in the
+        same order as ``split_names``.
+
+    Raises:
+        ValueError: On invalid argument combinations or constraint violations.
+        FileNotFoundError: If ``csv_path`` does not exist.
+    """
+    import numpy as np
+
+    n_shards = len(split_names)
+    if n_shards < 2:
+        raise ValueError("split_names must contain at least 2 entries.")
+
+    n_strategies = sum(
+        [fractions is not None, by_natoms is not None, by_column is not None]
+    )
+    if n_strategies > 1:
+        raise ValueError(
+            "Specify at most one split strategy: fractions, by_natoms, or by_column."
+        )
+
+    db_dir = Path(db_dir)
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    print(f"Reading {csv_path} ...")
+    df = pd.read_csv(csv_path)
+    n = len(df)
+
+    if by_natoms is not None:
+        if len(by_natoms) != n_shards - 1:
+            raise ValueError(
+                f"by_natoms must have len(split_names) - 1 = {n_shards - 1} "
+                f"boundary value(s), got {len(by_natoms)}."
+            )
+        natoms_arr = (
+            df[geometry_column]
+            .apply(lambda x: len(parse_xyz_elements(str(x))) if not pd.isna(x) else 0)
+            .to_numpy()
+        )
+        shards = np.full(n, n_shards - 1, dtype=int)
+        prev = 0
+        for shard_i, boundary in enumerate(by_natoms):
+            mask = (natoms_arr >= prev) & (natoms_arr < boundary)
+            shards[mask] = shard_i
+            prev = boundary
+        # rows with natoms >= last boundary already default to n_shards - 1
+        df = df.copy()
+        df["_shard"] = shards
+
+    elif by_column is not None:
+        if by_values is None:
+            raise ValueError("by_column requires by_values.")
+        if len(by_values) != n_shards - 1:
+            raise ValueError(
+                f"by_values must have len(split_names) - 1 = {n_shards - 1} "
+                f"entry/entries (remainder goes to last shard), got {len(by_values)}."
+            )
+        col_str = df[by_column].astype(str)
+        shards = np.full(n, n_shards - 1, dtype=int)
+        for shard_i, val in enumerate(by_values):
+            shards[col_str == str(val)] = shard_i
+        df = df.copy()
+        df["_shard"] = shards
+
+    else:
+        # Random split (equal or weighted by fractions)
+        if fractions is None:
+            fractions = [1.0 / n_shards] * n_shards
+        if len(fractions) != n_shards:
+            raise ValueError(
+                f"fractions must have the same length as split_names ({n_shards}), "
+                f"got {len(fractions)}."
+            )
+        total_frac = sum(fractions)
+        if abs(total_frac - 1.0) > 1e-6:
+            raise ValueError(f"fractions must sum to 1.0, got {total_frac:.6f}.")
+        counts = [int(round(f * n)) for f in fractions]
+        counts[-1] += n - sum(counts)  # absorb rounding error into last shard
+
+        rng = np.random.default_rng(seed)
+        shuffled = rng.permutation(n)
+        shards = np.empty(n, dtype=int)
+        offset = 0
+        for shard_i, count in enumerate(counts):
+            shards[shuffled[offset : offset + count]] = shard_i
+            offset += count
+        df = df.copy()
+        df["_shard"] = shards
+
+    results: list[tuple[Path, ArchitectorWorkflow]] = []
+    for shard_i, name in enumerate(split_names):
+        shard_df = df[df["_shard"] == shard_i].drop(columns=["_shard"])
+        db_path = db_dir / f"{db_name}_{name}.db"
+        create_workflow_db(
+            csv_path=shard_df,
+            db_path=db_path,
+            geometry_column=geometry_column,
+            charge_column=charge_column,
+            spin_column=spin_column,
+            batch_size=batch_size,
+            extra_columns=extra_columns,
+        )
+        workflow = ArchitectorWorkflow(db_path)
+        results.append((db_path, workflow))
+
+    return results
 
 
 def update_job_status(

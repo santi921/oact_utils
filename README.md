@@ -59,6 +59,7 @@ with ArchitectorWorkflow(db_path) as wf:
 ```
 
 **On HPC:**
+
 ```bash
 # Submit 100 jobs to Flux
 python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 100 --scheduler flux
@@ -111,6 +112,7 @@ print(f"Final energy: {metrics['final_energy']} Hartree")
 ```
 
 Supported parsers:
+
 - `parse_max_forces()` - Max gradient from output
 - `parse_scf_steps()` - SCF iteration count
 - `parse_final_energy()` - Final energy
@@ -147,5 +149,3 @@ See [CLAUDE.md](CLAUDE.md) for detailed development guidelines.
 - **[CLAUDE.md](CLAUDE.md)** - Project instructions and architecture
 - **[oact_utilities/workflows/README.md](oact_utilities/workflows/README.md)** - Workflow system documentation
 - **[oact_utilities/workflows/QUICKSTART.md](oact_utilities/workflows/QUICKSTART.md)** - Workflow quick start guide
-
-

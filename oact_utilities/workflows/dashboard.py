@@ -13,7 +13,21 @@ from pathlib import Path
 from typing import Callable
 
 from ..utils.status import check_job_termination, parse_failure_reason
-from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .architector_workflow import ArchitectorWorkflow, JobStatus, StatusGroupUpdate
+from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
+from .job_dir_patterns import (
+    DEFAULT_JOB_DIR_PATTERN,
+    apply_job_dir_prefix,
+    render_job_dir_pattern,
+)
+from .wandb_logger import (
+    WANDB_AVAILABLE,
+    add_wandb_args,
+    compute_metrics_stats,
+    finish_wandb_run,
+    init_wandb_run,
+    log_campaign_snapshot,
+)
 
 
 def print_header(text: str, width: int = 80):
@@ -270,7 +284,11 @@ def _extract_metrics_from_dir(
     """
     import time
 
-    from ..utils.analysis import parse_job_metrics
+    from ..utils.analysis import (
+        GENERATOR_AVAILABLE,
+        parse_generator_data,
+        parse_job_metrics,
+    )
 
     t0 = time.perf_counter()
 
@@ -292,7 +310,13 @@ def _extract_metrics_from_dir(
             "error": None,
             "timing_warning": None,
             "_cache_hit": cache_hit,
+            "generator_data": None,
         }
+
+        if GENERATOR_AVAILABLE:
+            result["generator_data"] = parse_generator_data(
+                job_dir, recompute=recompute
+            )
 
         if profile:
             result["_profile"] = {
@@ -386,17 +410,18 @@ def _parallel_extract_metrics(
             if result.get("error") is None:
                 if result.get("_cache_hit"):
                     cache_hits += 1
-                success_metrics.append(
-                    {
-                        "job_id": job_id,
-                        "job_dir": str(job_dir),
-                        "max_forces": result["max_forces"],
-                        "scf_steps": result["scf_steps"],
-                        "final_energy": result["final_energy"],
-                        "wall_time": result["wall_time"],
-                        "n_cores": result["n_cores"],
-                    }
-                )
+                metrics_entry = {
+                    "job_id": job_id,
+                    "job_dir": str(job_dir),
+                    "max_forces": result["max_forces"],
+                    "scf_steps": result["scf_steps"],
+                    "final_energy": result["final_energy"],
+                    "wall_time": result["wall_time"],
+                    "n_cores": result["n_cores"],
+                }
+                if result.get("generator_data") is not None:
+                    metrics_entry["generator_data"] = result["generator_data"]
+                success_metrics.append(metrics_entry)
                 if profile and "_profile" in result:
                     profile_data.append((job_id, result["_profile"]))
                 if verbose:
@@ -459,31 +484,95 @@ def _parallel_extract_metrics(
     return len(success_metrics), len(failed_jobs)
 
 
+# Max length of failure_reason text to embed in error_message. Keeps DB
+# column size bounded even if the marker JSON carries a long traceback.
+_MARKER_REASON_MAX_LEN = 200
+
+
+def _read_marker_failure_reason(job_dir: Path) -> str | None:
+    """Return ``failure_reason`` from ``.do_not_rerun.json`` or None.
+
+    Called only when ``is_marker_blocked`` already returned True, so a
+    missing file here is an odd race (caller re-reads after that check).
+    Failures are swallowed -- the stable MARKER_ERROR_MESSAGE fallback is
+    still correct fingerprinting.
+    """
+    import json
+
+    marker_path = job_dir / ".do_not_rerun.json"
+    try:
+        with open(marker_path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    reason = data.get("failure_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    return reason.strip()
+
+
+def _compose_marker_error_message(job_dir: Path) -> str:
+    """Build the error_message for a markered job.
+
+    Uses the stable ``MARKER_ERROR_MESSAGE`` prefix so downstream filters
+    can match with ``error_message LIKE 'Blocked by .do_not_rerun.json
+    marker%'``. Appends the marker JSON's failure_reason when available
+    so dashboards/grep can see why the job was purged without opening
+    the JSON. Reason text is truncated to ``_MARKER_REASON_MAX_LEN``
+    characters to bound column width.
+    """
+    reason = _read_marker_failure_reason(job_dir)
+    if reason is None:
+        return MARKER_ERROR_MESSAGE
+    truncated = reason[:_MARKER_REASON_MAX_LEN]
+    return f"{MARKER_ERROR_MESSAGE}: {truncated}"
+
+
 def _check_single_job_status(
     job_id: int,
     orig_index: int,
     current_status: JobStatus,
+    current_error_message: str | None,
     job_dir: Path,
     check_func: Callable,
-) -> dict:
+) -> dict | None:
     """Check status of a single job (pure I/O, no DB writes).
 
     Returns:
-        Dictionary with job_id, old_status, new_status, job_dir.
+        Dictionary with job_id, old_status, new_status, job_dir, marker_blocked,
+        new_error_message, marker_needs_write, or None if job_dir does not exist.
+
+    ``new_error_message`` is the prefixed marker message (includes
+    failure_reason from .do_not_rerun.json when parseable) or None for
+    non-markered jobs. ``marker_needs_write`` is True when a marker is
+    present AND the DB's current_error_message differs from the composed
+    message -- callers use this to emit an update even when status is
+    unchanged (fingerprint refresh).
     """
     if not job_dir.exists():
         return None
 
-    result = check_func(str(job_dir))
-
-    if result == 1:
-        new_status = JobStatus.COMPLETED
-    elif result == -2:
-        new_status = JobStatus.TIMEOUT
-    elif result == -1:
+    # .do_not_rerun.json (written by clean.py --purge-failed) overrides all
+    # other checks. Without this, a purged directory (which has no orca.out)
+    # would be classified as RUNNING or TIMEOUT and could be cycled by submit.
+    marker_blocked = is_marker_blocked(job_dir)
+    new_error_message: str | None = None
+    marker_needs_write = False
+    if marker_blocked:
         new_status = JobStatus.FAILED
+        new_error_message = _compose_marker_error_message(job_dir)
+        marker_needs_write = current_error_message != new_error_message
     else:
-        new_status = JobStatus.RUNNING
+        result = check_func(str(job_dir))
+
+        if result == 1:
+            new_status = JobStatus.COMPLETED
+        elif result == -2:
+            new_status = JobStatus.TIMEOUT
+        elif result == -1:
+            new_status = JobStatus.FAILED
+        else:
+            new_status = JobStatus.RUNNING
 
     return {
         "job_id": job_id,
@@ -491,7 +580,54 @@ def _check_single_job_status(
         "old_status": current_status,
         "new_status": new_status,
         "job_dir": job_dir,
+        "marker_blocked": marker_blocked,
+        "new_error_message": new_error_message,
+        "marker_needs_write": marker_needs_write,
     }
+
+
+def _commit_status_changes(
+    workflow: ArchitectorWorkflow,
+    status_groups: dict[JobStatus, list[int]],
+    marker_updates: dict[tuple[JobStatus, str, bool], list[int]],
+) -> None:
+    """Persist status transitions + marker updates in one commit.
+
+    ``marker_updates`` is keyed by ``(old_status, error_message, bump_fail_count)``
+    and maps to the list of job ids sharing that treatment. Jobs with the
+    same key go out as one bulk UPDATE so unique-message-count (not
+    job count) drives the number of writes. Typical campaigns have few
+    distinct failure_reasons, so this stays batch-friendly.
+
+    Marker-update rows are written with ``only_if_status=old_status`` (CAS)
+    so concurrent writers (submit_jobs, a second dashboard) that already
+    flipped the row to FAILED do not cause a second fail_count increment
+    and do not clobber a fresher tag.
+    """
+    additional: list[StatusGroupUpdate] = []
+    for (old_status, error_msg, bump_fc), ids in marker_updates.items():
+        if not ids:
+            continue
+        entry: StatusGroupUpdate = {
+            "job_ids": ids,
+            "new_status": JobStatus.FAILED,
+            "error_message": error_msg,
+            "only_if_status": old_status,
+        }
+        if bump_fc:
+            entry["increment_fail_count"] = True
+        additional.append(entry)
+
+    workflow.update_status_bulk_multi(status_groups, additional=additional or None)
+
+    transitioned = sum(len(ids) for (_, _, bump), ids in marker_updates.items() if bump)
+    refreshed = sum(
+        len(ids) for (_, _, bump), ids in marker_updates.items() if not bump
+    )
+    if transitioned:
+        print(f"  Marker-blocked: {transitioned} job(s) reverted to FAILED")
+    if refreshed:
+        print(f"  Marker fingerprint refreshed: {refreshed} job(s)")
 
 
 def _parallel_status_check(
@@ -510,7 +646,8 @@ def _parallel_status_check(
         workflow: ArchitectorWorkflow instance.
         jobs: List of job objects to check.
         root_dir: Root directory containing job subdirectories.
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         check_func: Status checking function.
         verbose: Print detailed progress messages.
         workers: Number of parallel worker threads.
@@ -535,9 +672,10 @@ def _parallel_status_check(
         # Submit all jobs
         future_to_job = {}
         for job in jobs:
-            job_dir_name = job_dir_pattern.format(
+            job_dir_name = render_job_dir_pattern(
+                job_dir_pattern,
                 orig_index=job.orig_index,
-                id=job.id,
+                job_id=job.id,
             )
             job_dir = root_dir / job_dir_name
 
@@ -546,6 +684,7 @@ def _parallel_status_check(
                 job.id,
                 job.orig_index,
                 job.status,
+                job.error_message,
                 job_dir,
                 check_func,
             )
@@ -576,23 +715,48 @@ def _parallel_status_check(
     }
     completed_for_metrics = []
 
-    # Group changed jobs by their new status
+    # Marker-blocked jobs: emit an update when status changes OR the DB
+    # tag is stale (e.g. FAILED with a non-marker error_message). Grouped
+    # by (old_status, composed error_message, bump_fail_count) so
+    # ``_commit_status_changes`` can batch same-treatment jobs into one
+    # bulk UPDATE per group. fail_count bumps only on a real status
+    # transition; refreshes of stale tags are fingerprint-only.
     status_groups: dict[JobStatus, list[int]] = {}
+    marker_updates: dict[tuple[JobStatus, str, bool], list[int]] = {}
     for update in status_updates:
-        if update["new_status"] != update["old_status"]:
+        status_changed = update["new_status"] != update["old_status"]
+        if update["marker_blocked"]:
+            if status_changed or update["marker_needs_write"]:
+                bump_fc = status_changed
+                key = (
+                    update["old_status"],
+                    update["new_error_message"],
+                    bump_fc,
+                )
+                marker_updates.setdefault(key, []).append(update["job_id"])
+                if status_changed:
+                    updated_counts[update["new_status"]] += 1
+
+                if verbose:
+                    tag = " [marker-blocked]" if status_changed else " [marker-refresh]"
+                    print(
+                        f"  Job {update['job_id']}: {update['old_status'].value} -> "
+                        f"{update['new_status'].value}{tag}"
+                    )
+        elif status_changed:
             status_groups.setdefault(update["new_status"], []).append(update["job_id"])
             updated_counts[update["new_status"]] += 1
 
             if verbose:
                 print(
-                    f"  Job {update['job_id']}: {update['old_status'].value} -> {update['new_status'].value}"
+                    f"  Job {update['job_id']}: {update['old_status'].value} -> "
+                    f"{update['new_status'].value}"
                 )
 
             if extract_metrics and update["new_status"] == JobStatus.COMPLETED:
                 completed_for_metrics.append((update["job_id"], update["job_dir"]))
 
-    # Single transaction for all status groups (one commit total)
-    workflow.update_status_bulk_multi(status_groups)
+    _commit_status_changes(workflow, status_groups, marker_updates)
 
     return updated_counts, completed_for_metrics
 
@@ -612,7 +776,8 @@ def _sequential_status_check(
         workflow: ArchitectorWorkflow instance.
         jobs: List of job objects to check.
         root_dir: Root directory containing job subdirectories.
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         check_func: Status checking function.
         verbose: Print detailed progress messages.
         extract_metrics: If True, collect completed jobs for metrics extraction.
@@ -645,47 +810,75 @@ def _sequential_status_check(
             disable=verbose,
         )
 
-    # Collect all status changes, then batch-write at the end
+    # Collect all status changes, then batch-write at the end.
+    # See _parallel_status_check for the marker_updates grouping key:
+    # (old_status, composed error_message, bump_fail_count).
     status_groups: dict[JobStatus, list[int]] = {}
+    marker_updates: dict[tuple[JobStatus, str, bool], list[int]] = {}
 
     for i, job in enumerate(jobs_iter):
         # Format job directory name
-        job_dir_name = job_dir_pattern.format(
+        job_dir_name = render_job_dir_pattern(
+            job_dir_pattern,
             orig_index=job.orig_index,
-            id=job.id,
+            job_id=job.id,
         )
         job_dir = root_dir / job_dir_name
 
         if not job_dir.exists():
             continue
 
-        # Check status
-        result = check_func(str(job_dir))
-
-        if result == 1:
-            new_status = JobStatus.COMPLETED
-        elif result == -2:
-            new_status = JobStatus.TIMEOUT
-        elif result == -1:
+        # .do_not_rerun.json marker overrides other checks (see
+        # _check_single_job_status for rationale).
+        marker_blocked = is_marker_blocked(job_dir)
+        new_error_message: str | None = None
+        marker_needs_write = False
+        if marker_blocked:
             new_status = JobStatus.FAILED
+            new_error_message = _compose_marker_error_message(job_dir)
+            marker_needs_write = job.error_message != new_error_message
         else:
-            new_status = JobStatus.RUNNING
+            result = check_func(str(job_dir))
 
-        # Track if changed
-        if new_status != job.status:
+            if result == 1:
+                new_status = JobStatus.COMPLETED
+            elif result == -2:
+                new_status = JobStatus.TIMEOUT
+            elif result == -1:
+                new_status = JobStatus.FAILED
+            else:
+                new_status = JobStatus.RUNNING
+
+        status_changed = new_status != job.status
+        if marker_blocked:
+            if status_changed or marker_needs_write:
+                assert new_error_message is not None
+                bump_fc = status_changed
+                key = (job.status, new_error_message, bump_fc)
+                marker_updates.setdefault(key, []).append(job.id)
+                if status_changed:
+                    updated_counts[new_status] += 1
+
+                if verbose:
+                    tag = " [marker-blocked]" if status_changed else " [marker-refresh]"
+                    print(
+                        f"  [{i+1}/{len(jobs)}] Job {job.id}: "
+                        f"{job.status.value} -> {new_status.value}{tag}"
+                    )
+        elif status_changed:
             status_groups.setdefault(new_status, []).append(job.id)
             updated_counts[new_status] += 1
 
             if verbose:
                 print(
-                    f"  [{i+1}/{len(jobs)}] Job {job.id}: {job.status.value} -> {new_status.value}"
+                    f"  [{i+1}/{len(jobs)}] Job {job.id}: "
+                    f"{job.status.value} -> {new_status.value}"
                 )
 
             if extract_metrics and new_status == JobStatus.COMPLETED:
                 completed_for_metrics.append((job.id, job_dir))
 
-    # Single transaction for all status groups (one commit total)
-    workflow.update_status_bulk_multi(status_groups)
+    _commit_status_changes(workflow, status_groups, marker_updates)
 
     return updated_counts, completed_for_metrics
 
@@ -693,7 +886,7 @@ def _sequential_status_check(
 def backfill_metrics(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     unzip: bool = False,
     verbose: bool = False,
     workers: int = 4,
@@ -706,7 +899,8 @@ def backfill_metrics(
     Args:
         workflow: ArchitectorWorkflow instance.
         root_dir: Root directory containing job subdirectories.
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         unzip: If True, handle gzipped output files (quacc).
         verbose: Print detailed progress messages.
         workers: Number of parallel worker threads for extraction.
@@ -719,16 +913,23 @@ def backfill_metrics(
 
     limit_clause = f" LIMIT {int(max_jobs)}" if max_jobs is not None else ""
 
+    from ..utils.analysis import GENERATOR_AVAILABLE
+
     if recompute:
         cur = workflow._execute_with_retry(
             f"SELECT id, orig_index FROM structures WHERE status = 'completed'{limit_clause}"
         )
     else:
+        # Include jobs missing standard metrics OR (when available) missing qtaim data.
+        if GENERATOR_AVAILABLE:
+            missing_clause = "max_forces IS NULL OR generator_data IS NULL"
+        else:
+            missing_clause = "max_forces IS NULL"
         cur = workflow._execute_with_retry(
             f"""
             SELECT id, orig_index
             FROM structures
-            WHERE status = 'completed' AND max_forces IS NULL{limit_clause}
+            WHERE status = 'completed' AND ({missing_clause}){limit_clause}
             """
         )
     rows = cur.fetchall()
@@ -746,7 +947,11 @@ def backfill_metrics(
     work_items = []
     skipped = 0
     for job_id, orig_index in rows:
-        job_dir_name = job_dir_pattern.format(orig_index=orig_index, id=job_id)
+        job_dir_name = render_job_dir_pattern(
+            job_dir_pattern,
+            orig_index=orig_index,
+            job_id=job_id,
+        )
         job_dir = root_dir / job_dir_name
 
         if not job_dir.exists():
@@ -781,7 +986,7 @@ def backfill_metrics(
 def reset_missing_jobs(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     statuses: list[JobStatus] | None = None,
 ) -> int:
     """Find jobs whose directories don't exist and reset them to TO_RUN.
@@ -792,7 +997,8 @@ def reset_missing_jobs(
     Args:
         workflow: ArchitectorWorkflow instance.
         root_dir: Root directory containing job subdirectories.
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         statuses: Job statuses to check. Defaults to RUNNING, FAILED, TIMEOUT.
 
     Returns:
@@ -806,9 +1012,10 @@ def reset_missing_jobs(
 
     reset_count = 0
     for job in jobs:
-        job_dir_name = job_dir_pattern.format(
+        job_dir_name = render_job_dir_pattern(
+            job_dir_pattern,
             orig_index=job.orig_index,
-            id=job.id,
+            job_id=job.id,
         )
         job_dir = root_dir / job_dir_name
 
@@ -870,7 +1077,7 @@ def _probe_unlinked_job(
 def fix_unlinked_jobs(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     hours_cutoff: float = 24.0,
     verbose: bool = False,
     max_jobs: int | None = None,
@@ -891,7 +1098,8 @@ def fix_unlinked_jobs(
     Args:
         workflow: ArchitectorWorkflow instance.
         root_dir: Root directory containing job subdirectories.
-        job_dir_pattern: Pattern for job directory names.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         hours_cutoff: Hours before considering a job timed out.
         verbose: Print per-job details.
         max_jobs: Limit to N jobs (for --debug).
@@ -936,9 +1144,10 @@ def fix_unlinked_jobs(
     # Build job_id -> (job, job_dir) mapping for the probe
     probe_items: list[tuple[int, Path, int, int | None]] = []
     for job in unlinked:
-        job_dir_name = job_dir_pattern.format(
+        job_dir_name = render_job_dir_pattern(
+            job_dir_pattern,
             orig_index=job.orig_index,
-            id=job.id,
+            job_id=job.id,
         )
         probe_items.append(
             (job.id, root / job_dir_name, job.orig_index, job.fail_count)
@@ -1048,7 +1257,7 @@ def fix_unlinked_jobs(
 def update_all_statuses(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
-    job_dir_pattern: str = "job_{orig_index}",
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     check_func: Callable | None = None,
     verbose: bool = False,
     extract_metrics: bool = False,
@@ -1065,7 +1274,8 @@ def update_all_statuses(
     Args:
         workflow: ArchitectorWorkflow instance.
         root_dir: Root directory containing job subdirectories.
-        job_dir_pattern: Pattern for job directory names. Use {orig_index} or {id}.
+        job_dir_pattern: Pattern for job directory names. Supports
+            {hostname}, {orig_index}, and {id}.
         check_func: Optional custom status checking function.
         verbose: Print detailed progress messages.
         extract_metrics: If True, extract computational metrics for newly completed jobs.
@@ -1440,8 +1650,21 @@ def main():
     )
     parser.add_argument(
         "--job-dir-pattern",
-        default="job_{orig_index}",
-        help="Pattern for job directory names (default: job_{orig_index})",
+        default=DEFAULT_JOB_DIR_PATTERN,
+        help=(
+            "Pattern for job directory names. Supports {hostname}, "
+            "{orig_index}, and {id} (default: "
+            f"{DEFAULT_JOB_DIR_PATTERN})"
+        ),
+    )
+    parser.add_argument(
+        "--job-prefix",
+        default=None,
+        help=(
+            "Optional stable prefix to prepend to job directories, for example "
+            "'campaignA' -> campaignA_job_{orig_index}. Use the same prefix across "
+            "coordinator requeues to keep scanning the same job directories."
+        ),
     )
     parser.add_argument(
         "--show-failed",
@@ -1578,7 +1801,16 @@ def main():
         help="Profile metrics extraction to identify bottlenecks (I/O, parsing, DB)",
     )
 
+    add_wandb_args(parser)
+
     args = parser.parse_args()
+
+    try:
+        effective_job_dir_pattern = apply_job_dir_prefix(
+            args.job_dir_pattern, args.job_prefix
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Open workflow database
     try:
@@ -1587,12 +1819,26 @@ def main():
         print(f"Error: Database not found at {args.db_path}")
         sys.exit(1)
 
+    # Initialize W&B run if requested
+    wandb_run = None
+    if args.wandb_project:
+        if not WANDB_AVAILABLE:
+            print(
+                "Warning: wandb not installed; --wandb-project ignored. pip install wandb"
+            )
+        else:
+            wandb_run = init_wandb_run(
+                project=args.wandb_project,
+                run_name=args.wandb_run_name or Path(args.db_path).stem,
+                run_id=args.wandb_run_id,
+            )
+
     # Update statuses if requested
     if args.update:
         update_all_statuses(
             workflow,
             args.update,
-            job_dir_pattern=args.job_dir_pattern,
+            job_dir_pattern=effective_job_dir_pattern,
             verbose=args.verbose,
             extract_metrics=args.extract_metrics,
             unzip=args.unzip,
@@ -1608,7 +1854,7 @@ def main():
             backfill_metrics(
                 workflow,
                 args.update,
-                job_dir_pattern=args.job_dir_pattern,
+                job_dir_pattern=effective_job_dir_pattern,
                 unzip=args.unzip,
                 verbose=args.verbose,
                 workers=args.workers,
@@ -1616,6 +1862,13 @@ def main():
                 max_jobs=args.debug,
                 profile=args.profile,
             )
+
+    # Log campaign snapshot to W&B if a run is active
+    if wandb_run is not None:
+        _counts = workflow.count_by_status()
+        _total = sum(_counts.values())
+        _stats = compute_metrics_stats(workflow)
+        log_campaign_snapshot(wandb_run, _counts, _total, _stats)
 
     # Reset failed jobs if requested
     if args.reset_failed:
@@ -1657,7 +1910,7 @@ def main():
         count = reset_missing_jobs(
             workflow,
             args.reset_missing,
-            job_dir_pattern=args.job_dir_pattern,
+            job_dir_pattern=effective_job_dir_pattern,
         )
         print(f"\nReset {count} jobs with missing directories to TO_RUN")
 
@@ -1666,7 +1919,7 @@ def main():
         result = fix_unlinked_jobs(
             workflow,
             args.fix_unlinked,
-            job_dir_pattern=args.job_dir_pattern,
+            job_dir_pattern=effective_job_dir_pattern,
             hours_cutoff=args.hours_cutoff,
             verbose=getattr(args, "verbose", False),
             max_jobs=args.debug if hasattr(args, "debug") else None,
@@ -1743,6 +1996,7 @@ def main():
         else:
             print(f"\nNo jobs have failed {args.show_chronic_failures}+ times.")
 
+    finish_wandb_run(wandb_run)
     workflow.close()
 
 

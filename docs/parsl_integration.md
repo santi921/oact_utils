@@ -76,6 +76,7 @@ python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
     --cores-per-worker 16 \            # Cores per worker
     --job-timeout 7200 \               # Per-job timeout (seconds)
     --conda-base /path/to/miniconda3   # Conda path for workers
+    --no-parsl-monitoring              # Disable monitoring.db (optional)
 ```
 
 ### 2. Documentation Updates
@@ -165,6 +166,94 @@ For a 64-core node:
 - **Timeout**: Per-job timeout tracked, status set to TIMEOUT
 - **Import check**: Parsl features disabled if package not installed
 - **Cleanup**: Parsl `dfk.cleanup()` called in finally block
+
+### Parsl MonitoringHub (monitoring.db)
+
+By default, Parsl writes resource usage (CPU, memory, task status) to a SQLite database at `runinfo/run_<pid>_<ts>/monitoring.db`. This is Parsl's internal monitoring, separate from the workflow database.
+
+**Disable with `--no-parsl-monitoring`:**
+
+```bash
+python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
+    --use-parsl --max-workers 4 --no-parsl-monitoring
+```
+
+Or programmatically:
+
+```python
+config = build_parsl_config_flux(max_workers=4, enable_monitoring=False)
+```
+
+**When to disable:**
+- The MonitoringHub binds a network port (default 55055). On some systems this port may be blocked or in use.
+- MonitoringHub requires `sqlalchemy` and `typeguard`. If these are missing or incompatible, startup will fail.
+- For lightweight runs where the extra `monitoring.db` overhead is not needed.
+
+The workflow database (`workflow.db`) is unaffected by this setting -- job status, metrics, and error messages are always tracked there regardless.
+
+### W&B (Weights & Biases) Integration
+
+Real-time job progress and aggregate campaign metrics can be streamed to a shared W&B project, making it easy to share campaign status with the team without SSH access.
+
+**Installation:**
+
+```bash
+pip install wandb
+wandb login  # One-time setup
+```
+
+**Per-job logging (Parsl mode):**
+
+Each job outcome is logged as it completes, incrementing a counter under `progress/{status}` and recording per-job metrics under `metrics/`:
+
+```bash
+python -m oact_utilities.workflows.submit_jobs \
+    workflow.db \
+    jobs/ \
+    --use-parsl \
+    --max-workers 4 \
+    --wandb-project actinide-campaign \
+    --wandb-run-name wave_two
+```
+
+Keys logged per job: `progress/completed`, `progress/failed`, `progress/timeout`, `metrics/max_forces`, `metrics/final_energy`, `metrics/scf_steps`, `metrics/wall_time`, `metrics/n_cores`.
+
+To resume logging into an existing W&B run across multiple batches, pass `--wandb-run-id <run-id>`.
+
+**Campaign snapshot logging (dashboard mode):**
+
+After a `--update` scan, the dashboard logs aggregate campaign status and metrics summary:
+
+```bash
+python -m oact_utilities.workflows.dashboard \
+    workflow.db \
+    --update jobs/ \
+    --extract-metrics \
+    --wandb-project actinide-campaign \
+    --wandb-run-id <run-id>  # Same ID as submit_jobs run to share one W&B run
+```
+
+Keys logged: `campaign/completed`, `campaign/failed`, `campaign/to_run`, `campaign/running`, `campaign/timeout`, `campaign/progress_pct`, `metrics/max_forces_mean`, `metrics/wall_time_total_hours`, `metrics/core_hours_total`, etc.
+
+**W&B is optional and fail-safe.** All W&B calls are wrapped in try/except -- a network failure, missing install, or expired token never aborts a campaign. If wandb is not installed, `--wandb-project` prints a warning and is ignored.
+
+**Programmatic usage:**
+
+```python
+from oact_utilities.workflows.wandb_logger import (
+    init_wandb_run,
+    log_job_result,
+    log_campaign_snapshot,
+    compute_metrics_stats,
+    finish_wandb_run,
+)
+
+run = init_wandb_run(project="actinide-campaign", run_name="wave_two")
+try:
+    submitted_ids = submit_batch_parsl(..., wandb_run=run)
+finally:
+    finish_wandb_run(run)
+```
 
 ### Crash Recovery and Graceful Shutdown
 
@@ -319,7 +408,7 @@ python -m oact_utilities.workflows.submit_jobs \
 2. **Dynamic worker count**: Adjust `max_workers` based on node detection
 3. **Load balancing**: Use Parsl's built-in scheduling for heterogeneous runtimes
 4. **Checkpointing**: Save Parsl state for resumable workflows
-5. **Monitoring UI**: Web dashboard for live Parsl execution monitoring
+5. **Monitoring UI**: Web dashboard for live Parsl execution monitoring (W&B integration added -- see W&B section above)
 6. **Resource profiles**: Pre-configured resource settings for common node types
 
 ## Related Files

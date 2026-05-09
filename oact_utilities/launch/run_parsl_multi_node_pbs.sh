@@ -21,15 +21,23 @@
 DB_PATH="/path/to/workflow.db"
 ROOT_DIR="/path/to/job_output_dir"
 ORCA_PATH="/path/to/orca"
+JOB_PREFIX=""  # optional stable prefix reused across coordinator requeues
 
 BATCH_SIZE=500
-MAX_WORKERS=12
-CORES_PER_WORKER=16
+# Reserve full nodes but intentionally leave some cores idle for memory headroom.
+MAX_WORKERS=8
+CORES_PER_WORKER=8
+CPUS_PER_NODE=192
 CONDA_ENV="py10mpi"
 CONDA_BASE="/usr/WS1/vargas58/miniconda3"
 LD_LIBRARY_PATH_OVERRIDE=""
 JOB_TIMEOUT=432000
 MAX_FAIL_COUNT=3
+
+# W&B online monitoring (optional -- leave empty to disable)
+WANDB_PROJECT=""        # e.g. "actinide-campaign"
+WANDB_RUN_NAME=""       # display name in W&B UI (default: db filename stem)
+WANDB_RUN_ID=""         # resume an existing run across batches
 
 # PBS Pro scale-out settings
 NODES_PER_BLOCK=39
@@ -58,9 +66,11 @@ python -m oact_utilities.workflows.submit_jobs \
     "${ROOT_DIR}" \
     --use-parsl \
     --scheduler pbspro \
+    ${JOB_PREFIX:+--job-prefix "${JOB_PREFIX}"} \
     --batch-size "${BATCH_SIZE}" \
     --max-workers "${MAX_WORKERS}" \
     --cores-per-worker "${CORES_PER_WORKER}" \
+    --cpus-per-node "${CPUS_PER_NODE}" \
     --queue "${QUEUE}" \
     --account "${ACCOUNT}" \
     --conda-env "${CONDA_ENV}" \
@@ -80,4 +90,7 @@ python -m oact_utilities.workflows.submit_jobs \
     --non-actinide-basis "${NON_ACTINIDE_BASIS}" \
     --scf-maxiter "${SCF_MAXITER}" \
     --ks-method uks \
-    --orca-path "${ORCA_PATH}"
+    --orca-path "${ORCA_PATH}" \
+    ${WANDB_PROJECT:+--wandb-project "${WANDB_PROJECT}"} \
+    ${WANDB_RUN_NAME:+--wandb-run-name "${WANDB_RUN_NAME}"} \
+    ${WANDB_RUN_ID:+--wandb-run-id "${WANDB_RUN_ID}"}

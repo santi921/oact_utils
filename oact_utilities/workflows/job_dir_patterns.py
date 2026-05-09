@@ -15,7 +15,19 @@ def get_job_dir_hostname() -> str:
 
 
 def apply_job_dir_prefix(job_dir_pattern: str, job_prefix: str | None = None) -> str:
-    """Apply an optional stable run prefix to a job directory pattern."""
+    """Apply an optional stable run prefix to a job directory pattern.
+
+    Args:
+        job_dir_pattern: Base job directory pattern.
+        job_prefix: Optional stable prefix to prepend. May contain only
+            alphanumerics, ``.``, ``_``, and ``-``.
+
+    Returns:
+        Effective job directory pattern.
+
+    Raises:
+        ValueError: If ``job_prefix`` contains unsupported characters.
+    """
     if not job_prefix:
         return job_dir_pattern
     if not _JOB_PREFIX_RE.fullmatch(job_prefix):
@@ -32,7 +44,22 @@ def render_job_dir_pattern(
     job_id: int,
     hostname: str | None = None,
 ) -> str:
-    """Render a supported job directory pattern safely."""
+    """Render a supported job directory pattern safely.
+
+    Supported placeholders are ``{hostname}``, ``{orig_index}``, and ``{id}``.
+
+    Args:
+        job_dir_pattern: Pattern template to render.
+        orig_index: Original structure index.
+        job_id: Workflow database job ID.
+        hostname: Optional hostname override. Defaults to the local hostname.
+
+    Returns:
+        Rendered directory name.
+
+    Raises:
+        ValueError: If unsupported placeholders or stray braces are present.
+    """
     allowed_placeholders = ("{hostname}", "{orig_index}", "{id}")
     temp_pattern = job_dir_pattern
     for placeholder in allowed_placeholders:

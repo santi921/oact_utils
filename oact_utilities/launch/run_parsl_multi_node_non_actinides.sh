@@ -32,6 +32,11 @@ LD_LIBRARY_PATH_OVERRIDE=""  # (optional) set to override LD_LIBRARY_PATH in job
 JOB_TIMEOUT=432000          # 5 days per job
 MAX_FAIL_COUNT=3
 
+# W&B online monitoring (optional -- leave empty to disable)
+WANDB_PROJECT=""        # e.g. "actinide-campaign"
+WANDB_RUN_NAME=""       # display name in W&B UI (default: db filename stem)
+WANDB_RUN_ID=""         # resume an existing run across batches
+
 # SLURM scale-out settings
 NODES_PER_BLOCK=1          # nodes per SLURM block (>1 enables multi-node with SrunLauncher)
 MAX_BLOCKS=10              # max SLURM blocks Parsl can provision
@@ -82,5 +87,8 @@ python -m oact_utilities.workflows.submit_jobs \
     --non-actinide-basis "${NON_ACTINIDE_BASIS}" \
     --scf-maxiter "${SCF_MAXITER}" \
     --ks-method uks \
-    --orca-path "${ORCA_PATH}"
+    --orca-path "${ORCA_PATH}" \
+    ${WANDB_PROJECT:+--wandb-project "${WANDB_PROJECT}"} \
+    ${WANDB_RUN_NAME:+--wandb-run-name "${WANDB_RUN_NAME}"} \
+    ${WANDB_RUN_ID:+--wandb-run-id "${WANDB_RUN_ID}"}
     #--dry-run # Uncomment to do a dry run (Parsl will spin up and prepare directories but not actually submit jobs)

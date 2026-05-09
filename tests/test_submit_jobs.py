@@ -15,6 +15,7 @@ from oact_utilities.workflows.submit_jobs import (
     _flush_pending_updates,
     _get_scheduler_job_id,
     _is_manager_lost_exception,
+    _write_job_update,
     prepare_job_directory,
     write_flux_job_file,
     write_slurm_job_file,
@@ -29,6 +30,7 @@ def mock_job_record():
     record = MagicMock()
     record.id = 1
     record.orig_index = 42
+    record.job_dir = None
     record.geometry = """H 0.0 0.0 0.0
 H 0.0 0.0 0.74"""
     record.charge = 0
@@ -42,6 +44,7 @@ def mock_actinide_job_record():
     record = MagicMock()
     record.id = 2
     record.orig_index = 100
+    record.job_dir = None
     record.geometry = """U 0.0 0.0 0.0
 O 1.8 0.0 0.0
 O -1.8 0.0 0.0"""
@@ -120,6 +123,38 @@ class TestPrepareJobDirectory:
         )
 
         assert job_dir.name == "calc_1_42"
+
+    def test_hostname_placeholder_in_job_dir_pattern(
+        self, mock_job_record, tmp_path, orca_config_with_path, monkeypatch
+    ):
+        """Custom job directory patterns may include the coordinator hostname."""
+        monkeypatch.setattr(
+            "oact_utilities.workflows.job_dir_patterns.get_job_dir_hostname",
+            lambda: "coord01",
+        )
+        job_dir = prepare_job_directory(
+            mock_job_record,
+            tmp_path,
+            job_dir_pattern="{hostname}_calc_{id}_{orig_index}",
+            orca_config=orca_config_with_path,
+        )
+
+        assert job_dir.name == "coord01_calc_1_42"
+
+    def test_apply_job_dir_prefix(self):
+        """Stable run prefixes prepend cleanly to the base job directory pattern."""
+        from oact_utilities.workflows.job_dir_patterns import apply_job_dir_prefix
+
+        assert apply_job_dir_prefix("job_{orig_index}", "campaignA") == (
+            "campaignA_job_{orig_index}"
+        )
+
+    def test_apply_job_dir_prefix_rejects_invalid_chars(self):
+        """Run prefixes reject path-like or unsafe characters."""
+        from oact_utilities.workflows.job_dir_patterns import apply_job_dir_prefix
+
+        with pytest.raises(ValueError, match="job_prefix may contain only"):
+            apply_job_dir_prefix("job_{orig_index}", "../campaign")
 
     def test_default_orca_config_applied(
         self, mock_job_record, tmp_path, orca_config_with_path
@@ -245,6 +280,7 @@ class TestPrepareJobDirectory:
         record = MagicMock()
         record.id = 1
         record.orig_index = 1
+        record.job_dir = None
         record.geometry = None
 
         job_dir = prepare_job_directory(record, tmp_path)
@@ -252,6 +288,23 @@ class TestPrepareJobDirectory:
         assert job_dir.exists()
         # No orca.inp should be created without geometry
         assert not (job_dir / "orca.inp").exists()
+
+    def test_uses_preset_job_dir(
+        self, mock_job_record, tmp_path, orca_config_with_path
+    ):
+        """If job_record.job_dir is set, use it instead of computing from root_dir/pattern."""
+        preset = tmp_path / "seeds" / "orig_index_42"
+        preset.mkdir(parents=True)
+        mock_job_record.job_dir = str(preset)
+
+        irrelevant_root = tmp_path / "should_not_be_used"
+        result = prepare_job_directory(
+            mock_job_record, irrelevant_root, orca_config=orca_config_with_path
+        )
+
+        assert result == preset
+        assert (preset / "orca.inp").exists()
+        assert not irrelevant_root.exists()
 
 
 class TestWriteFluxJobFile:
@@ -661,9 +714,26 @@ class TestDefaultOrcaPaths:
         """Test that slurm has a default ORCA path."""
         assert "slurm" in DEFAULT_ORCA_PATHS
 
-    def test_pbspro_default_path(self):
-        """Test that PBS Pro has a default ORCA path."""
-        assert "pbspro" in DEFAULT_ORCA_PATHS
+
+@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
+class TestBuildParslConfigFlux:
+    """Tests for build_parsl_config_flux function."""
+
+    def test_monitoring_enabled_by_default(self):
+        """MonitoringHub is attached by default."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_flux
+
+        config = build_parsl_config_flux()
+        assert config.monitoring is not None
+        expected = f"sqlite:///{(Path(config.run_dir).resolve() / 'monitoring.db')}"
+        assert config.monitoring.logging_endpoint == expected
+
+    def test_monitoring_disabled_when_flag_false(self):
+        """enable_monitoring=False omits MonitoringHub from Config."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_flux
+
+        config = build_parsl_config_flux(enable_monitoring=False)
+        assert config.monitoring is None
 
 
 @pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
@@ -709,6 +779,20 @@ class TestBuildParslConfigSlurm:
         assert "--ntasks-per-node=64" in provider.scheduler_options
         assert "--cpus-per-task=1" in provider.scheduler_options
 
+    def test_single_node_scheduler_options_can_reserve_more_than_active_cores(self):
+        """Single-node Slurm can reserve more scheduler cores than active worker cores."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(
+            max_workers=8,
+            cores_per_worker=8,
+            cpus_per_node=192,
+            nodes_per_block=1,
+        )
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node=192" in provider.scheduler_options
+        assert "--cpus-per-task=1" in provider.scheduler_options
+
     def test_multi_node_scheduler_options_empty(self):
         """Multi-node mode has no extra scheduler_options (exclusive=True handles it)."""
         from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
@@ -717,6 +801,32 @@ class TestBuildParslConfigSlurm:
         provider = config.executors[0].provider
         assert "--ntasks-per-node" not in provider.scheduler_options
         assert provider.exclusive is True
+
+    def test_multi_node_scheduler_options_include_explicit_cpus_per_node(self):
+        """Multi-node Slurm adds ntasks-per-node when an explicit override is requested."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(
+            max_workers=8,
+            cores_per_worker=8,
+            cpus_per_node=192,
+            nodes_per_block=10,
+        )
+        provider = config.executors[0].provider
+        assert "--ntasks-per-node=192" in provider.scheduler_options
+        assert "--cpus-per-task=1" in provider.scheduler_options
+        assert provider.exclusive is True
+
+    def test_slurm_cpu_shape_rejects_undersized_override(self):
+        """Reserved Slurm cores cannot be smaller than active worker cores."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        with pytest.raises(ValueError, match="cpus_per_node must be >="):
+            build_parsl_config_slurm(
+                max_workers=12,
+                cores_per_worker=16,
+                cpus_per_node=128,
+            )
 
     def test_cpu_affinity_block(self):
         """HighThroughputExecutor has cpu_affinity='block'."""
@@ -733,8 +843,33 @@ class TestBuildParslConfigSlurm:
         config = build_parsl_config_slurm()
         assert config.run_dir.startswith("runinfo/run_")
 
-    def test_monitoring_db_written_to_runinfo(self):
-        """Monitoring is enabled with a per-run database inside run_dir."""
+    def test_worker_init_prepends_orca_bin_dir_for_absolute_path(self, monkeypatch):
+        """Absolute orca_path causes its parent dir to be prepended to PATH in worker_init."""
+        monkeypatch.setattr(
+            "oact_utilities.workflows.submit_jobs.shutil.which",
+            lambda exe: None,
+        )
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm(orca_path="/opt/orca/bin/orca")
+        provider = config.executors[0].provider
+        assert "export PATH=/opt/orca/bin:" in provider.worker_init
+
+    def test_worker_init_no_path_export_for_non_absolute_orca_path(self, monkeypatch):
+        """No PATH export when orca_path is None or a bare executable name."""
+        monkeypatch.setattr(
+            "oact_utilities.workflows.submit_jobs.shutil.which",
+            lambda exe: None,
+        )
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        for val in [None, "orca"]:
+            config = build_parsl_config_slurm(orca_path=val)
+            provider = config.executors[0].provider
+            assert "export PATH=" not in provider.worker_init
+
+    def test_monitoring_enabled_by_default(self):
+        """MonitoringHub is attached by default."""
         from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
 
         config = build_parsl_config_slurm()
@@ -742,56 +877,12 @@ class TestBuildParslConfigSlurm:
         expected = f"sqlite:///{(Path(config.run_dir).resolve() / 'monitoring.db')}"
         assert config.monitoring.logging_endpoint == expected
 
-    def test_executor_has_runtime_address(self):
-        """HTEX sets a runtime-resolved address for worker connectivity."""
+    def test_monitoring_disabled_when_flag_false(self):
+        """enable_monitoring=False omits MonitoringHub from Config."""
         from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
 
-        config = build_parsl_config_slurm()
-        executor = config.executors[0]
-        assert executor.address is not None
-
-    def test_worker_init_prepends_orca_bin_dir_for_absolute_path(self):
-        """Absolute orca_path causes its parent dir to be prepended to PATH in worker_init."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
-
-        config = build_parsl_config_slurm(orca_path="/opt/orca/bin/orca")
-        provider = config.executors[0].provider
-        assert "export PATH=/opt/orca/bin:" in provider.worker_init
-
-    def test_worker_init_prepends_active_mpirun_dir(self, monkeypatch):
-        """Active mpirun dir is propagated into worker PATH."""
-        monkeypatch.setattr(
-            "oact_utilities.workflows.submit_jobs.shutil.which",
-            lambda exe: "/opt/openmpi/bin/mpirun" if exe == "mpirun" else None,
-        )
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
-
-        config = build_parsl_config_slurm(orca_path="/opt/orca/bin/orca")
-        provider = config.executors[0].provider
-        assert "export PATH=/opt/openmpi/bin:/opt/orca/bin:$PATH" in provider.worker_init
-
-    def test_worker_init_prefers_explicit_mpirun_path(self):
-        """Explicit mpirun path overrides coordinator-side discovery."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
-
-        config = build_parsl_config_slurm(
-            orca_path="/opt/orca/bin/orca",
-            mpirun_path="/p/home/ritwik/opt/openmpi-4.1.8/bin/mpirun",
-        )
-        provider = config.executors[0].provider
-        assert (
-            "export PATH=/p/home/ritwik/opt/openmpi-4.1.8/bin:/opt/orca/bin:$PATH"
-            in provider.worker_init
-        )
-
-    def test_worker_init_no_path_export_for_non_absolute_orca_path(self):
-        """No PATH export when orca_path is None or a bare executable name."""
-        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
-
-        for val in [None, "orca"]:
-            config = build_parsl_config_slurm(orca_path=val)
-            provider = config.executors[0].provider
-            assert "export PATH=" not in provider.worker_init
+        config = build_parsl_config_slurm(enable_monitoring=False)
+        assert config.monitoring is None
 
     def test_slurm_provider_cmd_timeout_is_30_minutes(self):
         """Slurm provider scheduler commands get a 30 minute timeout."""
@@ -847,6 +938,31 @@ class TestBuildParslConfigPbsPro:
         assert provider.cpus_per_node == 192
         assert provider.select_options == "mpiprocs=192"
 
+    def test_pbs_cpu_shape_can_reserve_more_than_active_worker_cores(self):
+        """PBS can reserve a full node while workers intentionally leave cores idle."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro(
+            max_workers=8,
+            cores_per_worker=8,
+            cpus_per_node=192,
+            nodes_per_block=39,
+        )
+        provider = config.executors[0].provider
+        assert provider.cpus_per_node == 192
+        assert provider.select_options == "mpiprocs=192"
+
+    def test_pbs_cpu_shape_rejects_undersized_override(self):
+        """Reserved PBS cores cannot be smaller than active worker cores."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        with pytest.raises(ValueError, match="cpus_per_node must be >="):
+            build_parsl_config_pbspro(
+                max_workers=12,
+                cores_per_worker=16,
+                cpus_per_node=128,
+            )
+
     def test_monitoring_db_written_to_runinfo(self):
         """Monitoring is enabled with a per-run database inside run_dir."""
         from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
@@ -855,6 +971,13 @@ class TestBuildParslConfigPbsPro:
         assert config.monitoring is not None
         expected = f"sqlite:///{(Path(config.run_dir).resolve() / 'monitoring.db')}"
         assert config.monitoring.logging_endpoint == expected
+
+    def test_monitoring_disabled_when_flag_false(self):
+        """enable_monitoring=False omits MonitoringHub from Config."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro(enable_monitoring=False)
+        assert config.monitoring is None
 
     def test_executor_has_runtime_address(self):
         """HTEX sets a runtime-resolved address for worker connectivity."""
@@ -971,6 +1094,61 @@ class TestMultiNodeCLIValidation:
         )
         assert result.returncode != 0
         assert "currently only supported with --use-parsl" in result.stderr
+
+    def test_pbspro_rejects_cpus_per_node_below_active_worker_cores(self):
+        """PBS full-node override must not undersize the active worker layout."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--scheduler",
+                "pbspro",
+                "--max-workers",
+                "12",
+                "--cores-per-worker",
+                "16",
+                "--cpus-per-node",
+                "128",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "must be >= max_workers * cores_per_worker" in result.stderr
+
+    def test_slurm_rejects_cpus_per_node_below_active_worker_cores(self):
+        """Slurm full-node override must not undersize the active worker layout."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--scheduler",
+                "slurm",
+                "--max-workers",
+                "12",
+                "--cores-per-worker",
+                "16",
+                "--cpus-per-node",
+                "128",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "must be >= max_workers * cores_per_worker" in result.stderr
+
 
 # --- Pre-submission disk check tests ---
 
@@ -1288,12 +1466,12 @@ class TestOrcaExitCodeVerification:
         assert self._check_orca_output(job_dir) is None
 
 
-# --- Tests for _flush_pending_updates (Change 2: batch commits) ---
+# --- Tests for _write_job_update (per-job commit) ---
 
 
 @pytest.fixture
 def workflow_db(tmp_path):
-    """Create a workflow DB with 5 test jobs for flush tests."""
+    """Create a workflow DB with 5 test jobs for update tests."""
     from oact_utilities.utils.architector import _init_db, _insert_row
 
     db_path = tmp_path / "test.db"
@@ -1312,21 +1490,14 @@ def workflow_db(tmp_path):
     return db_path
 
 
-class TestFlushPendingUpdates:
-    """Tests for the _flush_pending_updates batch commit function."""
+class TestWriteJobUpdate:
+    """Tests for _write_job_update per-job commit function."""
 
-    def test_empty_list_is_noop(self, workflow_db):
-        """Flushing an empty list does nothing."""
+    def test_completed_job_with_metrics(self, workflow_db):
+        """Completed job gets status + metrics in one commit."""
         with ArchitectorWorkflow(workflow_db) as wf:
-            _flush_pending_updates(wf, [])
-            # All jobs still running
-            running = wf.get_jobs_by_status(JobStatus.RUNNING)
-            assert len(running) == 5
-
-    def test_completed_jobs_with_metrics(self, workflow_db):
-        """Completed jobs get status + metrics in one transaction."""
-        with ArchitectorWorkflow(workflow_db) as wf:
-            pending = [
+            _write_job_update(
+                wf,
                 {
                     "job_id": 1,
                     "status": JobStatus.COMPLETED,
@@ -1339,6 +1510,20 @@ class TestFlushPendingUpdates:
                         "n_cores": 4,
                     },
                 },
+            )
+
+            completed = wf.get_jobs_by_status(JobStatus.COMPLETED)
+            assert len(completed) == 1
+            assert completed[0].max_forces == 0.001
+            assert completed[0].wall_time == 120.0
+            assert completed[0].scf_steps == 10
+            assert completed[0].worker_id is None
+
+    def test_completed_job_partial_metrics(self, workflow_db):
+        """Completed job with only some metrics populated."""
+        with ArchitectorWorkflow(workflow_db) as wf:
+            _write_job_update(
+                wf,
                 {
                     "job_id": 2,
                     "status": JobStatus.COMPLETED,
@@ -1349,58 +1534,59 @@ class TestFlushPendingUpdates:
                         "final_energy": -2.5,
                     },
                 },
-            ]
-            _flush_pending_updates(wf, pending)
+            )
 
             completed = wf.get_jobs_by_status(JobStatus.COMPLETED)
-            assert len(completed) == 2
-            assert completed[0].max_forces == 0.001
-            assert completed[0].wall_time == 120.0
-            assert completed[1].scf_steps == 15
+            assert len(completed) == 1
+            assert completed[0].scf_steps == 15
+            assert completed[0].wall_time is None
 
-            # worker_id should be cleared
-            assert completed[0].worker_id is None
-
-    def test_failed_jobs_with_error_and_fail_count(self, workflow_db):
-        """Failed jobs get error_message and incremented fail_count."""
+    def test_failed_job_with_error_and_fail_count(self, workflow_db):
+        """Failed job gets error_message and incremented fail_count."""
         with ArchitectorWorkflow(workflow_db) as wf:
-            pending = [
+            _write_job_update(
+                wf,
                 {
                     "job_id": 1,
                     "status": JobStatus.FAILED,
                     "error_message": "SCF did not converge",
                     "increment_fail_count": True,
                 },
-            ]
-            _flush_pending_updates(wf, pending)
+            )
 
             failed = wf.get_jobs_by_status(JobStatus.FAILED)
             assert len(failed) == 1
             assert failed[0].error_message == "SCF did not converge"
             assert failed[0].fail_count == 1
 
-    def test_mixed_statuses(self, workflow_db):
-        """Mix of completed, failed, and timeout in one batch."""
+    def test_multiple_updates_independent(self, workflow_db):
+        """Each update commits independently -- no cross-job rollback."""
         with ArchitectorWorkflow(workflow_db) as wf:
-            pending = [
+            _write_job_update(
+                wf,
                 {
                     "job_id": 1,
                     "status": JobStatus.COMPLETED,
                     "metrics": {"job_dir": "/j0", "final_energy": -1.0},
                 },
+            )
+            _write_job_update(
+                wf,
                 {
                     "job_id": 2,
                     "status": JobStatus.FAILED,
                     "error_message": "memory error",
                     "increment_fail_count": True,
                 },
+            )
+            _write_job_update(
+                wf,
                 {
                     "job_id": 3,
                     "status": JobStatus.TIMEOUT,
                     "error_message": "exceeded 20h",
                 },
-            ]
-            _flush_pending_updates(wf, pending)
+            )
 
             completed = wf.get_jobs_by_status(JobStatus.COMPLETED)
             failed = wf.get_jobs_by_status(JobStatus.FAILED)
