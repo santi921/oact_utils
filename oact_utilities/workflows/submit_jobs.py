@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Literal, TypedDict
@@ -30,7 +31,7 @@ from ..utils.analysis import (
 )
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
-from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .architector_workflow import ArchitectorWorkflow, JobRecord, JobStatus
 from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
 from .globus_transfer import (
     GlobusTransferConfig,
@@ -376,14 +377,17 @@ def prepare_job_directory(
 
 def _serialize_job_record(job_record: Any) -> dict[str, Any]:
     """Convert a workflow job record into a Parsl-safe payload."""
-    return {
-        "id": job_record.id,
-        "orig_index": job_record.orig_index,
-        "job_dir": job_record.job_dir,
-        "geometry": job_record.geometry,
-        "charge": job_record.charge,
-        "spin": job_record.spin,
+    if is_dataclass(job_record):
+        return asdict(job_record)
+
+    payload = {
+        field_name: getattr(job_record, field_name, None)
+        for field_name in JobRecord.__dataclass_fields__
     }
+    for key, value in vars(job_record).items():
+        if not key.startswith("_") and key not in payload:
+            payload[key] = value
+    return payload
 
 
 def _resolve_job_dir(
@@ -507,11 +511,13 @@ def _classify_claimed_job(
             "job_payload": None,
         }
 
+    job_payload = _serialize_job_record(job)
+    job_payload["job_dir"] = str(job_dir)
     return {
         "action": "submit_ready",
         "job_id": job.id,
         "job_dir": str(job_dir),
-        "job_payload": _serialize_job_record(job),
+        "job_payload": job_payload,
     }
 
 
@@ -1251,6 +1257,7 @@ def _build_parsl_worker_init(
     mpirun_path: str | None = None,
 ) -> str:
     """Build worker initialization commands for Parsl-launched workers."""
+    repo_root = Path(__file__).resolve().parents[2]
     ld_lib = ld_library_path
     if ld_lib is None:
         if scheduler == "flux":
@@ -1275,12 +1282,14 @@ def _build_parsl_worker_init(
     path_entries = list(dict.fromkeys(path_entries))
     path_line = f"export PATH={':'.join(path_entries)}:$PATH\n" if path_entries else ""
     ld_line = f"export LD_LIBRARY_PATH={ld_lib}:$LD_LIBRARY_PATH\n" if ld_lib else ""
+    pythonpath_line = f"export PYTHONPATH={repo_root}:$PYTHONPATH\n"
 
     return (
         "source ~/.bashrc\n"
         f"conda activate {conda_env}\n"
         f"{path_line}"
         f"{ld_line}"
+        f"{pythonpath_line}"
         "export JAX_PLATFORMS=cpu\n"
         "export OMP_NUM_THREADS=1\n"
     )
@@ -1308,6 +1317,29 @@ def _build_parsl_htex_launch_cmd(python_executable: str | None = None) -> str:
         return DEFAULT_LAUNCH_CMD.replace("process_worker_pool.py", entrypoint, 1)
 
     return f"{entrypoint} {DEFAULT_LAUNCH_CMD}"
+
+
+def _validate_worker_setup_func(setup_func: Callable | None) -> None:
+    """Reject setup functions that cannot be imported reliably on workers."""
+    if setup_func is None:
+        return
+
+    if not inspect.isfunction(setup_func):
+        raise TypeError("setup_func must be a function when used with Parsl workers")
+
+    if setup_func.__name__ == "<lambda>":
+        raise ValueError("setup_func must be a named top-level function, not a lambda")
+
+    if "<locals>" in setup_func.__qualname__:
+        raise ValueError(
+            "setup_func must be defined at module top level for Parsl worker use"
+        )
+
+    if setup_func.__module__ == "__main__":
+        raise ValueError(
+            "setup_func defined in __main__ is not importable on Parsl workers; "
+            "move it into an importable module"
+        )
 
 
 def build_parsl_config_flux(
@@ -1795,6 +1827,9 @@ def submit_batch_parsl(
         print("Reroot mode: ignoring database job_dir paths, using root_dir")
 
     scheduler_key = scheduler.lower()
+    if scheduler_key in {"slurm", "pbspro"}:
+        _validate_worker_setup_func(setup_func)
+
     active_window = _parsl_active_window(
         scheduler=scheduler_key,
         num_jobs=num_jobs,

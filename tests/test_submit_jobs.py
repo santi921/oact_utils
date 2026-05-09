@@ -3,6 +3,7 @@
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -37,30 +38,56 @@ PARSL_INSTALLED = importlib.util.find_spec("parsl") is not None
 @pytest.fixture
 def mock_job_record():
     """Create a mock job record."""
-    record = MagicMock()
-    record.id = 1
-    record.orig_index = 42
-    record.job_dir = None
-    record.geometry = """H 0.0 0.0 0.0
-H 0.0 0.0 0.74"""
-    record.charge = 0
-    record.spin = 1
-    return record
+    return SimpleNamespace(
+        id=1,
+        orig_index=42,
+        elements="H;H",
+        natoms=2,
+        status=JobStatus.TO_RUN,
+        charge=0,
+        spin=1,
+        geometry="""H 0.0 0.0 0.0
+H 0.0 0.0 0.74""",
+        job_dir=None,
+        max_forces=None,
+        scf_steps=None,
+        final_energy=None,
+        error_message=None,
+        fail_count=0,
+        wall_time=None,
+        n_cores=None,
+        optimizer=None,
+        worker_id=None,
+        generator_data=None,
+    )
 
 
 @pytest.fixture
 def mock_actinide_job_record():
     """Create a mock job record with actinide."""
-    record = MagicMock()
-    record.id = 2
-    record.orig_index = 100
-    record.job_dir = None
-    record.geometry = """U 0.0 0.0 0.0
+    return SimpleNamespace(
+        id=2,
+        orig_index=100,
+        elements="U;O;O",
+        natoms=3,
+        status=JobStatus.TO_RUN,
+        charge=2,
+        spin=3,
+        geometry="""U 0.0 0.0 0.0
 O 1.8 0.0 0.0
-O -1.8 0.0 0.0"""
-    record.charge = 2
-    record.spin = 3
-    return record
+O -1.8 0.0 0.0""",
+        job_dir=None,
+        max_forces=None,
+        scf_steps=None,
+        final_energy=None,
+        error_message=None,
+        fail_count=0,
+        wall_time=None,
+        n_cores=None,
+        optimizer=None,
+        worker_id=None,
+        generator_data=None,
+    )
 
 
 @pytest.fixture
@@ -122,6 +149,7 @@ class TestParslJobSerialization:
 
         assert restored.id == mock_job_record.id
         assert restored.orig_index == mock_job_record.orig_index
+        assert restored.elements == mock_job_record.elements
         assert restored.job_dir == mock_job_record.job_dir
         assert restored.geometry == mock_job_record.geometry
         assert restored.charge == mock_job_record.charge
