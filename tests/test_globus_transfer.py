@@ -78,8 +78,7 @@ def test_submit_archive_transfer_builds_expected_transfer(monkeypatch, tmp_path)
             self.auth_client = auth_client
 
     class FakeTransferData:
-        def __init__(self, client, source_endpoint, destination_endpoint, label):
-            self.client = client
+        def __init__(self, source_endpoint, destination_endpoint, label):
             self.source_endpoint = source_endpoint
             self.destination_endpoint = destination_endpoint
             self.label = label

@@ -142,7 +142,6 @@ def submit_archive_transfer(
     destination_path = build_destination_path(archive, root_dir, config.dest_root)
 
     transfer_data = globus_sdk.TransferData(
-        client,
         config.source_endpoint_id,
         config.destination_endpoint_id,
         label=f"oact backup {archive.name}",
