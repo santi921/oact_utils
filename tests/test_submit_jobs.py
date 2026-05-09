@@ -21,6 +21,8 @@ from oact_utilities.workflows.submit_jobs import (
     _get_scheduler_job_id,
     _is_manager_lost_exception,
     _parsl_active_window,
+    _deserialize_job_record,
+    _serialize_job_record,
     _submit_globus_backup_if_verified,
     _write_job_update,
     prepare_job_directory,
@@ -107,6 +109,22 @@ class TestParslActiveWindow:
             )
             == 80
         )
+
+
+class TestParslJobSerialization:
+    """Tests for worker-side job payload transport."""
+
+    def test_round_trip_preserves_prepare_fields(self, mock_job_record):
+        """Serialized job payload keeps the fields needed for preparation."""
+        payload = _serialize_job_record(mock_job_record)
+        restored = _deserialize_job_record(payload)
+
+        assert restored.id == mock_job_record.id
+        assert restored.orig_index == mock_job_record.orig_index
+        assert restored.job_dir == mock_job_record.job_dir
+        assert restored.geometry == mock_job_record.geometry
+        assert restored.charge == mock_job_record.charge
+        assert restored.spin == mock_job_record.spin
 
 
 class TestPrepareJobDirectory:

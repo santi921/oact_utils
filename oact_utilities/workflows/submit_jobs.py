@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Literal, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
@@ -370,6 +371,23 @@ def prepare_job_directory(
     return job_dir
 
 
+def _serialize_job_record(job_record: Any) -> dict[str, Any]:
+    """Convert a workflow job record into a Parsl-safe payload."""
+    return {
+        "id": job_record.id,
+        "orig_index": job_record.orig_index,
+        "job_dir": job_record.job_dir,
+        "geometry": job_record.geometry,
+        "charge": job_record.charge,
+        "spin": job_record.spin,
+    }
+
+
+def _deserialize_job_record(job_payload: dict[str, Any]) -> Any:
+    """Rebuild an attribute-based job record from a serialized payload."""
+    return SimpleNamespace(**job_payload)
+
+
 def write_flux_job_file(
     job_dir: Path,
     n_cores: int = 4,
@@ -717,6 +735,12 @@ if PARSL_AVAILABLE:
         job_id: int,
         job_dir: str,
         orca_config: dict,
+        job_payload: dict[str, Any] | None = None,
+        root_dir: str | None = None,
+        job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
+        n_cores: int = 4,
+        setup_func: Callable | None = None,
+        force_root_dir: bool = False,
         ld_library_path: str | None = None,
         mpirun_path: str | None = None,
         timeout_seconds: int = 7200,
@@ -756,7 +780,25 @@ if PARSL_AVAILABLE:
         import time
         from pathlib import Path
 
-        job_dir_path = Path(job_dir)
+        if job_payload is not None:
+            if root_dir is None:
+                return {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": "Missing root_dir for deferred job preparation",
+                }
+            job_record = _deserialize_job_record(job_payload)
+            job_dir_path = prepare_job_directory(
+                job_record,
+                Path(root_dir),
+                job_dir_pattern=job_dir_pattern,
+                orca_config=orca_config,
+                n_cores=n_cores,
+                setup_func=setup_func,
+                force_root_dir=force_root_dir,
+            )
+        else:
+            job_dir_path = Path(job_dir)
         optimizer = orca_config.get("optimizer")
 
         # Determine command based on optimizer
@@ -1874,22 +1916,34 @@ def submit_batch_parsl(
                 continue
 
             job = claimed_jobs[0]
+            job_dir_name = render_job_dir_pattern(
+                job_dir_pattern,
+                orig_index=job.orig_index,
+                job_id=job.id,
+            )
+            if job.job_dir and not reroot:
+                job_dir = Path(job.job_dir)
+            else:
+                job_dir = root_dir / job_dir_name
             try:
-                job_dir = prepare_job_directory(
-                    job,
-                    root_dir,
-                    job_dir_pattern=job_dir_pattern,
-                    orca_config=config,
-                    n_cores=n_cores,
-                    setup_func=setup_func,
-                    force_root_dir=reroot,
-                )
                 workflow.update_job_metrics_bulk(
                     [{"job_id": job.id, "job_dir": str(job_dir)}]
                 )
-                print(f"Prepared job {job.id} in {job_dir}")
+                if scheduler_key == "flux":
+                    job_dir = prepare_job_directory(
+                        job,
+                        root_dir,
+                        job_dir_pattern=job_dir_pattern,
+                        orca_config=config,
+                        n_cores=n_cores,
+                        setup_func=setup_func,
+                        force_root_dir=reroot,
+                    )
+                    print(f"Prepared job {job.id} in {job_dir}")
+                else:
+                    print(f"Reserved job {job.id} for worker preparation in {job_dir}")
             except Exception as e:
-                print(f"FAILED to prepare job {job.id}: {e}")
+                print(f"FAILED to stage job {job.id}: {e}")
                 pending_updates.append({"job_id": job.id, "status": JobStatus.TO_RUN})
                 log_job_result(wandb_run, job.id, "requeued")
                 _flush_if_buffered()
@@ -1899,6 +1953,12 @@ def submit_batch_parsl(
                 job_id=job.id,
                 job_dir=str(job_dir),
                 orca_config=dict(config),
+                job_payload=None if scheduler_key == "flux" else _serialize_job_record(job),
+                root_dir=None if scheduler_key == "flux" else str(root_dir),
+                job_dir_pattern=job_dir_pattern,
+                n_cores=n_cores,
+                setup_func=setup_func,
+                force_root_dir=reroot,
                 ld_library_path=ld_library_path,
                 mpirun_path=mpirun_path,
                 timeout_seconds=timeout_seconds,
