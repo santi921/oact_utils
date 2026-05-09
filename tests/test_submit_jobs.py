@@ -817,6 +817,7 @@ class TestSubmitJobsCli:
 
         def fake_recover_orphaned_jobs(workflow, scheduler, **kwargs):
             captured["recovered_scheduler"] = scheduler
+            captured["recover_kwargs"] = kwargs
             return {
                 "recovered": 7,
                 "completed": 0,
@@ -848,7 +849,69 @@ class TestSubmitJobsCli:
         sj.main()
 
         assert captured["recovered_scheduler"] == "pbspro"
+        assert captured["recover_kwargs"]["root_dir"] is None
         assert captured["submitted"] is True
+
+    def test_use_parsl_reroot_passes_recovery_fallback_path(
+        self, monkeypatch, tmp_path
+    ):
+        """Parsl startup should pass reroot fallback info into orphan recovery."""
+        from oact_utilities.workflows import submit_jobs as sj
+
+        captured: dict[str, object] = {}
+
+        class DummyWorkflow:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def close(self):
+                pass
+
+        def fake_submit_batch_parsl(**kwargs):
+            return []
+
+        def fake_recover_orphaned_jobs(workflow, scheduler, **kwargs):
+            captured["scheduler"] = scheduler
+            captured["kwargs"] = kwargs
+            return {
+                "recovered": 0,
+                "completed": 0,
+                "failed": 0,
+                "reset": 0,
+                "dead_jobs": 0,
+                "skipped": 0,
+            }
+
+        monkeypatch.setattr(sj, "ArchitectorWorkflow", DummyWorkflow)
+        monkeypatch.setattr(sj, "submit_batch_parsl", fake_submit_batch_parsl)
+        monkeypatch.setattr(
+            "oact_utilities.workflows.dashboard.recover_orphaned_jobs",
+            fake_recover_orphaned_jobs,
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "submit_jobs.py",
+                str(tmp_path / "workflow.db"),
+                str(tmp_path / "jobs"),
+                "--use-parsl",
+                "--scheduler",
+                "pbspro",
+                "--reroot",
+                "--job-dir-pattern",
+                "{formula}_q{charge}_m{spin}_idx{orig_index}",
+            ],
+        )
+
+        sj.main()
+
+        assert captured["scheduler"] == "pbspro"
+        assert captured["kwargs"]["root_dir"] == str(tmp_path / "jobs")
+        assert (
+            captured["kwargs"]["job_dir_pattern"]
+            == "{formula}_q{charge}_m{spin}_idx{orig_index}"
+        )
 
 
 class TestFluxSellaJobFile:

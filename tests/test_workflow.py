@@ -1294,6 +1294,118 @@ def test_recover_orphans_all_active(tmp_path, monkeypatch):
         assert len(jobs) == 1
 
 
+def test_recover_orphans_reroot_keeps_existing_original_path(tmp_path, monkeypatch):
+    """Recovery should prefer the DB job_dir when it still exists."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        charge=0,
+        spin=1,
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    original_dir = tmp_path / "original" / "job_0"
+    original_dir.mkdir(parents=True)
+
+    fallback_root = tmp_path / "reroot"
+    fallback_dir = fallback_root / "job_0"
+    fallback_dir.mkdir(parents=True)
+
+    seen_dirs: list[str] = []
+
+    def mock_check(job_dir, **kwargs):
+        seen_dirs.append(str(job_dir))
+        return 0
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.mark_jobs_as_running([1], worker_id="slurm_100")
+        workflow.update_job_metrics(1, job_dir=str(original_dir))
+
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: set(),
+        )
+        monkeypatch.setattr(
+            "oact_utilities.workflows.dashboard.check_job_termination",
+            mock_check,
+        )
+
+        result = recover_orphaned_jobs(
+            workflow,
+            scheduler="slurm",
+            root_dir=fallback_root,
+            job_dir_pattern="job_{orig_index}",
+        )
+
+        assert result["reset"] == 1
+        assert seen_dirs == [str(original_dir)]
+
+
+def test_recover_orphans_reroots_when_original_path_missing(tmp_path, monkeypatch):
+    """Recovery should fall back to root_dir + pattern when DB job_dir is gone."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        charge=0,
+        spin=1,
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    missing_original = tmp_path / "missing" / "job_0"
+    fallback_root = tmp_path / "reroot"
+    fallback_dir = fallback_root / "job_0"
+    fallback_dir.mkdir(parents=True)
+
+    seen_dirs: list[str] = []
+
+    def mock_check(job_dir, **kwargs):
+        seen_dirs.append(str(job_dir))
+        return 0
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.mark_jobs_as_running([1], worker_id="slurm_100")
+        workflow.update_job_metrics(1, job_dir=str(missing_original))
+
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: set(),
+        )
+        monkeypatch.setattr(
+            "oact_utilities.workflows.dashboard.check_job_termination",
+            mock_check,
+        )
+
+        result = recover_orphaned_jobs(
+            workflow,
+            scheduler="slurm",
+            root_dir=fallback_root,
+            job_dir_pattern="job_{orig_index}",
+        )
+
+        assert result["reset"] == 1
+        assert seen_dirs == [str(fallback_dir)]
+
+
 # --- Tests for DELETE journal mode (Change 1) ---
 
 

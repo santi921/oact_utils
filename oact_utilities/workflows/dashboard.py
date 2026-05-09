@@ -1489,6 +1489,8 @@ def show_running_jobs(workflow: ArchitectorWorkflow, limit: int = 20):
 def recover_orphaned_jobs(
     workflow: ArchitectorWorkflow,
     scheduler: str,
+    root_dir: str | Path | None = None,
+    job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     hours_cutoff: float = 24.0,
     verbose: bool = False,
 ) -> dict[str, int]:
@@ -1507,6 +1509,11 @@ def recover_orphaned_jobs(
     Args:
         workflow: ArchitectorWorkflow instance.
         scheduler: Scheduler type ("slurm", "pbspro", or "flux").
+        root_dir: Optional fallback root directory for rerooting orphan path
+            checks when the DB's stored job_dir no longer exists.
+        job_dir_pattern: Pattern used to reconstruct a fallback job_dir under
+            ``root_dir``. Supports {hostname}, {orig_index}, {id}, {formula},
+            {charge}, and {spin}.
         hours_cutoff: Hours threshold for timeout detection.
         verbose: Print per-job details.
 
@@ -1577,13 +1584,34 @@ def recover_orphaned_jobs(
     failed_updates: list[tuple[int, str]] = []  # (job_id, error_msg)
     reset_ids: list[int] = []
 
+    fallback_root = Path(root_dir) if root_dir is not None else None
+
     for job in orphans:
-        job_dir = job.job_dir
-        if not job_dir:
+        job_dir_path: Path | None = None
+        if job.job_dir:
+            candidate = Path(job.job_dir)
+            if candidate.is_dir():
+                job_dir_path = candidate
+
+        if job_dir_path is None and fallback_root is not None:
+            fallback_dir = fallback_root / render_job_dir_pattern(
+                job_dir_pattern,
+                orig_index=job.orig_index,
+                job_id=job.id,
+                elements=job.elements,
+                charge=job.charge,
+                spin=job.spin,
+            )
+            if fallback_dir.is_dir():
+                job_dir_path = fallback_dir
+
+        if job_dir_path is None:
             reset_ids.append(job.id)
             if verbose:
-                print(f"  Job {job.id}: no job_dir -- reset to TO_RUN")
+                print(f"  Job {job.id}: no recoverable job_dir -- reset to TO_RUN")
             continue
+
+        job_dir = str(job_dir_path)
 
         # Check output files on disk (content-based, preserves content > age rule)
         disk_status = check_job_termination(job_dir, hours_cutoff=hours_cutoff)

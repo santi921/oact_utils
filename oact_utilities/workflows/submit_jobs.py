@@ -3047,6 +3047,8 @@ def main():
         recovery_result = recover_orphaned_jobs(
             workflow,
             scheduler=args.scheduler,
+            root_dir=args.root_dir if args.reroot else None,
+            job_dir_pattern=effective_job_dir_pattern,
         )
         print(
             f"Launch-time orphan recovery touched {recovery_result['recovered']} "
