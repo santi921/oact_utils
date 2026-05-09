@@ -17,6 +17,7 @@ from oact_utilities.workflows.submit_jobs import (
     DEFAULT_ORCA_PATHS,
     OrcaConfig,
     _classify_parsl_future_failure,
+    _classify_claimed_job,
     _flush_pending_updates,
     _get_scheduler_job_id,
     _is_manager_lost_exception,
@@ -125,6 +126,48 @@ class TestParslJobSerialization:
         assert restored.geometry == mock_job_record.geometry
         assert restored.charge == mock_job_record.charge
         assert restored.spin == mock_job_record.spin
+
+
+class TestClaimedJobClassification:
+    """Tests for coordinator-side claimed-job classification."""
+
+    def test_marker_blocked_job_is_classified_without_submission(
+        self, mock_job_record, tmp_path
+    ):
+        """Marker-blocked claimed jobs should be filtered before Parsl submit."""
+        job_dir = tmp_path / "job_42"
+        job_dir.mkdir()
+        (job_dir / ".do_not_rerun.json").write_text("{}")
+        mock_job_record.job_dir = str(job_dir)
+
+        result = _classify_claimed_job(
+            mock_job_record,
+            tmp_path,
+            "job_{orig_index}",
+            "pbspro",
+            {"orca_path": "/fake/path/to/orca"},
+            4,
+        )
+
+        assert result["action"] == "marker_blocked"
+        assert result["job_id"] == mock_job_record.id
+
+    def test_slurm_claimed_job_returns_submit_payload(
+        self, mock_job_record, tmp_path
+    ):
+        """Deferred-prep schedulers should return a submit-ready payload."""
+        result = _classify_claimed_job(
+            mock_job_record,
+            tmp_path,
+            "job_{orig_index}",
+            "slurm",
+            {"orca_path": "/fake/path/to/orca"},
+            8,
+        )
+
+        assert result["action"] == "submit_ready"
+        assert result["job_id"] == mock_job_record.id
+        assert result["job_payload"]["geometry"] == mock_job_record.geometry
 
 
 class TestPrepareJobDirectory:
@@ -741,6 +784,58 @@ class TestSubmitJobsCli:
         sj.main()
 
         assert captured["queue"] == "frontier_lg"
+
+    def test_use_parsl_recovers_orphaned_rows_on_launch(self, monkeypatch, tmp_path):
+        """Parsl startup should run orphan recovery before claiming new work."""
+        from oact_utilities.workflows import submit_jobs as sj
+
+        captured: dict[str, object] = {}
+
+        class DummyWorkflow:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def close(self):
+                pass
+
+        def fake_submit_batch_parsl(**kwargs):
+            captured["submitted"] = True
+            return []
+
+        def fake_recover_orphaned_jobs(workflow, scheduler, **kwargs):
+            captured["recovered_scheduler"] = scheduler
+            return {
+                "recovered": 7,
+                "completed": 0,
+                "failed": 0,
+                "reset": 7,
+                "dead_jobs": 1,
+                "skipped": 0,
+            }
+
+        monkeypatch.setattr(sj, "ArchitectorWorkflow", DummyWorkflow)
+        monkeypatch.setattr(sj, "submit_batch_parsl", fake_submit_batch_parsl)
+        monkeypatch.setattr(
+            "oact_utilities.workflows.dashboard.recover_orphaned_jobs",
+            fake_recover_orphaned_jobs,
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "submit_jobs.py",
+                str(tmp_path / "workflow.db"),
+                str(tmp_path / "jobs"),
+                "--use-parsl",
+                "--scheduler",
+                "pbspro",
+            ],
+        )
+
+        sj.main()
+
+        assert captured["recovered_scheduler"] == "pbspro"
+        assert captured["submitted"] is True
 
 
 class TestFluxSellaJobFile:

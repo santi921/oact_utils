@@ -388,6 +388,129 @@ def _deserialize_job_record(job_payload: dict[str, Any]) -> Any:
     return SimpleNamespace(**job_payload)
 
 
+def _resolve_job_dir(
+    job: Any,
+    root_dir: Path,
+    job_dir_pattern: str,
+    force_root_dir: bool = False,
+) -> Path:
+    """Resolve the deterministic job directory for a job record."""
+    if job.job_dir and not force_root_dir:
+        return Path(job.job_dir)
+    return root_dir / render_job_dir_pattern(
+        job_dir_pattern,
+        orig_index=job.orig_index,
+        job_id=job.id,
+    )
+
+
+def _find_existing_job_dir(
+    job: Any,
+    root_dir: Path,
+    job_dir_pattern: str,
+    force_root_dir: bool = False,
+) -> Path | None:
+    """Return an existing on-disk job directory if one can be resolved."""
+    if job.job_dir and not force_root_dir:
+        job_dir = Path(job.job_dir)
+        if job_dir.is_dir():
+            return job_dir
+
+    candidate = root_dir / render_job_dir_pattern(
+        job_dir_pattern,
+        orig_index=job.orig_index,
+        job_id=job.id,
+    )
+    if candidate.is_dir():
+        return candidate
+    return None
+
+
+def _classify_claimed_job(
+    job: Any,
+    root_dir: Path,
+    job_dir_pattern: str,
+    scheduler: str,
+    orca_config: OrcaConfig,
+    n_cores: int,
+    setup_func: Callable | None = None,
+    force_root_dir: bool = False,
+) -> dict[str, Any]:
+    """Classify a claimed job without mutating shared coordinator state."""
+    existing_job_dir = _find_existing_job_dir(
+        job,
+        root_dir,
+        job_dir_pattern,
+        force_root_dir=force_root_dir,
+    )
+    job_dir = _resolve_job_dir(
+        job,
+        root_dir,
+        job_dir_pattern,
+        force_root_dir=force_root_dir,
+    )
+
+    marker_paths = []
+    if existing_job_dir is not None:
+        marker_paths.append(existing_job_dir)
+    if job_dir not in marker_paths:
+        marker_paths.append(job_dir)
+
+    for marker_path in marker_paths:
+        if is_marker_blocked(marker_path):
+            return {
+                "action": "marker_blocked",
+                "job_id": job.id,
+                "job_dir": str(job_dir),
+            }
+
+    if existing_job_dir is not None:
+        status = check_job_termination(str(existing_job_dir), hours_cutoff=168)
+        if status == 1:
+            return {
+                "action": "completed_on_disk",
+                "job_id": job.id,
+                "job_dir": str(existing_job_dir),
+            }
+        if status == -1:
+            error_message = None
+            try:
+                log_file = pull_log_file(str(existing_job_dir))
+                error_message = parse_failure_reason(log_file)
+            except (FileNotFoundError, OSError):
+                pass
+            return {
+                "action": "failed_on_disk",
+                "job_id": job.id,
+                "job_dir": str(existing_job_dir),
+                "error_message": error_message,
+            }
+
+    if scheduler == "flux":
+        prepared_job_dir = prepare_job_directory(
+            job,
+            root_dir,
+            job_dir_pattern=job_dir_pattern,
+            orca_config=orca_config,
+            n_cores=n_cores,
+            setup_func=setup_func,
+            force_root_dir=force_root_dir,
+        )
+        return {
+            "action": "submit_ready",
+            "job_id": job.id,
+            "job_dir": str(prepared_job_dir),
+            "job_payload": None,
+        }
+
+    return {
+        "action": "submit_ready",
+        "job_id": job.id,
+        "job_dir": str(job_dir),
+        "job_payload": _serialize_job_record(job),
+    }
+
+
 def write_flux_job_file(
     job_dir: Path,
     n_cores: int = 4,
@@ -1631,7 +1754,7 @@ def submit_batch_parsl(
         return []
 
     import signal
-    from concurrent.futures import FIRST_COMPLETED, wait
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 
     import parsl
 
@@ -1881,79 +2004,124 @@ def submit_batch_parsl(
 
     def _claim_and_submit_window(task_map_fh: Any) -> bool:
         nonlocal pending_updates
-        claimed_any = False
+        needed = active_window - len(active_futures)
+        if needed <= 0:
+            return False
 
-        while len(active_futures) < active_window:
-            claimed_jobs = workflow.claim_jobs_for_submission(
-                limit=1,
-                worker_id=_scheduler_job_id,
-                max_fail_count=max_fail_count,
-                randomize=randomize,
-            )
-            if not claimed_jobs:
-                return claimed_any
+        claimed_jobs = workflow.claim_jobs_for_submission(
+            limit=needed,
+            worker_id=_scheduler_job_id,
+            max_fail_count=max_fail_count,
+            randomize=randomize,
+        )
+        if not claimed_jobs:
+            return False
 
-            claimed_any = True
-
-            claimed_jobs = _filter_marker_jobs(
-                claimed_jobs,
-                root_dir,
-                job_dir_pattern,
-                workflow,
-                force_root_dir=reroot,
-            )
-            if not claimed_jobs:
-                continue
-
-            claimed_jobs = _skip_finished_on_disk(
-                claimed_jobs,
-                root_dir,
-                job_dir_pattern,
-                workflow,
-                force_root_dir=reroot,
-            )
-            if not claimed_jobs:
-                continue
-
-            job = claimed_jobs[0]
-            job_dir_name = render_job_dir_pattern(
-                job_dir_pattern,
-                orig_index=job.orig_index,
-                job_id=job.id,
-            )
-            if job.job_dir and not reroot:
-                job_dir = Path(job.job_dir)
-            else:
-                job_dir = root_dir / job_dir_name
-            try:
-                workflow.update_job_metrics_bulk(
-                    [{"job_id": job.id, "job_dir": str(job_dir)}]
-                )
-                if scheduler_key == "flux":
-                    job_dir = prepare_job_directory(
-                        job,
-                        root_dir,
-                        job_dir_pattern=job_dir_pattern,
-                        orca_config=config,
-                        n_cores=n_cores,
-                        setup_func=setup_func,
-                        force_root_dir=reroot,
+        classify_workers = min(32, len(claimed_jobs))
+        classified_results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=classify_workers) as executor:
+            future_to_job_id = {
+                executor.submit(
+                    _classify_claimed_job,
+                    job,
+                    root_dir,
+                    job_dir_pattern,
+                    scheduler_key,
+                    config,
+                    n_cores,
+                    setup_func,
+                    reroot,
+                ): job.id
+                for job in claimed_jobs
+            }
+            for classified_future in as_completed(future_to_job_id):
+                job_id = future_to_job_id[classified_future]
+                try:
+                    classified_results.append(classified_future.result())
+                except Exception as e:
+                    classified_results.append(
+                        {
+                            "action": "requeue",
+                            "job_id": job_id,
+                            "error": str(e),
+                        }
                     )
-                    print(f"Prepared job {job.id} in {job_dir}")
+
+        claimed_job_map = {job.id: job for job in claimed_jobs}
+        for result in classified_results:
+            job_id = result.get("job_id")
+            action = result["action"]
+
+            if action == "marker_blocked":
+                job_dir = result["job_dir"]
+                pending_updates.append(
+                    {
+                        "job_id": job_id,
+                        "status": JobStatus.FAILED,
+                        "error_message": MARKER_ERROR_MESSAGE,
+                        "increment_fail_count": True,
+                    }
+                )
+                print(f"Skipped job {job_id} due to .do_not_rerun.json marker")
+                log_job_result(wandb_run, job_id, "failed")
+                _flush_if_buffered()
+                continue
+
+            if action == "completed_on_disk":
+                job_dir = result["job_dir"]
+                pending_updates.append(
+                    {
+                        "job_id": job_id,
+                        "status": JobStatus.COMPLETED,
+                        "metrics": {"job_dir": job_dir},
+                    }
+                )
+                print(f"Detected completed job {job_id} on disk")
+                log_job_result(wandb_run, job_id, "completed")
+                _flush_if_buffered()
+                continue
+
+            if action == "failed_on_disk":
+                job_dir = result["job_dir"]
+                pending_updates.append(
+                    {
+                        "job_id": job_id,
+                        "status": JobStatus.FAILED,
+                        "error_message": result.get("error_message"),
+                        "increment_fail_count": True,
+                    }
+                )
+                print(f"Detected failed job {job_id} on disk")
+                log_job_result(wandb_run, job_id, "failed")
+                _flush_if_buffered()
+                continue
+
+            if action == "requeue":
+                pending_updates.append({"job_id": job_id, "status": JobStatus.TO_RUN})
+                print(f"FAILED to stage job {job_id}: {result.get('error')}")
+                log_job_result(wandb_run, job_id, "requeued")
+                _flush_if_buffered()
+                continue
+
+            job_dir = result["job_dir"]
+            try:
+                workflow.update_job_metrics_bulk([{"job_id": job_id, "job_dir": job_dir}])
+                if scheduler_key == "flux":
+                    print(f"Prepared job {job_id} in {job_dir}")
                 else:
-                    print(f"Reserved job {job.id} for worker preparation in {job_dir}")
+                    print(f"Reserved job {job_id} for worker preparation in {job_dir}")
             except Exception as e:
-                print(f"FAILED to stage job {job.id}: {e}")
-                pending_updates.append({"job_id": job.id, "status": JobStatus.TO_RUN})
-                log_job_result(wandb_run, job.id, "requeued")
+                pending_updates.append({"job_id": job_id, "status": JobStatus.TO_RUN})
+                print(f"FAILED to stage job {job_id}: {e}")
+                log_job_result(wandb_run, job_id, "requeued")
                 _flush_if_buffered()
                 continue
 
             future = orca_job_wrapper(
-                job_id=job.id,
-                job_dir=str(job_dir),
+                job_id=job_id,
+                job_dir=job_dir,
                 orca_config=dict(config),
-                job_payload=None if scheduler_key == "flux" else _serialize_job_record(job),
+                job_payload=result.get("job_payload"),
                 root_dir=None if scheduler_key == "flux" else str(root_dir),
                 job_dir_pattern=job_dir_pattern,
                 n_cores=n_cores,
@@ -1963,16 +2131,16 @@ def submit_batch_parsl(
                 mpirun_path=mpirun_path,
                 timeout_seconds=timeout_seconds,
             )
-            active_futures[future] = (job.id, str(job_dir))
-            _track_submitted(job.id)
-            task_map_fh.write(f"{future.tid}\t{job.id}\t{job_dir}\n")
-            print(f"Submitted job {job.id} to Parsl")
+            active_futures[future] = (job_id, job_dir)
+            _track_submitted(job_id)
+            task_map_fh.write(f"{future.tid}\t{job_id}\t{job_dir}\n")
+            print(f"Submitted job {job_id} to Parsl")
             _flush_if_buffered()
 
             if _shutdown_requested:
-                return claimed_any
+                return True
 
-        return claimed_any
+        return True
 
     try:
         print("Monitoring job execution...")
@@ -2859,6 +3027,17 @@ def main():
 
     # Submit based on mode
     if args.use_parsl:
+        from .dashboard import recover_orphaned_jobs
+
+        recovery_result = recover_orphaned_jobs(
+            workflow,
+            scheduler=args.scheduler,
+        )
+        print(
+            f"Launch-time orphan recovery touched {recovery_result['recovered']} "
+            "RUNNING row(s)"
+        )
+
         # Initialize W&B run if requested
         wandb_run = None
         if args.wandb_project:

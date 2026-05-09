@@ -1488,7 +1488,7 @@ def recover_orphaned_jobs(
 
     Args:
         workflow: ArchitectorWorkflow instance.
-        scheduler: Scheduler type ("slurm" or "flux").
+        scheduler: Scheduler type ("slurm", "pbspro", or "flux").
         hours_cutoff: Hours threshold for timeout detection.
         verbose: Print per-job details.
 

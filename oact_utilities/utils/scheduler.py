@@ -17,6 +17,7 @@ import subprocess
 #       that match the $FLUX_JOB_ID env var format.
 _SCHEDULER_COMMANDS: dict[str, list[str]] = {
     "slurm": ["squeue", "-u", "{user}", "-h", "-o", "%A"],
+    "pbspro": ["qstat", "-u", "{user}"],
     "flux": ["flux", "jobs", "--filter=pending,running,completing", "-no", "{{id}}"],
 }
 
@@ -28,7 +29,7 @@ def get_active_scheduler_jobs(scheduler: str) -> set[str] | None:
     as a set for O(1) membership testing.
 
     Args:
-        scheduler: Scheduler type ("slurm" or "flux").
+        scheduler: Scheduler type ("slurm", "pbspro", or "flux").
 
     Returns:
         set[str]: Job IDs of active jobs. Empty set means "nothing is running,
@@ -57,7 +58,23 @@ def get_active_scheduler_jobs(scheduler: str) -> set[str] | None:
         if result.returncode != 0:
             return None
         output = result.stdout.strip()
-        return set(output.split("\n")) if output else set()
+        if not output:
+            return set()
+
+        if scheduler == "pbspro":
+            active_jobs: set[str] = set()
+            for line in output.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                first_token = stripped.split()[0]
+                if first_token in {"Job", "---"}:
+                    continue
+                if first_token[0].isdigit():
+                    active_jobs.add(first_token)
+            return active_jobs
+
+        return set(output.split("\n"))
     except (subprocess.TimeoutExpired, OSError):
         # OSError covers FileNotFoundError (command not found) and other
         # OS-level errors (permissions, etc.)

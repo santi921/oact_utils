@@ -1083,6 +1083,29 @@ def test_get_active_scheduler_jobs_flux_mock(monkeypatch):
     assert active == {"f2xgUVYLJs27", "f2xgUVdyx8JK"}
 
 
+def test_get_active_scheduler_jobs_pbspro_mock(monkeypatch):
+    """get_active_scheduler_jobs returns PBS Pro job IDs from qstat output."""
+    from unittest.mock import MagicMock
+
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        "Job id            Name             User              Time Use S Queue\n"
+        "----------------  ---------------- ----------------  -------- - -----\n"
+        "123.server        job_a            ritwik            00:01:00 R workq\n"
+        "124.server        job_b            ritwik            00:00:00 Q workq\n"
+    )
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run", lambda *a, **kw: mock_result
+    )
+
+    active = get_active_scheduler_jobs("pbspro")
+    assert active == {"123.server", "124.server"}
+
+
 def test_get_active_scheduler_jobs_empty(monkeypatch):
     """Empty scheduler queue returns empty set (not None)."""
     from unittest.mock import MagicMock
