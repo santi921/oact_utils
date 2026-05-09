@@ -386,11 +386,6 @@ def _serialize_job_record(job_record: Any) -> dict[str, Any]:
     }
 
 
-def _deserialize_job_record(job_payload: dict[str, Any]) -> Any:
-    """Rebuild an attribute-based job record from a serialized payload."""
-    return SimpleNamespace(**job_payload)
-
-
 def _resolve_job_dir(
     job: Any,
     root_dir: Path,
@@ -913,10 +908,13 @@ if PARSL_AVAILABLE:
         """
         import os
         import signal
+        import shutil
         import subprocess
         import tempfile
         import time
         from pathlib import Path
+        from types import SimpleNamespace
+        from oact_utilities.workflows.submit_jobs import prepare_job_directory
 
         if job_payload is not None:
             if root_dir is None:
@@ -925,7 +923,7 @@ if PARSL_AVAILABLE:
                     "status": "failed",
                     "error": "Missing root_dir for deferred job preparation",
                 }
-            job_record = _deserialize_job_record(job_payload)
+            job_record = SimpleNamespace(**job_payload)
             job_dir_path = prepare_job_directory(
                 job_record,
                 Path(root_dir),
@@ -1010,7 +1008,7 @@ if PARSL_AVAILABLE:
         # Give each worker a private TMPDIR inside the job directory so that
         # ORCA's temp files (orca_atom*.out/.gbw, MPI shared-memory segments)
         # don't collide between concurrent jobs on the same node.
-        tmp_dir = tempfile.mkdtemp(prefix="orca_tmp_", dir=job_dir)
+        tmp_dir = tempfile.mkdtemp(prefix="orca_tmp_", dir=job_dir_path)
         env["TMPDIR"] = tmp_dir
 
         # Prevent OpenMPI from using shared-memory transport between unrelated
@@ -1071,7 +1069,7 @@ if PARSL_AVAILABLE:
 
             proc = subprocess.Popen(
                 cmd,
-                cwd=job_dir,
+                cwd=job_dir_path,
                 stdout=f_out,
                 stderr=f_err,
                 env=env,
