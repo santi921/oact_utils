@@ -145,6 +145,9 @@ def submit_archive_transfer(
         config.source_endpoint_id,
         config.destination_endpoint_id,
         label=f"oact backup {archive.name}",
+        notify_on_succeeded=False,
+        notify_on_failed=False,
+        notify_on_inactive=False,
     )
     transfer_data.add_item(str(archive), destination_path)
 

@@ -642,6 +642,44 @@ class TestSubmitJobsCli:
             captured["mpirun_path"] == "/opt/custom/openmpi/bin/mpirun"
         )
 
+    def test_use_parsl_forwards_queue(self, monkeypatch, tmp_path):
+        """The --queue CLI option must reach submit_batch_parsl()."""
+        from oact_utilities.workflows import submit_jobs as sj
+
+        captured: dict[str, object] = {}
+
+        class DummyWorkflow:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def close(self):
+                pass
+
+        def fake_submit_batch_parsl(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(sj, "ArchitectorWorkflow", DummyWorkflow)
+        monkeypatch.setattr(sj, "submit_batch_parsl", fake_submit_batch_parsl)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "submit_jobs.py",
+                str(tmp_path / "workflow.db"),
+                str(tmp_path / "jobs"),
+                "--use-parsl",
+                "--scheduler",
+                "pbspro",
+                "--queue",
+                "frontier_lg",
+            ],
+        )
+
+        sj.main()
+
+        assert captured["queue"] == "frontier_lg"
+
 
 class TestFluxSellaJobFile:
     """Tests for Flux job file with Sella optimizer."""

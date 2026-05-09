@@ -78,10 +78,21 @@ def test_submit_archive_transfer_builds_expected_transfer(monkeypatch, tmp_path)
             self.auth_client = auth_client
 
     class FakeTransferData:
-        def __init__(self, source_endpoint, destination_endpoint, label):
+        def __init__(
+            self,
+            source_endpoint,
+            destination_endpoint,
+            label,
+            notify_on_succeeded,
+            notify_on_failed,
+            notify_on_inactive,
+        ):
             self.source_endpoint = source_endpoint
             self.destination_endpoint = destination_endpoint
             self.label = label
+            self.notify_on_succeeded = notify_on_succeeded
+            self.notify_on_failed = notify_on_failed
+            self.notify_on_inactive = notify_on_inactive
             self.items = []
 
         def add_item(self, source_path, destination_path):
@@ -126,6 +137,9 @@ def test_submit_archive_transfer_builds_expected_transfer(monkeypatch, tmp_path)
     assert submitted["authorizer"].refresh_token == "refresh-token"
     assert transfer_data.source_endpoint == "source-ep"
     assert transfer_data.destination_endpoint == "dest-ep"
+    assert transfer_data.notify_on_succeeded is False
+    assert transfer_data.notify_on_failed is False
+    assert transfer_data.notify_on_inactive is False
     assert transfer_data.items == [
         (str(archive_path.resolve()), "/globus/backups/job_1.tar.gz")
     ]

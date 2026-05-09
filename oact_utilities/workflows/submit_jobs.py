@@ -704,6 +704,8 @@ if PARSL_AVAILABLE:
         job_id: int,
         job_dir: str,
         orca_config: dict,
+        ld_library_path: str | None = None,
+        mpirun_path: str | None = None,
         timeout_seconds: int = 7200,
     ) -> dict:
         """Execute ORCA (or Sella) job within Parsl worker.
@@ -773,6 +775,45 @@ if PARSL_AVAILABLE:
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = "1"
 
+        # OpenPBS/PMIx state inherited by the worker can confuse ORCA's own
+        # nested OpenMPI launcher. Strip scheduler/session MPI env before ORCA.
+        for key in list(env):
+            if key.startswith(("PMI_", "PMIX_", "PRTE_", "OMPI_COMM_WORLD_")):
+                env.pop(key, None)
+        for key in (
+            "OMPI_MCA_ess",
+            "OMPI_MCA_orte_hnp_uri",
+            "OMPI_MCA_pmix",
+            "PMIX_SERVER_URI2",
+        ):
+            env.pop(key, None)
+
+        resolved_mpirun = mpirun_path or shutil.which("mpirun")
+        mpirun_bin_dir = (
+            os.path.dirname(resolved_mpirun)
+            if resolved_mpirun and os.path.isabs(resolved_mpirun)
+            else None
+        )
+        orca_bin_dir = (
+            os.path.dirname(orca_config.get("orca_path"))
+            if orca_config.get("orca_path")
+            and os.path.isabs(orca_config.get("orca_path"))
+            else None
+        )
+        path_entries = [entry for entry in [mpirun_bin_dir, orca_bin_dir] if entry]
+        path_entries = list(dict.fromkeys(path_entries))
+        if path_entries:
+            existing_path = env.get("PATH")
+            env["PATH"] = ":".join(
+                path_entries + ([existing_path] if existing_path else [])
+            )
+
+        if ld_library_path:
+            existing_ld = env.get("LD_LIBRARY_PATH")
+            env["LD_LIBRARY_PATH"] = (
+                f"{ld_library_path}:{existing_ld}" if existing_ld else ld_library_path
+            )
+
         # Give each worker a private TMPDIR inside the job directory so that
         # ORCA's temp files (orca_atom*.out/.gbw, MPI shared-memory segments)
         # don't collide between concurrent jobs on the same node.
@@ -783,6 +824,7 @@ if PARSL_AVAILABLE:
         # ORCA instances that happen to share the same node.  vader (or sm)
         # uses /dev/shm files whose names can collide.
         env["OMPI_MCA_btl"] = "self,tcp"
+        env["OMPI_MCA_plm"] = "isolated"
 
         # Restrict ORCA's mpirun to the local node only.  In multi-node
         # SLURM blocks, mpirun would otherwise read the SLURM hostfile and
@@ -799,9 +841,35 @@ if PARSL_AVAILABLE:
         env["SLURM_NNODES"] = "1"
 
         start_time = time.time()
+        deadline = start_time + timeout_seconds
 
         proc = None
+        proc_pgid = None
         try:
+            def _process_group_is_alive() -> bool:
+                """Return True while any member of the launched process group lives."""
+                if proc_pgid is None:
+                    return proc is not None and proc.poll() is None
+                try:
+                    os.killpg(proc_pgid, 0)
+                except ProcessLookupError:
+                    return False
+                except PermissionError:
+                    return True
+                else:
+                    return True
+
+            def _kill_process_group() -> None:
+                """Terminate the launched process group if it still exists."""
+                if proc_pgid is not None:
+                    try:
+                        os.killpg(proc_pgid, signal.SIGKILL)
+                        return
+                    except ProcessLookupError:
+                        return
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+
             # Write output directly to files to avoid pipe buffer deadlocks.
             # start_new_session=True puts the process + children in a new
             # process group so we can kill the entire tree on timeout.
@@ -816,12 +884,14 @@ if PARSL_AVAILABLE:
                 env=env,
                 start_new_session=True,
             )
+            proc_pgid = os.getpgid(proc.pid)
 
             try:
-                proc.wait(timeout=timeout_seconds)
+                remaining = max(0.0, deadline - time.time())
+                proc.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 # Kill the entire process group (ORCA + mpirun + orca_main workers)
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                _kill_process_group()
                 proc.wait()
                 return {
                     "job_id": job_id,
@@ -832,87 +902,79 @@ if PARSL_AVAILABLE:
                 f_out.close()
                 f_err.close()
 
+            while _process_group_is_alive():
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    _kill_process_group()
+                    proc.wait()
+                    return {
+                        "job_id": job_id,
+                        "status": "timeout",
+                        "error": f"Job exceeded {timeout_seconds}s timeout",
+                    }
+                time.sleep(min(1.0, remaining))
+
             elapsed = time.time() - start_time
 
-            if proc.returncode == 0:
-                # For Sella jobs, check sella_status.txt — the process can
-                # exit 0 even when the optimization did not converge.
-                if optimizer == "sella":
-                    status_path = job_dir_path / "sella_status.txt"
-                    try:
-                        status_text = status_path.read_text()
-                        if "NOT_CONVERGED" in status_text or "ERROR" in status_text:
-                            return {
-                                "job_id": job_id,
-                                "status": "failed",
-                                "error": "Sella optimization did not converge",
-                                "wall_time": elapsed,
-                            }
-                    except OSError:
-                        # Status file missing/unreadable after clean exit —
-                        # something unexpected happened; fail safe.
-                        return {
-                            "job_id": job_id,
-                            "status": "failed",
-                            "error": "Sella status file not found after process exit",
-                            "wall_time": elapsed,
-                        }
+            if optimizer == "sella":
+                status_path = job_dir_path / "sella_status.txt"
+                try:
+                    status_text = status_path.read_text()
+                    if "CONVERGED" in status_text and "NOT_CONVERGED" not in status_text:
+                        termination_status = 1
+                    elif "NOT_CONVERGED" in status_text or "ERROR" in status_text:
+                        termination_status = -1
+                    else:
+                        termination_status = 0
+                except OSError:
+                    termination_status = -1
+            else:
+                try:
+                    with open(stdout_path, errors="replace") as fh:
+                        last_lines = fh.readlines()[-10:]
+                except OSError:
+                    last_lines = []
+
+                if any("ORCA TERMINATED NORMALLY" in line for line in last_lines):
+                    termination_status = 1
+                elif any(
+                    "aborting the run" in line or "Error" in line
+                    for line in last_lines
+                ):
+                    termination_status = -1
                 else:
-                    # ORCA can exit 0 even when an MPI child process
-                    # (e.g. orca_leanscf_mpi) fails with "aborting the
-                    # run".  Verify the output file actually shows normal
-                    # termination before trusting the return code.
-                    from collections import deque
+                    termination_status = 0
 
-                    out_path = job_dir_path / "orca.out"
-                    if out_path.exists():
-                        try:
-                            with open(out_path, errors="replace") as fh:
-                                tail = deque(fh, maxlen=10)
-                            has_normal = any(
-                                "ORCA TERMINATED NORMALLY" in ln for ln in tail
-                            )
-                            has_abort = any(
-                                "aborting the run" in ln or "Error" in ln for ln in tail
-                            )
-                            if not has_normal and has_abort:
-                                err_tail = "".join(tail).strip()[-300:]
-                                return {
-                                    "job_id": job_id,
-                                    "status": "failed",
-                                    "error": (
-                                        "ORCA exited 0 but output shows "
-                                        f"error: {err_tail}"
-                                    ),
-                                    "wall_time": elapsed,
-                                }
-                        except OSError:
-                            pass  # Fall through to completed
-
+            if termination_status == 1:
                 return {
                     "job_id": job_id,
                     "status": "completed",
                     "wall_time": elapsed,
                 }
-            else:
-                # Read tail of stderr for error reporting
-                err_tail = ""
-                try:
-                    err_tail = stderr_path.read_text()[-500:]
-                except Exception:
-                    pass
-                return {
-                    "job_id": job_id,
-                    "status": "failed",
-                    "error": f"ORCA exited with code {proc.returncode}",
-                    "stderr": err_tail,
-                }
+
+            err_tail = ""
+            try:
+                err_tail = stderr_path.read_text()[-500:]
+            except Exception:
+                pass
+
+            error_msg = (
+                f"ORCA exited with code {proc.returncode}"
+                if proc.returncode not in (None, 0)
+                else "ORCA process group exited without normal termination"
+            )
+            return {
+                "job_id": job_id,
+                "status": "failed",
+                "error": error_msg,
+                "stderr": err_tail,
+            }
 
         except Exception as e:
             # Kill process tree if it's still alive
-            if proc is not None and proc.poll() is None:
+            if _process_group_is_alive():
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    _kill_process_group()
                     proc.wait()
                 except Exception:
                     pass
@@ -1758,12 +1820,8 @@ def submit_batch_parsl(
         claimed_any = False
 
         while len(active_futures) < num_jobs:
-            claim_limit = num_jobs - len(active_futures)
-            if claim_limit <= 0:
-                return claimed_any
-
             claimed_jobs = workflow.claim_jobs_for_submission(
-                limit=claim_limit,
+                limit=1,
                 worker_id=_scheduler_job_id,
                 max_fail_count=max_fail_count,
                 randomize=randomize,
@@ -1793,55 +1851,41 @@ def submit_batch_parsl(
             if not claimed_jobs:
                 continue
 
-            print(f"Preparing {len(claimed_jobs)} jobs for Parsl submission...")
-            job_dir_updates: list[dict[str, str | int]] = []
-            prepared_jobs: list[tuple[int, str]] = []
-
-            for i, job in enumerate(claimed_jobs, 1):
-                try:
-                    job_dir = prepare_job_directory(
-                        job,
-                        root_dir,
-                        job_dir_pattern=job_dir_pattern,
-                        orca_config=config,
-                        n_cores=n_cores,
-                        setup_func=setup_func,
-                        force_root_dir=reroot,
-                    )
-                    job_dir_updates.append({"job_id": job.id, "job_dir": str(job_dir)})
-                    prepared_jobs.append((job.id, str(job_dir)))
-                    print(f"  [{i}/{len(claimed_jobs)}] Prepared {job_dir}")
-                except Exception as e:
-                    print(
-                        f"  [{i}/{len(claimed_jobs)}] FAILED to prepare job {job.id}: {e}"
-                    )
-                    pending_updates.append(
-                        {"job_id": job.id, "status": JobStatus.TO_RUN}
-                    )
-                    log_job_result(wandb_run, job.id, "requeued")
-
-            if job_dir_updates:
-                workflow.update_job_metrics_bulk(job_dir_updates)
-                print(
-                    f"Persisted {len(job_dir_updates)} job directories in one transaction"
+            job = claimed_jobs[0]
+            try:
+                job_dir = prepare_job_directory(
+                    job,
+                    root_dir,
+                    job_dir_pattern=job_dir_pattern,
+                    orca_config=config,
+                    n_cores=n_cores,
+                    setup_func=setup_func,
+                    force_root_dir=reroot,
                 )
-
-            if prepared_jobs:
-                print(f"Submitting {len(prepared_jobs)} jobs to Parsl...")
-
-            for job_id, job_dir in prepared_jobs:
-                future = orca_job_wrapper(
-                    job_id=job_id,
-                    job_dir=job_dir,
-                    orca_config=dict(config),
-                    ld_library_path=ld_library_path,
-                    mpirun_path=mpirun_path,
-                    timeout_seconds=timeout_seconds,
+                workflow.update_job_metrics_bulk(
+                    [{"job_id": job.id, "job_dir": str(job_dir)}]
                 )
-                active_futures[future] = (job_id, job_dir)
-                _track_submitted(job_id)
-                task_map_fh.write(f"{future.tid}\t{job_id}\t{job_dir}\n")
+                print(f"Prepared job {job.id} in {job_dir}")
+            except Exception as e:
+                print(f"FAILED to prepare job {job.id}: {e}")
+                pending_updates.append({"job_id": job.id, "status": JobStatus.TO_RUN})
+                log_job_result(wandb_run, job.id, "requeued")
                 _flush_if_buffered()
+                continue
+
+            future = orca_job_wrapper(
+                job_id=job.id,
+                job_dir=str(job_dir),
+                orca_config=dict(config),
+                ld_library_path=ld_library_path,
+                mpirun_path=mpirun_path,
+                timeout_seconds=timeout_seconds,
+            )
+            active_futures[future] = (job.id, str(job_dir))
+            _track_submitted(job.id)
+            task_map_fh.write(f"{future.tid}\t{job.id}\t{job_dir}\n")
+            print(f"Submitted job {job.id} to Parsl")
+            _flush_if_buffered()
 
             if _shutdown_requested:
                 return claimed_any
@@ -2773,6 +2817,7 @@ def main():
             init_blocks=args.init_blocks,
             min_blocks=args.min_blocks,
             walltime_hours=args.walltime_hours,
+            queue=args.queue,
             qos=args.qos,
             account=args.account,
             enable_monitoring=not args.no_parsl_monitoring,
