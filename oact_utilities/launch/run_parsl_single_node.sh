@@ -11,6 +11,10 @@
 #
 # Usage (SLURM):
 #   sbatch run_parsl_single_node.sh
+#
+# Enable Globus backup:
+#   bash run_parsl_single_node.sh --globus-transfer
+#   sbatch run_parsl_single_node.sh --globus-transfer
 # =============================================================================
 
 #SBATCH --account=ODEFN5169CYFZ
@@ -19,6 +23,11 @@
 #SBATCH --constraint=standard
 #SBATCH --job-name=parsl-single-node
 #SBATCH --nodes=1
+
+GLOBUS_TRANSFER_FLAG=""
+if [ "$1" = "--globus-transfer" ]; then
+    GLOBUS_TRANSFER_FLAG="--globus-transfer"
+fi
 
 # ---- Configuration (edit these) ----
 DB_PATH="/path/to/workflow.db"
@@ -39,14 +48,14 @@ WANDB_RUN_NAME=""       # display name in W&B UI (default: db filename stem)
 WANDB_RUN_ID=""         # resume an existing run across batches
 
 # Globus backup (optional). Endpoint values may also be provided by the
-# environment. Keep the access token in the environment instead of the command.
-GLOBUS_TRANSFER="${GLOBUS_TRANSFER:-0}"  # set to 1 to enable
+# environment. Use GLOBUS_TRANSFER_REFRESH_TOKEN for campaign runs.
 export GLOBUS_SOURCE_ENDPOINT_ID="${GLOBUS_SOURCE_ENDPOINT_ID:-}"
 export GLOBUS_DESTINATION_ENDPOINT_ID="${GLOBUS_DESTINATION_ENDPOINT_ID:-}"
 export GLOBUS_DEST_ROOT="${GLOBUS_DEST_ROOT:-}"
-export GLOBUS_ACCESS_TOKEN="${GLOBUS_ACCESS_TOKEN:-}"
+export GLOBUS_CLIENT_ID="${GLOBUS_CLIENT_ID:-}"
+export GLOBUS_TRANSFER_REFRESH_TOKEN="${GLOBUS_TRANSFER_REFRESH_TOKEN:-}"
+export GLOBUS_CLIENT_SECRET="${GLOBUS_CLIENT_SECRET:-}"  # optional
 GLOBUS_CONNECT_PERSONAL_BIN="${GLOBUS_CONNECT_PERSONAL_BIN:-globusconnectpersonal}"
-GLOBUS_TRANSFER_FLAG=""
 
 # ORCA settings
 FUNCTIONAL="wB97M-V"
@@ -60,14 +69,9 @@ SCF_MAXITER=500
 source ~/.bashrc
 conda activate "${CONDA_ENV}"
 
-if [ "${GLOBUS_TRANSFER}" = "1" ]; then
-    GLOBUS_TRANSFER_FLAG="--globus-transfer"
-    if command -v "${GLOBUS_CONNECT_PERSONAL_BIN}" >/dev/null 2>&1; then
-        GLOBUS_CONNECT_JOB_ID="${SLURM_JOB_ID:-${PBS_JOBID:-${FLUX_JOB_ID:-$$}}}"
-        nohup "${GLOBUS_CONNECT_PERSONAL_BIN}" -start >"/tmp/globusconnectpersonal_${GLOBUS_CONNECT_JOB_ID}.log" 2>&1 &
-    else
-        echo "Warning: ${GLOBUS_CONNECT_PERSONAL_BIN} not found; continuing without starting Globus Connect Personal"
-    fi
+if [ "${GLOBUS_TRANSFER_FLAG}" = "--globus-transfer" ]; then
+    GLOBUS_CONNECT_JOB_ID="${SLURM_JOB_ID:-${PBS_JOBID:-${FLUX_JOB_ID:-$$}}}"
+    nohup "${GLOBUS_CONNECT_PERSONAL_BIN}" -start >"/tmp/globusconnectpersonal_${GLOBUS_CONNECT_JOB_ID}.log" 2>&1 &
 fi
 
 python -m oact_utilities.workflows.submit_jobs \
@@ -75,7 +79,7 @@ python -m oact_utilities.workflows.submit_jobs \
     "${ROOT_DIR}" \
     --use-parsl \
     --scheduler flux \
-    ${GLOBUS_TRANSFER_FLAG:+${GLOBUS_TRANSFER_FLAG}} \
+    ${GLOBUS_TRANSFER_FLAG} \
     --batch-size "${BATCH_SIZE}" \
     --max-workers "${MAX_WORKERS}" \
     --cores-per-worker "${CORES_PER_WORKER}" \

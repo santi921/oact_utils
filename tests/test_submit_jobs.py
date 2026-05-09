@@ -543,8 +543,12 @@ class TestLegacySubmitBatch:
         workflow.update_job_metrics_bulk = MagicMock()
         workflow.update_status = MagicMock()
 
-        job1 = MagicMock(id=1, orig_index=1, job_dir=None, geometry="H 0 0 0", charge=0, spin=1)
-        job2 = MagicMock(id=2, orig_index=2, job_dir=None, geometry="H 0 0 0", charge=0, spin=1)
+        job1 = MagicMock(
+            id=1, orig_index=1, job_dir=None, geometry="H 0 0 0", charge=0, spin=1
+        )
+        job2 = MagicMock(
+            id=2, orig_index=2, job_dir=None, geometry="H 0 0 0", charge=0, spin=1
+        )
 
         monkeypatch.setattr(
             sj,
@@ -1030,7 +1034,6 @@ class TestSchedulerJobId:
         assert _get_scheduler_job_id() == "456.server"
 
 
-
 class TestMultiNodeCLIValidation:
     """Tests for --nodes-per-block CLI validation."""
 
@@ -1167,7 +1170,9 @@ class TestGlobusCLIValidation:
             "GLOBUS_SOURCE_ENDPOINT_ID",
             "GLOBUS_DESTINATION_ENDPOINT_ID",
             "GLOBUS_DEST_ROOT",
-            "GLOBUS_ACCESS_TOKEN",
+            "GLOBUS_CLIENT_ID",
+            "GLOBUS_TRANSFER_REFRESH_TOKEN",
+            "GLOBUS_CLIENT_SECRET",
         ):
             env.pop(name, None)
         return env
@@ -1215,10 +1220,11 @@ class TestGlobusCLIValidation:
         assert "GLOBUS_SOURCE_ENDPOINT_ID" in result.stderr
         assert "GLOBUS_DESTINATION_ENDPOINT_ID" in result.stderr
         assert "GLOBUS_DEST_ROOT" in result.stderr
-        assert "GLOBUS_ACCESS_TOKEN" in result.stderr
+        assert "GLOBUS_CLIENT_ID" in result.stderr
+        assert "GLOBUS_TRANSFER_REFRESH_TOKEN" in result.stderr
 
     def test_globus_transfer_accepts_cli_values(self):
-        """Complete Globus CLI config should pass validation."""
+        """Complete refresh-token config should pass validation."""
         import subprocess
 
         result = subprocess.run(
@@ -1236,8 +1242,10 @@ class TestGlobusCLIValidation:
                 "dest",
                 "--globus-dest-root",
                 "/backup",
-                "--globus-access-token",
-                "token",
+                "--globus-client-id",
+                "client-id",
+                "--globus-transfer-refresh-token",
+                "refresh-token",
             ],
             capture_output=True,
             text=True,
@@ -1573,7 +1581,8 @@ class TestGlobusBackupGate:
             source_endpoint_id="source-ep",
             destination_endpoint_id="dest-ep",
             dest_root="/backup/root",
-            access_token="token",
+            client_id="client-id",
+            transfer_refresh_token="refresh-token",
         )
 
     def test_submits_only_after_completed_result_and_success_metrics(
@@ -1587,8 +1596,12 @@ class TestGlobusBackupGate:
         job_dir.mkdir(parents=True)
         calls = []
 
-        def fake_archive_and_submit_transfer(job_dir, root_dir, config):
-            calls.append((job_dir, root_dir, config))
+        transfer_client = object()
+
+        def fake_archive_and_submit_transfer(
+            job_dir, root_dir, config, transfer_client=None
+        ):
+            calls.append((job_dir, root_dir, config, transfer_client))
             return GlobusTransferResult(
                 archive_path=Path(root_dir) / "job_1.tar.gz",
                 destination_path="/backup/root/job_1.tar.gz",
@@ -1606,11 +1619,12 @@ class TestGlobusBackupGate:
             result={"status": "completed"},
             metrics={"success": True},
             globus_config=self._config(),
+            globus_transfer_client=transfer_client,
         )
 
         assert result is not None
         assert result.task_id == "task-123"
-        assert calls == [(job_dir, root_dir, self._config())]
+        assert calls == [(job_dir, root_dir, self._config(), transfer_client)]
 
     @pytest.mark.parametrize(
         ("wrapper_result", "metrics"),
@@ -1632,8 +1646,10 @@ class TestGlobusBackupGate:
         job_dir.mkdir(parents=True)
         calls = []
 
-        def fake_archive_and_submit_transfer(job_dir, root_dir, config):
-            calls.append((job_dir, root_dir, config))
+        def fake_archive_and_submit_transfer(
+            job_dir, root_dir, config, transfer_client=None
+        ):
+            calls.append((job_dir, root_dir, config, transfer_client))
             return GlobusTransferResult(
                 archive_path=Path(root_dir) / "job_1.tar.gz",
                 destination_path="/backup/root/job_1.tar.gz",
@@ -1656,35 +1672,32 @@ class TestGlobusBackupGate:
         assert result is None
         assert calls == []
 
-    def test_transfer_failure_logs_warning_without_raising(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """Globus failures do not change chemistry job handling."""
+    def test_transfer_failure_raises(self, tmp_path, monkeypatch):
+        """Globus failures raise instead of being swallowed."""
         from oact_utilities.workflows import submit_jobs as sj
 
         root_dir = tmp_path / "jobs"
         job_dir = root_dir / "job_1"
         job_dir.mkdir(parents=True)
 
-        def fake_archive_and_submit_transfer(job_dir, root_dir, config):
+        def fake_archive_and_submit_transfer(
+            job_dir, root_dir, config, transfer_client=None
+        ):
             raise RuntimeError("globus unavailable")
 
         monkeypatch.setattr(
             sj, "archive_and_submit_transfer", fake_archive_and_submit_transfer
         )
 
-        result = _submit_globus_backup_if_verified(
-            job_id=1,
-            job_dir=job_dir,
-            root_dir=root_dir,
-            result={"status": "completed"},
-            metrics={"success": True},
-            globus_config=self._config(),
-        )
-
-        captured = capsys.readouterr()
-        assert result is None
-        assert "Warning: Globus backup failed for job 1" in captured.out
+        with pytest.raises(RuntimeError, match="globus unavailable"):
+            _submit_globus_backup_if_verified(
+                job_id=1,
+                job_dir=job_dir,
+                root_dir=root_dir,
+                result={"status": "completed"},
+                metrics={"success": True},
+                globus_config=self._config(),
+            )
 
 
 # --- Tests for _write_job_update (per-job commit) ---

@@ -15,7 +15,9 @@ class GlobusTransferConfig:
     source_endpoint_id: str
     destination_endpoint_id: str
     dest_root: str
-    access_token: str
+    client_id: str
+    transfer_refresh_token: str
+    client_secret: str | None = None
 
 
 @dataclass(frozen=True)
@@ -41,25 +43,12 @@ def create_job_archive(
     Returns:
         Path to the created archive.
 
-    Raises:
-        FileNotFoundError: If ``job_dir`` does not exist or is not a directory.
-        ValueError: If ``archive_path`` is inside ``job_dir``.
     """
     job_dir_path = Path(job_dir).resolve()
-    if not job_dir_path.is_dir():
-        raise FileNotFoundError(f"Job directory not found: {job_dir_path}")
-
     if archive_path is None:
         archive = job_dir_path.with_name(f"{job_dir_path.name}.tar.gz")
     else:
         archive = Path(archive_path).resolve()
-
-    try:
-        archive.relative_to(job_dir_path)
-    except ValueError:
-        pass
-    else:
-        raise ValueError("archive_path must not be inside job_dir")
 
     archive.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "w:gz") as tar:
@@ -98,27 +87,29 @@ def build_destination_path(
     return str(PurePosixPath(dest_root) / PurePosixPath(relative_archive.as_posix()))
 
 
-def build_transfer_client(access_token: str) -> Any:
+def build_transfer_client(config: GlobusTransferConfig) -> Any:
     """Build an authenticated ``globus_sdk.TransferClient``.
 
     Args:
-        access_token: Globus transfer access token.
+        config: Globus transfer configuration.
 
     Returns:
         Authenticated Globus TransferClient.
-
-    Raises:
-        RuntimeError: If ``globus_sdk`` is not installed.
     """
-    try:
-        import globus_sdk
-    except ImportError as exc:
-        raise RuntimeError(
-            "globus_sdk is required for --globus-transfer. "
-            "Install with: pip install globus-sdk"
-        ) from exc
+    import globus_sdk
 
-    authorizer = globus_sdk.AccessTokenAuthorizer(access_token)
+    if config.client_secret:
+        auth_client = globus_sdk.ConfidentialAppAuthClient(
+            config.client_id,
+            config.client_secret,
+        )
+    else:
+        auth_client = globus_sdk.NativeAppAuthClient(config.client_id)
+
+    authorizer = globus_sdk.RefreshTokenAuthorizer(
+        config.transfer_refresh_token,
+        auth_client,
+    )
     return globus_sdk.TransferClient(authorizer=authorizer)
 
 
@@ -139,22 +130,14 @@ def submit_archive_transfer(
     Returns:
         Metadata for the submitted transfer task.
 
-    Raises:
-        RuntimeError: If ``globus_sdk`` is not installed.
     """
-    try:
-        import globus_sdk
-    except ImportError as exc:
-        raise RuntimeError(
-            "globus_sdk is required for --globus-transfer. "
-            "Install with: pip install globus-sdk"
-        ) from exc
+    import globus_sdk
 
     archive = Path(archive_path).resolve()
     client = (
         transfer_client
         if transfer_client is not None
-        else build_transfer_client(config.access_token)
+        else build_transfer_client(config)
     )
     destination_path = build_destination_path(archive, root_dir, config.dest_root)
 
@@ -195,7 +178,7 @@ def archive_and_submit_transfer(
     client = (
         transfer_client
         if transfer_client is not None
-        else build_transfer_client(config.access_token)
+        else build_transfer_client(config)
     )
     archive_path = create_job_archive(job_dir)
     return submit_archive_transfer(
@@ -208,10 +191,4 @@ def archive_and_submit_transfer(
 
 def _extract_task_id(response: Any) -> str:
     """Extract a Globus task ID from common SDK response shapes."""
-    try:
-        task_id = response["task_id"]
-    except (KeyError, TypeError):
-        data = getattr(response, "data", {})
-        task_id = data.get("task_id") if isinstance(data, dict) else None
-
-    return "" if task_id is None else str(task_id)
+    return str(response["task_id"])

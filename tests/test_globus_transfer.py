@@ -11,6 +11,7 @@ import pytest
 from oact_utilities.workflows.globus_transfer import (
     GlobusTransferConfig,
     build_destination_path,
+    build_transfer_client,
     create_job_archive,
     submit_archive_transfer,
 )
@@ -67,9 +68,14 @@ def test_submit_archive_transfer_builds_expected_transfer(monkeypatch, tmp_path)
 
     submitted = {}
 
-    class FakeAuthorizer:
-        def __init__(self, token):
-            self.token = token
+    class FakeNativeAppAuthClient:
+        def __init__(self, client_id):
+            self.client_id = client_id
+
+    class FakeRefreshTokenAuthorizer:
+        def __init__(self, refresh_token, auth_client):
+            self.refresh_token = refresh_token
+            self.auth_client = auth_client
 
     class FakeTransferData:
         def __init__(self, client, source_endpoint, destination_endpoint, label):
@@ -92,7 +98,9 @@ def test_submit_archive_transfer_builds_expected_transfer(monkeypatch, tmp_path)
             return {"task_id": "task-123"}
 
     fake_sdk = SimpleNamespace(
-        AccessTokenAuthorizer=FakeAuthorizer,
+        NativeAppAuthClient=FakeNativeAppAuthClient,
+        ConfidentialAppAuthClient=None,
+        RefreshTokenAuthorizer=FakeRefreshTokenAuthorizer,
         TransferClient=FakeTransferClient,
         TransferData=FakeTransferData,
     )
@@ -102,7 +110,8 @@ def test_submit_archive_transfer_builds_expected_transfer(monkeypatch, tmp_path)
         source_endpoint_id="source-ep",
         destination_endpoint_id="dest-ep",
         dest_root="/globus/backups",
-        access_token="secret-token",
+        client_id="client-id",
+        transfer_refresh_token="refresh-token",
     )
 
     result = submit_archive_transfer(
@@ -115,9 +124,97 @@ def test_submit_archive_transfer_builds_expected_transfer(monkeypatch, tmp_path)
     assert result.task_id == "task-123"
     assert result.archive_path == archive_path.resolve()
     assert result.destination_path == "/globus/backups/job_1.tar.gz"
-    assert submitted["authorizer"].token == "secret-token"
+    assert submitted["authorizer"].refresh_token == "refresh-token"
     assert transfer_data.source_endpoint == "source-ep"
     assert transfer_data.destination_endpoint == "dest-ep"
     assert transfer_data.items == [
         (str(archive_path.resolve()), "/globus/backups/job_1.tar.gz")
     ]
+
+
+def test_build_transfer_client_uses_native_refresh_token(monkeypatch):
+    """Refresh-token config builds a renewing TransferClient."""
+    created = {}
+
+    class FakeNativeAppAuthClient:
+        def __init__(self, client_id):
+            self.client_id = client_id
+            created["auth_client"] = self
+
+    class FakeRefreshTokenAuthorizer:
+        def __init__(self, refresh_token, auth_client):
+            self.refresh_token = refresh_token
+            self.auth_client = auth_client
+            created["authorizer"] = self
+
+    class FakeTransferClient:
+        def __init__(self, authorizer=None):
+            self.authorizer = authorizer
+            created["transfer_client"] = self
+
+    fake_sdk = SimpleNamespace(
+        NativeAppAuthClient=FakeNativeAppAuthClient,
+        ConfidentialAppAuthClient=None,
+        RefreshTokenAuthorizer=FakeRefreshTokenAuthorizer,
+        TransferClient=FakeTransferClient,
+    )
+    monkeypatch.setitem(sys.modules, "globus_sdk", fake_sdk)
+
+    config = GlobusTransferConfig(
+        source_endpoint_id="source-ep",
+        destination_endpoint_id="dest-ep",
+        dest_root="/globus/backups",
+        client_id="client-id",
+        transfer_refresh_token="refresh-token",
+    )
+
+    client = build_transfer_client(config)
+
+    assert client is created["transfer_client"]
+    assert created["auth_client"].client_id == "client-id"
+    assert created["authorizer"].refresh_token == "refresh-token"
+    assert created["authorizer"].auth_client is created["auth_client"]
+
+
+def test_build_transfer_client_uses_confidential_refresh_token(monkeypatch):
+    """Client secret config uses ConfidentialAppAuthClient."""
+    created = {}
+
+    class FakeConfidentialAppAuthClient:
+        def __init__(self, client_id, client_secret):
+            self.client_id = client_id
+            self.client_secret = client_secret
+            created["auth_client"] = self
+
+    class FakeRefreshTokenAuthorizer:
+        def __init__(self, refresh_token, auth_client):
+            self.refresh_token = refresh_token
+            self.auth_client = auth_client
+            created["authorizer"] = self
+
+    class FakeTransferClient:
+        def __init__(self, authorizer=None):
+            self.authorizer = authorizer
+
+    fake_sdk = SimpleNamespace(
+        NativeAppAuthClient=None,
+        ConfidentialAppAuthClient=FakeConfidentialAppAuthClient,
+        RefreshTokenAuthorizer=FakeRefreshTokenAuthorizer,
+        TransferClient=FakeTransferClient,
+    )
+    monkeypatch.setitem(sys.modules, "globus_sdk", fake_sdk)
+
+    config = GlobusTransferConfig(
+        source_endpoint_id="source-ep",
+        destination_endpoint_id="dest-ep",
+        dest_root="/globus/backups",
+        client_id="client-id",
+        client_secret="client-secret",
+        transfer_refresh_token="refresh-token",
+    )
+
+    build_transfer_client(config)
+
+    assert created["auth_client"].client_id == "client-id"
+    assert created["auth_client"].client_secret == "client-secret"
+    assert created["authorizer"].refresh_token == "refresh-token"

@@ -35,6 +35,7 @@ from .globus_transfer import (
     GlobusTransferConfig,
     GlobusTransferResult,
     archive_and_submit_transfer,
+    build_transfer_client,
 )
 from .job_dir_patterns import (
     DEFAULT_JOB_DIR_PATTERN,
@@ -170,6 +171,7 @@ def _submit_globus_backup_if_verified(
     result: dict[str, Any],
     metrics: dict[str, Any] | None,
     globus_config: GlobusTransferConfig | None,
+    globus_transfer_client: Any | None = None,
 ) -> GlobusTransferResult | None:
     """Archive and submit a Globus backup only for verified successful jobs."""
     if globus_config is None:
@@ -185,15 +187,12 @@ def _submit_globus_backup_if_verified(
         )
         return None
 
-    try:
-        transfer_result = archive_and_submit_transfer(
-            job_dir=job_dir,
-            root_dir=root_dir,
-            config=globus_config,
-        )
-    except Exception as exc:
-        print(f"  Warning: Globus backup failed for job {job_id}: {exc}")
-        return None
+    transfer_result = archive_and_submit_transfer(
+        job_dir=job_dir,
+        root_dir=root_dir,
+        config=globus_config,
+        transfer_client=globus_transfer_client,
+    )
 
     print(
         f"  Globus backup submitted for job {job_id}: "
@@ -632,9 +631,7 @@ def _skip_finished_on_disk(
 
     # Batch DB updates
     if completed_ids:
-        workflow.update_status_bulk(
-            completed_ids, JobStatus.COMPLETED, worker_id=None
-        )
+        workflow.update_status_bulk(completed_ids, JobStatus.COMPLETED, worker_id=None)
         print(
             f"Skipped {len(completed_ids)} jobs already completed on disk "
             "(updated DB to COMPLETED)"
@@ -1585,6 +1582,11 @@ def submit_batch_parsl(
         print(f"  Cores per worker: {cores_per_worker}")
         return [j.id for j in jobs_to_submit]
 
+    globus_transfer_client: Any | None = None
+    if globus_config is not None:
+        globus_transfer_client = build_transfer_client(globus_config)
+        print("Globus backup enabled with refresh-token authorization")
+
     # Build Parsl configuration
     if scheduler.lower() == "slurm":
         total_nodes = max_blocks * nodes_per_block
@@ -1813,7 +1815,9 @@ def submit_batch_parsl(
                     print(
                         f"  [{i}/{len(claimed_jobs)}] FAILED to prepare job {job.id}: {e}"
                     )
-                    pending_updates.append({"job_id": job.id, "status": JobStatus.TO_RUN})
+                    pending_updates.append(
+                        {"job_id": job.id, "status": JobStatus.TO_RUN}
+                    )
                     log_job_result(wandb_run, job.id, "requeued")
 
             if job_dir_updates:
@@ -1909,7 +1913,9 @@ def submit_batch_parsl(
                                         try:
                                             gen_data = parse_generator_data(job_dir)
                                             if gen_data is not None:
-                                                metrics_dict["generator_data"] = gen_data
+                                                metrics_dict[
+                                                    "generator_data"
+                                                ] = gen_data
                                         except Exception as e:
                                             print(
                                                 f"  Warning: generator parsing failed for job {job_id}: {e}"
@@ -1926,6 +1932,7 @@ def submit_batch_parsl(
                                 result=result,
                                 metrics=metrics,
                                 globus_config=globus_config,
+                                globus_transfer_client=globus_transfer_client,
                             )
 
                             pending_updates.append(
@@ -1964,9 +1971,11 @@ def submit_batch_parsl(
                             print(f"Job {job_id} failed: {error_msg}")
                             log_job_result(wandb_run, job_id, "failed")
                     except Exception as e:
-                        failure_status, increment_fail_count, outcome_label = (
-                            _classify_parsl_future_failure(e)
-                        )
+                        (
+                            failure_status,
+                            increment_fail_count,
+                            outcome_label,
+                        ) = _classify_parsl_future_failure(e)
                         pending_updates.append(
                             {
                                 "job_id": job_id,
@@ -1978,9 +1987,7 @@ def submit_batch_parsl(
                             }
                         )
                         if failure_status == JobStatus.TO_RUN:
-                            print(
-                                f"Job {job_id} lost its manager; resetting to TO_RUN"
-                            )
+                            print(f"Job {job_id} lost its manager; resetting to TO_RUN")
                         else:
                             failed_ids.append(job_id)
                             print(f"Job {job_id} exception: {str(e)[:100]}")
@@ -2399,7 +2406,7 @@ def main():
         help=(
             "Archive and submit verified successful Parsl jobs to Globus. "
             "Requires source/destination endpoint IDs, destination root, and "
-            "access token via CLI flags or GLOBUS_* environment variables."
+            "refresh-token auth via CLI flags or GLOBUS_* environment variables."
         ),
     )
     globus_group.add_argument(
@@ -2421,11 +2428,28 @@ def main():
         help="Destination root path on the Globus endpoint (default: GLOBUS_DEST_ROOT)",
     )
     globus_group.add_argument(
-        "--globus-access-token",
-        default=os.environ.get("GLOBUS_ACCESS_TOKEN"),
-        help="Globus transfer access token (default: GLOBUS_ACCESS_TOKEN)",
+        "--globus-client-id",
+        default=os.environ.get("GLOBUS_CLIENT_ID"),
+        help=(
+            "Globus app client ID for refresh-token auth " "(default: GLOBUS_CLIENT_ID)"
+        ),
     )
-
+    globus_group.add_argument(
+        "--globus-transfer-refresh-token",
+        default=os.environ.get("GLOBUS_TRANSFER_REFRESH_TOKEN"),
+        help=(
+            "Long-lived Globus Transfer refresh token "
+            "(default: GLOBUS_TRANSFER_REFRESH_TOKEN)"
+        ),
+    )
+    globus_group.add_argument(
+        "--globus-client-secret",
+        default=os.environ.get("GLOBUS_CLIENT_SECRET"),
+        help=(
+            "Optional Globus app client secret for confidential-client "
+            "refresh-token auth (default: GLOBUS_CLIENT_SECRET)"
+        ),
+    )
     # Scale-out Parsl options (--use-parsl --scheduler slurm|pbspro)
     scaleout_parsl_group = parser.add_argument_group(
         "Scale-Out Parsl Options (--use-parsl --scheduler slurm|pbspro)"
@@ -2625,7 +2649,11 @@ def main():
                 "--globus-destination-endpoint-id or GLOBUS_DESTINATION_ENDPOINT_ID",
             ),
             (args.globus_dest_root, "--globus-dest-root or GLOBUS_DEST_ROOT"),
-            (args.globus_access_token, "--globus-access-token or GLOBUS_ACCESS_TOKEN"),
+            (args.globus_client_id, "--globus-client-id or GLOBUS_CLIENT_ID"),
+            (
+                args.globus_transfer_refresh_token,
+                "--globus-transfer-refresh-token or GLOBUS_TRANSFER_REFRESH_TOKEN",
+            ),
         ]
         missing = [
             label for value, label in globus_fields if not str(value or "").strip()
@@ -2637,7 +2665,13 @@ def main():
             source_endpoint_id=str(args.globus_source_endpoint_id).strip(),
             destination_endpoint_id=str(args.globus_destination_endpoint_id).strip(),
             dest_root=str(args.globus_dest_root).strip(),
-            access_token=str(args.globus_access_token).strip(),
+            client_id=str(args.globus_client_id).strip(),
+            transfer_refresh_token=str(args.globus_transfer_refresh_token).strip(),
+            client_secret=(
+                str(args.globus_client_secret).strip()
+                if args.globus_client_secret
+                else None
+            ),
         )
 
     try:
