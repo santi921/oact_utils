@@ -1344,9 +1344,9 @@ def _validate_worker_setup_func(setup_func: Callable | None) -> None:
 
 def _format_parsl_walltime(walltime_hours: int | float) -> str:
     """Format Parsl provider walltime as HH:MM:SS."""
-    if isinstance(walltime_hours, float):
+    if isinstance(walltime_hours, float) and walltime_hours < 1:
         return f"00:{int(60 * walltime_hours):02d}:00"
-    return f"{walltime_hours:02d}:00:00"
+    return f"{int(walltime_hours):02d}:00:00"
 
 
 def build_parsl_config_flux(
@@ -1433,7 +1433,7 @@ def build_parsl_config_slurm(
     max_blocks: int = 10,
     init_blocks: int = 2,
     min_blocks: int = 1,
-    walltime_hours: int = 2,
+    walltime_hours: int | float = 2,
     qos: str = "frontier",
     account: str = "ODEFN5169CYFZ",
     conda_env: str = "py10mpi",
@@ -1468,7 +1468,8 @@ def build_parsl_config_slurm(
         max_blocks: Maximum number of SLURM blocks to provision.
         init_blocks: Number of blocks to request at startup.
         min_blocks: Minimum number of blocks to keep alive.
-        walltime_hours: Walltime per block allocation in hours.
+        walltime_hours: Walltime per block allocation in hours. Values
+            below 1 may be passed as fractional hours, e.g. ``0.5``.
         qos: SLURM QOS.
         account: SLURM account/allocation.
         conda_env: Conda environment name.
@@ -1585,7 +1586,7 @@ def build_parsl_config_pbspro(
     max_blocks: int = 10,
     init_blocks: int = 2,
     min_blocks: int = 1,
-    walltime_hours: int = 2,
+    walltime_hours: int | float = 2,
     queue: str = "pbatch",
     account: str = "ODEFN5169CYFZ",
     conda_env: str = "py10mpi",
@@ -1616,7 +1617,8 @@ def build_parsl_config_pbspro(
         max_blocks: Maximum number of PBS blocks to provision.
         init_blocks: Number of blocks to request at startup.
         min_blocks: Minimum blocks to keep alive.
-        walltime_hours: Walltime per block allocation in hours.
+        walltime_hours: Walltime per block allocation in hours. Values
+            below 1 may be passed as fractional hours, e.g. ``0.5``.
         queue: PBS queue.
         account: PBS account/allocation.
         conda_env: Conda environment name.
@@ -1738,7 +1740,7 @@ def submit_batch_parsl(
     max_blocks: int = 10,
     init_blocks: int = 2,
     min_blocks: int = 1,
-    walltime_hours: int = 2,
+    walltime_hours: int | float = 2,
     queue: str = "pbatch",
     qos: str = "frontier",
     account: str = "ODEFN5169CYFZ",
@@ -1779,7 +1781,8 @@ def submit_batch_parsl(
         max_blocks: Maximum scheduler blocks to provision.
         init_blocks: Blocks to request at startup.
         min_blocks: Minimum blocks to keep alive.
-        walltime_hours: Walltime per block allocation in hours.
+        walltime_hours: Walltime per block allocation in hours. Values
+            below 1 may be passed as fractional hours, e.g. ``0.5``.
         queue: Queue/partition name for supported schedulers.
         qos: (SLURM) SLURM QOS.
         account: (SLURM) SLURM account/allocation.
@@ -2830,9 +2833,12 @@ def main():
     )
     scaleout_parsl_group.add_argument(
         "--walltime-hours",
-        type=int,
+        type=float,
         default=2,
-        help="Walltime per scheduler block allocation in hours (default: 2)",
+        help=(
+            "Walltime per scheduler block allocation in hours. "
+            "Sub-hour values like 0.5 are allowed (default: 2)"
+        ),
     )
     scaleout_parsl_group.add_argument(
         "--cpus-per-node",
