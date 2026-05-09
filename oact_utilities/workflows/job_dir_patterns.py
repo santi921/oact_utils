@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import socket
+from collections import OrderedDict
 
 DEFAULT_JOB_DIR_PATTERN = "job_{orig_index}"
 _JOB_PREFIX_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -43,16 +44,23 @@ def render_job_dir_pattern(
     orig_index: int,
     job_id: int,
     hostname: str | None = None,
+    elements: str | None = None,
+    charge: int | None = None,
+    spin: int | None = None,
 ) -> str:
     """Render a supported job directory pattern safely.
 
-    Supported placeholders are ``{hostname}``, ``{orig_index}``, and ``{id}``.
+    Supported placeholders are ``{hostname}``, ``{orig_index}``, ``{id}``,
+    ``{formula}``, ``{charge}``, and ``{spin}``.
 
     Args:
         job_dir_pattern: Pattern template to render.
         orig_index: Original structure index.
         job_id: Workflow database job ID.
         hostname: Optional hostname override. Defaults to the local hostname.
+        elements: Optional semicolon-separated element string from the DB.
+        charge: Optional molecular charge.
+        spin: Optional spin multiplicity.
 
     Returns:
         Rendered directory name.
@@ -60,7 +68,14 @@ def render_job_dir_pattern(
     Raises:
         ValueError: If unsupported placeholders or stray braces are present.
     """
-    allowed_placeholders = ("{hostname}", "{orig_index}", "{id}")
+    allowed_placeholders = (
+        "{hostname}",
+        "{orig_index}",
+        "{id}",
+        "{formula}",
+        "{charge}",
+        "{spin}",
+    )
     temp_pattern = job_dir_pattern
     for placeholder in allowed_placeholders:
         temp_pattern = temp_pattern.replace(placeholder, "")
@@ -70,8 +85,34 @@ def render_job_dir_pattern(
         )
 
     resolved_hostname = hostname or get_job_dir_hostname()
+    resolved_formula = _format_formula(elements)
     return (
         job_dir_pattern.replace("{hostname}", resolved_hostname)
         .replace("{orig_index}", str(orig_index))
         .replace("{id}", str(job_id))
+        .replace("{formula}", resolved_formula)
+        .replace("{charge}", str(charge if charge is not None else 0))
+        .replace("{spin}", str(spin if spin is not None else 1))
     )
+
+
+def _format_formula(elements: str | None) -> str:
+    """Return a compact formula token from a semicolon-separated element list."""
+    if not elements:
+        return "unknown"
+
+    counts: OrderedDict[str, int] = OrderedDict()
+    for token in elements.split(";"):
+        symbol = token.strip()
+        if not symbol:
+            continue
+        counts[symbol] = counts.get(symbol, 0) + 1
+
+    if not counts:
+        return "unknown"
+
+    parts = []
+    for symbol, count in counts.items():
+        suffix = "" if count == 1 else str(count)
+        parts.append(f"{symbol}{suffix}")
+    return "".join(parts)

@@ -647,7 +647,7 @@ def _parallel_status_check(
         jobs: List of job objects to check.
         root_dir: Root directory containing job subdirectories.
         job_dir_pattern: Pattern for job directory names. Supports
-            {hostname}, {orig_index}, and {id}.
+            {hostname}, {orig_index}, {id}, {formula}, {charge}, and {spin}.
         check_func: Status checking function.
         verbose: Print detailed progress messages.
         workers: Number of parallel worker threads.
@@ -676,6 +676,9 @@ def _parallel_status_check(
                 job_dir_pattern,
                 orig_index=job.orig_index,
                 job_id=job.id,
+                elements=job.elements,
+                charge=job.charge,
+                spin=job.spin,
             )
             job_dir = root_dir / job_dir_name
 
@@ -777,7 +780,7 @@ def _sequential_status_check(
         jobs: List of job objects to check.
         root_dir: Root directory containing job subdirectories.
         job_dir_pattern: Pattern for job directory names. Supports
-            {hostname}, {orig_index}, and {id}.
+            {hostname}, {orig_index}, {id}, {formula}, {charge}, and {spin}.
         check_func: Status checking function.
         verbose: Print detailed progress messages.
         extract_metrics: If True, collect completed jobs for metrics extraction.
@@ -822,6 +825,9 @@ def _sequential_status_check(
             job_dir_pattern,
             orig_index=job.orig_index,
             job_id=job.id,
+            elements=job.elements,
+            charge=job.charge,
+            spin=job.spin,
         )
         job_dir = root_dir / job_dir_name
 
@@ -900,7 +906,7 @@ def backfill_metrics(
         workflow: ArchitectorWorkflow instance.
         root_dir: Root directory containing job subdirectories.
         job_dir_pattern: Pattern for job directory names. Supports
-            {hostname}, {orig_index}, and {id}.
+            {hostname}, {orig_index}, {id}, {formula}, {charge}, and {spin}.
         unzip: If True, handle gzipped output files (quacc).
         verbose: Print detailed progress messages.
         workers: Number of parallel worker threads for extraction.
@@ -917,7 +923,10 @@ def backfill_metrics(
 
     if recompute:
         cur = workflow._execute_with_retry(
-            f"SELECT id, orig_index FROM structures WHERE status = 'completed'{limit_clause}"
+            (
+                "SELECT id, orig_index, elements, charge, spin "
+                f"FROM structures WHERE status = 'completed'{limit_clause}"
+            )
         )
     else:
         # Include jobs missing standard metrics OR (when available) missing qtaim data.
@@ -927,7 +936,7 @@ def backfill_metrics(
             missing_clause = "max_forces IS NULL"
         cur = workflow._execute_with_retry(
             f"""
-            SELECT id, orig_index
+            SELECT id, orig_index, elements, charge, spin
             FROM structures
             WHERE status = 'completed' AND ({missing_clause}){limit_clause}
             """
@@ -946,11 +955,14 @@ def backfill_metrics(
     # Build work items, filtering out missing directories
     work_items = []
     skipped = 0
-    for job_id, orig_index in rows:
+    for job_id, orig_index, elements, charge, spin in rows:
         job_dir_name = render_job_dir_pattern(
             job_dir_pattern,
             orig_index=orig_index,
             job_id=job_id,
+            elements=elements,
+            charge=charge,
+            spin=spin,
         )
         job_dir = root_dir / job_dir_name
 
@@ -998,7 +1010,7 @@ def reset_missing_jobs(
         workflow: ArchitectorWorkflow instance.
         root_dir: Root directory containing job subdirectories.
         job_dir_pattern: Pattern for job directory names. Supports
-            {hostname}, {orig_index}, and {id}.
+            {hostname}, {orig_index}, {id}, {formula}, {charge}, and {spin}.
         statuses: Job statuses to check. Defaults to RUNNING, FAILED, TIMEOUT.
 
     Returns:
@@ -1016,6 +1028,9 @@ def reset_missing_jobs(
             job_dir_pattern,
             orig_index=job.orig_index,
             job_id=job.id,
+            elements=job.elements,
+            charge=job.charge,
+            spin=job.spin,
         )
         job_dir = root_dir / job_dir_name
 
@@ -1099,7 +1114,7 @@ def fix_unlinked_jobs(
         workflow: ArchitectorWorkflow instance.
         root_dir: Root directory containing job subdirectories.
         job_dir_pattern: Pattern for job directory names. Supports
-            {hostname}, {orig_index}, and {id}.
+            {hostname}, {orig_index}, {id}, {formula}, {charge}, and {spin}.
         hours_cutoff: Hours before considering a job timed out.
         verbose: Print per-job details.
         max_jobs: Limit to N jobs (for --debug).
@@ -1148,6 +1163,9 @@ def fix_unlinked_jobs(
             job_dir_pattern,
             orig_index=job.orig_index,
             job_id=job.id,
+            elements=job.elements,
+            charge=job.charge,
+            spin=job.spin,
         )
         probe_items.append(
             (job.id, root / job_dir_name, job.orig_index, job.fail_count)
@@ -1653,7 +1671,7 @@ def main():
         default=DEFAULT_JOB_DIR_PATTERN,
         help=(
             "Pattern for job directory names. Supports {hostname}, "
-            "{orig_index}, and {id} (default: "
+            "{orig_index}, {id}, {formula}, {charge}, and {spin} (default: "
             f"{DEFAULT_JOB_DIR_PATTERN})"
         ),
     )

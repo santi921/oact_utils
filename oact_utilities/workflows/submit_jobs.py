@@ -284,7 +284,7 @@ def prepare_job_directory(
         job_record: JobRecord from the workflow database.
         root_dir: Root directory where job directories will be created.
         job_dir_pattern: Pattern for job directory names. Supports
-            {hostname}, {orig_index}, and {id}.
+            {hostname}, {orig_index}, {id}, {formula}, {charge}, and {spin}.
         orca_config: ORCA calculation configuration.
         n_cores: Number of CPU cores for ORCA.
         setup_func: Optional function to set up additional files. Called with
@@ -304,6 +304,9 @@ def prepare_job_directory(
             job_dir_pattern,
             orig_index=job_record.orig_index,
             job_id=job_record.id,
+            elements=job_record.elements,
+            charge=job_record.charge,
+            spin=job_record.spin,
         )
         job_dir = root_dir / job_dir_name
 
@@ -401,6 +404,9 @@ def _resolve_job_dir(
         job_dir_pattern,
         orig_index=job.orig_index,
         job_id=job.id,
+        elements=job.elements,
+        charge=job.charge,
+        spin=job.spin,
     )
 
 
@@ -420,6 +426,9 @@ def _find_existing_job_dir(
         job_dir_pattern,
         orig_index=job.orig_index,
         job_id=job.id,
+        elements=job.elements,
+        charge=job.charge,
+        spin=job.spin,
     )
     if candidate.is_dir():
         return candidate
@@ -667,7 +676,7 @@ def _filter_marker_jobs(
         jobs: List of JobRecord objects to filter.
         root_dir: Root directory for job directories.
         job_dir_pattern: Pattern for job directory names. Supports
-            {hostname}, {orig_index}, and {id}.
+            {hostname}, {orig_index}, {id}, {formula}, {charge}, and {spin}.
         workflow: ArchitectorWorkflow instance for DB updates.
         force_root_dir: If True, skip DB job_dir and always use
             root_dir + pattern for lookups.
@@ -688,6 +697,9 @@ def _filter_marker_jobs(
                 job_dir_pattern,
                 orig_index=job.orig_index,
                 job_id=job.id,
+                elements=job.elements,
+                charge=job.charge,
+                spin=job.spin,
             )
             marker_found = is_marker_blocked(root_dir / pattern)
 
@@ -757,6 +769,9 @@ def _skip_finished_on_disk(
                 job_dir_pattern,
                 orig_index=job.orig_index,
                 job_id=job.id,
+                elements=job.elements,
+                charge=job.charge,
+                spin=job.spin,
             )
             candidate = root_dir / pattern
             if candidate.is_dir():
@@ -1712,7 +1727,7 @@ def submit_batch_parsl(
             "slurm" for SlurmProvider multi-node, "pbspro" for
             PBSProProvider multi-node).
         job_dir_pattern: Pattern for job directory names. Supports
-            {hostname}, {orig_index}, and {id}.
+            {hostname}, {orig_index}, {id}, {formula}, {charge}, and {spin}.
         orca_config: ORCA configuration
         setup_func: Optional setup function per job
         n_cores: Cores per ORCA job
@@ -2596,7 +2611,7 @@ def main():
         default=DEFAULT_JOB_DIR_PATTERN,
         help=(
             "Pattern for job directory names. Supports {hostname}, "
-            "{orig_index}, and {id} (default: "
+            "{orig_index}, {id}, {formula}, {charge}, and {spin} (default: "
             f"{DEFAULT_JOB_DIR_PATTERN})"
         ),
     )

@@ -252,6 +252,19 @@ class TestPrepareJobDirectory:
 
         assert job_dir.name == "coord01_calc_1_42"
 
+    def test_formula_placeholders_in_job_dir_pattern(
+        self, mock_actinide_job_record, tmp_path, orca_config_with_path
+    ):
+        """Custom job directory patterns may include formula, charge, and spin."""
+        job_dir = prepare_job_directory(
+            mock_actinide_job_record,
+            tmp_path,
+            job_dir_pattern="{formula}_q{charge}_m{spin}_idx{orig_index}",
+            orca_config=orca_config_with_path,
+        )
+
+        assert job_dir.name == "UO2_q2_m3_idx100"
+
     def test_apply_job_dir_prefix(self):
         """Stable run prefixes prepend cleanly to the base job directory pattern."""
         from oact_utilities.workflows.job_dir_patterns import apply_job_dir_prefix
