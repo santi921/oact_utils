@@ -20,6 +20,7 @@ from oact_utilities.workflows.submit_jobs import (
     _flush_pending_updates,
     _get_scheduler_job_id,
     _is_manager_lost_exception,
+    _parsl_active_window,
     _submit_globus_backup_if_verified,
     _write_job_update,
     prepare_job_directory,
@@ -63,6 +64,49 @@ O -1.8 0.0 0.0"""
 def orca_config_with_path():
     """ORCA config with a fake orca_path to avoid which() returning None."""
     return {"orca_path": "/fake/path/to/orca"}
+
+
+class TestParslActiveWindow:
+    """Tests for Parsl active future window sizing."""
+
+    def test_flux_uses_batch_size_window(self):
+        """Flux keeps using the requested batch size as the active window."""
+        assert (
+            _parsl_active_window(
+                scheduler="flux",
+                num_jobs=500,
+                nodes_per_block=39,
+                init_blocks=1,
+                max_workers=8,
+            )
+            == 500
+        )
+
+    def test_pbspro_ignores_batch_size_window(self):
+        """PBS Pro derives the active window from initial scheduler capacity."""
+        assert (
+            _parsl_active_window(
+                scheduler="pbspro",
+                num_jobs=8336,
+                nodes_per_block=521,
+                init_blocks=1,
+                max_workers=8,
+            )
+            == 4168
+        )
+
+    def test_slurm_ignores_batch_size_window(self):
+        """Slurm derives the active window from initial scheduler capacity."""
+        assert (
+            _parsl_active_window(
+                scheduler="slurm",
+                num_jobs=999999,
+                nodes_per_block=10,
+                init_blocks=2,
+                max_workers=4,
+            )
+            == 80
+        )
 
 
 class TestPrepareJobDirectory:

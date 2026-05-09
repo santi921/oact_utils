@@ -164,6 +164,19 @@ def _classify_parsl_future_failure(exc: BaseException) -> tuple[JobStatus, bool,
     return JobStatus.FAILED, True, "failed"
 
 
+def _parsl_active_window(
+    scheduler: str,
+    num_jobs: int,
+    nodes_per_block: int,
+    init_blocks: int,
+    max_workers: int,
+) -> int:
+    """Return the number of Parsl futures to keep active."""
+    if scheduler.lower() == "flux":
+        return num_jobs
+    return nodes_per_block * init_blocks * max_workers
+
+
 def _submit_globus_backup_if_verified(
     job_id: int,
     job_dir: str | Path,
@@ -1522,10 +1535,9 @@ def submit_batch_parsl(
     Args:
         workflow: ArchitectorWorkflow instance
         root_dir: Root directory for job directories
-        num_jobs: Maximum number of jobs to keep claimed/submitted in the
-            active Parsl pipeline at once. The submitter refills this window
-            from the DB until no ``TO_RUN`` jobs remain or the process is
-            interrupted.
+        num_jobs: Active job window for Flux Parsl mode. Ignored for Slurm
+            and PBS Pro, where the active window is derived from
+            ``nodes_per_block * init_blocks * max_workers``.
         max_workers: Maximum number of concurrent workers
         cores_per_worker: CPU cores per worker
         cpus_per_node: Scheduler CPU cores reserved/requested per node. When
@@ -1604,10 +1616,19 @@ def submit_batch_parsl(
     if reroot:
         print("Reroot mode: ignoring database job_dir paths, using root_dir")
 
+    scheduler_key = scheduler.lower()
+    active_window = _parsl_active_window(
+        scheduler=scheduler_key,
+        num_jobs=num_jobs,
+        nodes_per_block=nodes_per_block,
+        init_blocks=init_blocks,
+        max_workers=max_workers,
+    )
+
     if dry_run:
         jobs_to_submit = filter_jobs_for_submission(
             workflow,
-            num_jobs=num_jobs,
+            num_jobs=active_window,
             max_fail_count=max_fail_count,
             randomize=randomize,
         )
@@ -1650,7 +1671,7 @@ def submit_batch_parsl(
         print("Globus backup enabled with refresh-token authorization")
 
     # Build Parsl configuration
-    if scheduler.lower() == "slurm":
+    if scheduler_key == "slurm":
         total_nodes = max_blocks * nodes_per_block
         total_workers = total_nodes * max_workers
         print(
@@ -1691,7 +1712,7 @@ def submit_batch_parsl(
             mpirun_path=mpirun_path,
             enable_monitoring=enable_monitoring,
         )
-    elif scheduler.lower() == "pbspro":
+    elif scheduler_key == "pbspro":
         total_nodes = max_blocks * nodes_per_block
         total_workers = total_nodes * max_workers
         print(
@@ -1790,7 +1811,8 @@ def submit_batch_parsl(
     _scheduler_job_id = _get_scheduler_job_id()
 
     print(
-        f"\nSubmitting jobs to Parsl with a refill window of {num_jobs} claimed jobs..."
+        f"\nSubmitting jobs to Parsl with a refill window of {active_window} "
+        "claimed jobs..."
     )
     print("(Press Ctrl+C for graceful shutdown)\n")
 
@@ -1819,7 +1841,7 @@ def submit_batch_parsl(
         nonlocal pending_updates
         claimed_any = False
 
-        while len(active_futures) < num_jobs:
+        while len(active_futures) < active_window:
             claimed_jobs = workflow.claim_jobs_for_submission(
                 limit=1,
                 worker_id=_scheduler_job_id,
@@ -2330,9 +2352,9 @@ def main():
         type=int,
         default=10,
         help=(
-            "Number of jobs to keep in the active submission window "
-            "(default: 10). For Parsl mode, the submitter refills this window "
-            "from the DB until no TO_RUN jobs remain."
+            "Traditional mode batch size, and Flux Parsl active window "
+            "(default: 10). Ignored for Slurm/PBS Pro Parsl, where the "
+            "window is nodes_per_block * init_blocks * max_workers."
         ),
     )
     parser.add_argument(
