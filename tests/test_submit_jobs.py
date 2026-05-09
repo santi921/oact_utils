@@ -13,6 +13,7 @@ from oact_utilities.workflows.submit_jobs import (
     OrcaConfig,
     _classify_parsl_future_failure,
     _flush_pending_updates,
+    _get_scheduler_job_id,
     _is_manager_lost_exception,
     prepare_job_directory,
     write_flux_job_file,
@@ -792,6 +793,14 @@ class TestBuildParslConfigSlurm:
             provider = config.executors[0].provider
             assert "export PATH=" not in provider.worker_init
 
+    def test_slurm_provider_cmd_timeout_is_30_minutes(self):
+        """Slurm provider scheduler commands get a 30 minute timeout."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
+
+        config = build_parsl_config_slurm()
+        provider = config.executors[0].provider
+        assert provider.cmd_timeout == 1800
+
 
 @pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
 class TestBuildParslConfigPbsPro:
@@ -865,6 +874,32 @@ class TestBuildParslConfigPbsPro:
             executor.launch_cmd
         )
         assert "process_worker_pool.py" not in executor.launch_cmd
+
+    def test_pbs_provider_cmd_timeout_is_30_minutes(self):
+        """PBS provider scheduler commands get a 30 minute timeout."""
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_pbspro
+
+        config = build_parsl_config_pbspro()
+        provider = config.executors[0].provider
+        assert provider.cmd_timeout == 1800
+
+
+class TestSchedulerJobId:
+    """Tests for scheduler allocation ID detection."""
+
+    def test_prefers_slurm_over_other_ids(self, monkeypatch):
+        """SLURM_JOB_ID takes precedence when multiple schedulers are visible."""
+        monkeypatch.setenv("SLURM_JOB_ID", "123")
+        monkeypatch.setenv("PBS_JOBID", "456")
+        monkeypatch.setenv("FLUX_JOB_ID", "789")
+        assert _get_scheduler_job_id() == "123"
+
+    def test_uses_pbs_jobid_when_present(self, monkeypatch):
+        """PBS allocations should be recorded with PBS_JOBID."""
+        monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+        monkeypatch.setenv("PBS_JOBID", "456.server")
+        monkeypatch.delenv("FLUX_JOB_ID", raising=False)
+        assert _get_scheduler_job_id() == "456.server"
 
 
 
@@ -1007,6 +1042,31 @@ class TestSkipFinishedOnDisk:
             assert len(completed) == 1
             assert completed[0].orig_index == 0
 
+    def test_completed_on_disk_clears_worker_id_for_claimed_job(self, tmp_path):
+        """Claimed jobs reclassified as completed on disk clear worker_id."""
+        from oact_utilities.workflows.architector_workflow import (
+            ArchitectorWorkflow,
+            JobStatus,
+        )
+        from oact_utilities.workflows.submit_jobs import _skip_finished_on_disk
+
+        db_path = self._make_db(tmp_path, n_jobs=1)
+        root_dir = tmp_path / "jobs"
+        job_dir = root_dir / "job_0"
+        job_dir.mkdir(parents=True)
+        (job_dir / "orca.out").write_text("Some output\nORCA TERMINATED NORMALLY\n")
+
+        with ArchitectorWorkflow(db_path) as wf:
+            claimed = wf.claim_jobs_for_submission(limit=1, worker_id="pbs_123")
+            assert claimed[0].worker_id == "pbs_123"
+
+            result = _skip_finished_on_disk(claimed, root_dir, "job_{orig_index}", wf)
+            assert result == []
+
+            completed = wf.get_jobs_by_status(JobStatus.COMPLETED)
+            assert len(completed) == 1
+            assert completed[0].worker_id is None
+
     def test_failed_on_disk_filtered_and_db_updated(self, tmp_path):
         """A job with 'aborting the run' on disk is skipped and DB updated."""
         from oact_utilities.workflows.architector_workflow import (
@@ -1033,6 +1093,31 @@ class TestSkipFinishedOnDisk:
             assert len(failed) == 1
             assert failed[0].fail_count == 1
             assert failed[0].error_message is not None
+
+    def test_failed_on_disk_clears_worker_id_for_claimed_job(self, tmp_path):
+        """Claimed jobs reclassified as failed on disk clear worker_id."""
+        from oact_utilities.workflows.architector_workflow import (
+            ArchitectorWorkflow,
+            JobStatus,
+        )
+        from oact_utilities.workflows.submit_jobs import _skip_finished_on_disk
+
+        db_path = self._make_db(tmp_path, n_jobs=1)
+        root_dir = tmp_path / "jobs"
+        job_dir = root_dir / "job_0"
+        job_dir.mkdir(parents=True)
+        (job_dir / "orca.out").write_text("SCF NOT CONVERGED\naborting the run\n")
+
+        with ArchitectorWorkflow(db_path) as wf:
+            claimed = wf.claim_jobs_for_submission(limit=1, worker_id="slurm_123")
+            assert claimed[0].worker_id == "slurm_123"
+
+            result = _skip_finished_on_disk(claimed, root_dir, "job_{orig_index}", wf)
+            assert result == []
+
+            failed = wf.get_jobs_by_status(JobStatus.FAILED)
+            assert len(failed) == 1
+            assert failed[0].worker_id is None
 
     def test_no_output_file_passes_through(self, tmp_path):
         """A directory with no .out file passes through for submission."""

@@ -194,6 +194,16 @@ def _get_parsl_runtime_address() -> str:
     return address_by_hostname()
 
 
+def _get_scheduler_job_id() -> str:
+    """Return the active scheduler allocation ID for claim tracking."""
+    return (
+        os.environ.get("SLURM_JOB_ID")
+        or os.environ.get("PBS_JOBID")
+        or os.environ.get("FLUX_JOB_ID")
+        or f"pid_{os.getpid()}"
+    )
+
+
 def _get_monitoring_hub_class():
     """Import MonitoringHub across Parsl versions."""
     try:
@@ -599,6 +609,7 @@ def _filter_marker_jobs(
             JobStatus.FAILED,
             increment_fail_count=True,
             error_message="Blocked by .do_not_rerun.json marker",
+            worker_id=None,
         )
         print(f"Skipped {len(skip_ids)} jobs due to .do_not_rerun.json marker")
 
@@ -678,7 +689,9 @@ def _skip_finished_on_disk(
 
     # Batch DB updates
     if completed_ids:
-        workflow.update_status_bulk(completed_ids, JobStatus.COMPLETED)
+        workflow.update_status_bulk(
+            completed_ids, JobStatus.COMPLETED, worker_id=None
+        )
         print(
             f"Skipped {len(completed_ids)} jobs already completed on disk "
             "(updated DB to COMPLETED)"
@@ -695,6 +708,7 @@ def _skip_finished_on_disk(
                 JobStatus.FAILED,
                 error_message=error_msg,
                 increment_fail_count=True,
+                worker_id=None,
             )
         print(
             f"Skipped {len(failed_ids)} jobs already failed on disk "
@@ -1210,6 +1224,7 @@ def build_parsl_config_slurm(
         exclusive=True,
         launcher=launcher,
         parallelism=1.0,
+        cmd_timeout=1800,
     )
 
     executor = HighThroughputExecutor(
@@ -1476,9 +1491,7 @@ def submit_batch_parsl(
     # RUNNING status claim (avoids a window where jobs are RUNNING but have
     # no worker_id, which would make them invisible to --recover-orphans).
     _scheduler_job_id = (
-        os.environ.get("SLURM_JOB_ID")
-        or os.environ.get("FLUX_JOB_ID")
-        or f"pid_{os.getpid()}"
+        _get_scheduler_job_id()
     )
 
     if dry_run:
