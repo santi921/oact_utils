@@ -867,6 +867,7 @@ class TestBuildParslConfigPbsPro:
         assert "process_worker_pool.py" not in executor.launch_cmd
 
 
+
 class TestMultiNodeCLIValidation:
     """Tests for --nodes-per-block CLI validation."""
 

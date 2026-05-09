@@ -1324,6 +1324,7 @@ def build_parsl_config_pbspro(
         worker_init=worker_init,
         launcher=launcher,
         parallelism=1.0,
+        cmd_timeout=1800,
     )
 
     executor = HighThroughputExecutor(
@@ -2289,7 +2290,6 @@ def main():
         default="ODEFN5169CYFZ",
         help="Scheduler account/allocation for Parsl mode (default: ODEFN5169CYFZ)",
     )
-
     parser.add_argument(
         "--max-fail-count",
         type=int,
