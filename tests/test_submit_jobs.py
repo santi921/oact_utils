@@ -1,6 +1,7 @@
 """Tests for submit_jobs module."""
 
 import importlib.util
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -598,6 +599,48 @@ class TestLegacySubmitBatch:
         content = slurm_script.read_text()
         # Default slurm LD_LIBRARY_PATH is empty, so no export line should appear
         assert "export LD_LIBRARY_PATH=:" not in content
+
+
+class TestSubmitJobsCli:
+    """CLI regression tests for submit_jobs.main()."""
+
+    def test_use_parsl_forwards_mpirun_path(self, monkeypatch, tmp_path):
+        """The --mpirun-path CLI option must reach submit_batch_parsl()."""
+        from oact_utilities.workflows import submit_jobs as sj
+
+        captured: dict[str, object] = {}
+
+        class DummyWorkflow:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def close(self):
+                pass
+
+        def fake_submit_batch_parsl(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(sj, "ArchitectorWorkflow", DummyWorkflow)
+        monkeypatch.setattr(sj, "submit_batch_parsl", fake_submit_batch_parsl)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "submit_jobs.py",
+                str(tmp_path / "workflow.db"),
+                str(tmp_path / "jobs"),
+                "--use-parsl",
+                "--mpirun-path",
+                "/opt/custom/openmpi/bin/mpirun",
+            ],
+        )
+
+        sj.main()
+
+        assert (
+            captured["mpirun_path"] == "/opt/custom/openmpi/bin/mpirun"
+        )
 
 
 class TestFluxSellaJobFile:

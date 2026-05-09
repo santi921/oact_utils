@@ -2601,6 +2601,14 @@ def main():
         default=None,
         help="Path to ORCA executable (default: scheduler-specific)",
     )
+    orca_group.add_argument(
+        "--mpirun-path",
+        default=None,
+        help=(
+            "Exact path to the mpirun executable for Parsl workers. "
+            "Its parent directory is prepended to PATH ahead of the ORCA bin."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -2754,6 +2762,7 @@ def main():
             conda_env=args.conda_env,
             conda_base=args.conda_base,
             ld_library_path=args.ld_library_path,
+            mpirun_path=args.mpirun_path,
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             timeout_seconds=args.job_timeout,
