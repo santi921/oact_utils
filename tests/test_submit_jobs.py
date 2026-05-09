@@ -7,6 +7,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from oact_utilities.workflows.architector_workflow import ArchitectorWorkflow, JobStatus
+from oact_utilities.workflows.globus_transfer import (
+    GlobusTransferConfig,
+    GlobusTransferResult,
+)
 from oact_utilities.workflows.submit_jobs import (
     DEFAULT_ORCA_CONFIG,
     DEFAULT_ORCA_PATHS,
@@ -15,6 +19,7 @@ from oact_utilities.workflows.submit_jobs import (
     _flush_pending_updates,
     _get_scheduler_job_id,
     _is_manager_lost_exception,
+    _submit_globus_backup_if_verified,
     _write_job_update,
     prepare_job_directory,
     write_flux_job_file,
@@ -1150,6 +1155,99 @@ class TestMultiNodeCLIValidation:
         assert "must be >= max_workers * cores_per_worker" in result.stderr
 
 
+class TestGlobusCLIValidation:
+    """Tests for Globus backup CLI validation."""
+
+    @staticmethod
+    def _env_without_globus():
+        import os
+
+        env = os.environ.copy()
+        for name in (
+            "GLOBUS_SOURCE_ENDPOINT_ID",
+            "GLOBUS_DESTINATION_ENDPOINT_ID",
+            "GLOBUS_DEST_ROOT",
+            "GLOBUS_ACCESS_TOKEN",
+        ):
+            env.pop(name, None)
+        return env
+
+    def test_globus_transfer_requires_parsl_mode(self):
+        """--globus-transfer is only valid for the Parsl submitter."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--globus-transfer",
+            ],
+            capture_output=True,
+            text=True,
+            env=self._env_without_globus(),
+        )
+        assert result.returncode != 0
+        assert "--globus-transfer requires --use-parsl" in result.stderr
+
+    def test_globus_transfer_requires_endpoint_env_or_args(self):
+        """Missing Globus config should fail before opening the workflow DB."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--globus-transfer",
+            ],
+            capture_output=True,
+            text=True,
+            env=self._env_without_globus(),
+        )
+        assert result.returncode != 0
+        assert "--globus-transfer requires" in result.stderr
+        assert "GLOBUS_SOURCE_ENDPOINT_ID" in result.stderr
+        assert "GLOBUS_DESTINATION_ENDPOINT_ID" in result.stderr
+        assert "GLOBUS_DEST_ROOT" in result.stderr
+        assert "GLOBUS_ACCESS_TOKEN" in result.stderr
+
+    def test_globus_transfer_accepts_cli_values(self):
+        """Complete Globus CLI config should pass validation."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.submit_jobs",
+                "fake.db",
+                "fake_dir",
+                "--use-parsl",
+                "--globus-transfer",
+                "--globus-source-endpoint-id",
+                "src",
+                "--globus-destination-endpoint-id",
+                "dest",
+                "--globus-dest-root",
+                "/backup",
+                "--globus-access-token",
+                "token",
+            ],
+            capture_output=True,
+            text=True,
+            env=self._env_without_globus(),
+        )
+        assert result.returncode != 0
+        assert "--globus-transfer requires" not in result.stderr
+        assert "Database not found" in result.stdout
+
+
 # --- Pre-submission disk check tests ---
 
 
@@ -1464,6 +1562,129 @@ class TestOrcaExitCodeVerification:
             "****ORCA TERMINATED NORMALLY****\n"
         )
         assert self._check_orca_output(job_dir) is None
+
+
+class TestGlobusBackupGate:
+    """Tests for the verified-success Globus backup gate."""
+
+    @staticmethod
+    def _config() -> GlobusTransferConfig:
+        return GlobusTransferConfig(
+            source_endpoint_id="source-ep",
+            destination_endpoint_id="dest-ep",
+            dest_root="/backup/root",
+            access_token="token",
+        )
+
+    def test_submits_only_after_completed_result_and_success_metrics(
+        self, tmp_path, monkeypatch
+    ):
+        """Completed wrapper result plus successful metrics submits one transfer."""
+        from oact_utilities.workflows import submit_jobs as sj
+
+        root_dir = tmp_path / "jobs"
+        job_dir = root_dir / "job_1"
+        job_dir.mkdir(parents=True)
+        calls = []
+
+        def fake_archive_and_submit_transfer(job_dir, root_dir, config):
+            calls.append((job_dir, root_dir, config))
+            return GlobusTransferResult(
+                archive_path=Path(root_dir) / "job_1.tar.gz",
+                destination_path="/backup/root/job_1.tar.gz",
+                task_id="task-123",
+            )
+
+        monkeypatch.setattr(
+            sj, "archive_and_submit_transfer", fake_archive_and_submit_transfer
+        )
+
+        result = _submit_globus_backup_if_verified(
+            job_id=1,
+            job_dir=job_dir,
+            root_dir=root_dir,
+            result={"status": "completed"},
+            metrics={"success": True},
+            globus_config=self._config(),
+        )
+
+        assert result is not None
+        assert result.task_id == "task-123"
+        assert calls == [(job_dir, root_dir, self._config())]
+
+    @pytest.mark.parametrize(
+        ("wrapper_result", "metrics"),
+        [
+            ({"status": "failed"}, {"success": True}),
+            ({"status": "timeout"}, {"success": True}),
+            ({"status": "completed"}, {"success": False}),
+            ({"status": "completed"}, None),
+        ],
+    )
+    def test_skips_without_both_success_signals(
+        self, tmp_path, monkeypatch, wrapper_result, metrics
+    ):
+        """Failed, timeout, and metrics-unsuccessful cases skip transfer."""
+        from oact_utilities.workflows import submit_jobs as sj
+
+        root_dir = tmp_path / "jobs"
+        job_dir = root_dir / "job_1"
+        job_dir.mkdir(parents=True)
+        calls = []
+
+        def fake_archive_and_submit_transfer(job_dir, root_dir, config):
+            calls.append((job_dir, root_dir, config))
+            return GlobusTransferResult(
+                archive_path=Path(root_dir) / "job_1.tar.gz",
+                destination_path="/backup/root/job_1.tar.gz",
+                task_id="task-123",
+            )
+
+        monkeypatch.setattr(
+            sj, "archive_and_submit_transfer", fake_archive_and_submit_transfer
+        )
+
+        result = _submit_globus_backup_if_verified(
+            job_id=1,
+            job_dir=job_dir,
+            root_dir=root_dir,
+            result=wrapper_result,
+            metrics=metrics,
+            globus_config=self._config(),
+        )
+
+        assert result is None
+        assert calls == []
+
+    def test_transfer_failure_logs_warning_without_raising(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Globus failures do not change chemistry job handling."""
+        from oact_utilities.workflows import submit_jobs as sj
+
+        root_dir = tmp_path / "jobs"
+        job_dir = root_dir / "job_1"
+        job_dir.mkdir(parents=True)
+
+        def fake_archive_and_submit_transfer(job_dir, root_dir, config):
+            raise RuntimeError("globus unavailable")
+
+        monkeypatch.setattr(
+            sj, "archive_and_submit_transfer", fake_archive_and_submit_transfer
+        )
+
+        result = _submit_globus_backup_if_verified(
+            job_id=1,
+            job_dir=job_dir,
+            root_dir=root_dir,
+            result={"status": "completed"},
+            metrics={"success": True},
+            globus_config=self._config(),
+        )
+
+        captured = capsys.readouterr()
+        assert result is None
+        assert "Warning: Globus backup failed for job 1" in captured.out
 
 
 # --- Tests for _write_job_update (per-job commit) ---

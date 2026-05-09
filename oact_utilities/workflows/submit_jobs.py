@@ -31,6 +31,11 @@ from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
 from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
+from .globus_transfer import (
+    GlobusTransferConfig,
+    GlobusTransferResult,
+    archive_and_submit_transfer,
+)
 from .job_dir_patterns import (
     DEFAULT_JOB_DIR_PATTERN,
     apply_job_dir_prefix,
@@ -156,6 +161,45 @@ def _classify_parsl_future_failure(exc: BaseException) -> tuple[JobStatus, bool,
     if _is_manager_lost_exception(exc):
         return JobStatus.TO_RUN, False, "requeued"
     return JobStatus.FAILED, True, "failed"
+
+
+def _submit_globus_backup_if_verified(
+    job_id: int,
+    job_dir: str | Path,
+    root_dir: str | Path,
+    result: dict[str, Any],
+    metrics: dict[str, Any] | None,
+    globus_config: GlobusTransferConfig | None,
+) -> GlobusTransferResult | None:
+    """Archive and submit a Globus backup only for verified successful jobs."""
+    if globus_config is None:
+        return None
+
+    if result.get("status") != "completed":
+        return None
+
+    if not metrics or not metrics.get("success"):
+        print(
+            f"  Skipping Globus backup for job {job_id}: "
+            "metrics did not confirm success"
+        )
+        return None
+
+    try:
+        transfer_result = archive_and_submit_transfer(
+            job_dir=job_dir,
+            root_dir=root_dir,
+            config=globus_config,
+        )
+    except Exception as exc:
+        print(f"  Warning: Globus backup failed for job {job_id}: {exc}")
+        return None
+
+    print(
+        f"  Globus backup submitted for job {job_id}: "
+        f"archive={transfer_result.archive_path}, task_id={transfer_result.task_id}"
+    )
+    return transfer_result
 
 
 def _write_job_update(
@@ -1412,6 +1456,7 @@ def submit_batch_parsl(
     enable_monitoring: bool = True,
     wandb_run: Any | None = None,
     reroot: bool = False,
+    globus_config: GlobusTransferConfig | None = None,
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -1459,6 +1504,9 @@ def submit_batch_parsl(
         reroot: If True, ignore job_dir paths stored in the database and
             always construct paths from root_dir + job_dir_pattern. Useful
             when the database has been relocated.
+        globus_config: Optional Globus transfer configuration. When provided,
+            completed jobs are archived and submitted to Globus only after
+            ``parse_job_metrics()`` confirms ``success``.
 
     Returns:
         List of submitted job IDs
@@ -1831,6 +1879,7 @@ def submit_batch_parsl(
                             completed_ids.append(job_id)
 
                             metrics_dict: dict[str, Any] | None = None
+                            metrics: dict[str, Any] | None = None
                             try:
                                 metrics = parse_job_metrics(job_dir)
                                 wall_time = None
@@ -1869,6 +1918,15 @@ def submit_batch_parsl(
                                 print(
                                     f"  Warning: metrics extraction failed for job {job_id}: {e}"
                                 )
+
+                            _submit_globus_backup_if_verified(
+                                job_id=job_id,
+                                job_dir=job_dir,
+                                root_dir=root_dir,
+                                result=result,
+                                metrics=metrics,
+                                globus_config=globus_config,
+                            )
 
                             pending_updates.append(
                                 {
@@ -2333,6 +2391,41 @@ def main():
     # W&B options (--use-parsl only)
     add_wandb_args(parser)
 
+    # Globus backup options (--use-parsl only)
+    globus_group = parser.add_argument_group("Globus Backup Options (--use-parsl)")
+    globus_group.add_argument(
+        "--globus-transfer",
+        action="store_true",
+        help=(
+            "Archive and submit verified successful Parsl jobs to Globus. "
+            "Requires source/destination endpoint IDs, destination root, and "
+            "access token via CLI flags or GLOBUS_* environment variables."
+        ),
+    )
+    globus_group.add_argument(
+        "--globus-source-endpoint-id",
+        default=os.environ.get("GLOBUS_SOURCE_ENDPOINT_ID"),
+        help="Globus source endpoint ID (default: GLOBUS_SOURCE_ENDPOINT_ID)",
+    )
+    globus_group.add_argument(
+        "--globus-destination-endpoint-id",
+        default=os.environ.get("GLOBUS_DESTINATION_ENDPOINT_ID"),
+        help=(
+            "Globus destination endpoint ID "
+            "(default: GLOBUS_DESTINATION_ENDPOINT_ID)"
+        ),
+    )
+    globus_group.add_argument(
+        "--globus-dest-root",
+        default=os.environ.get("GLOBUS_DEST_ROOT"),
+        help="Destination root path on the Globus endpoint (default: GLOBUS_DEST_ROOT)",
+    )
+    globus_group.add_argument(
+        "--globus-access-token",
+        default=os.environ.get("GLOBUS_ACCESS_TOKEN"),
+        help="Globus transfer access token (default: GLOBUS_ACCESS_TOKEN)",
+    )
+
     # Scale-out Parsl options (--use-parsl --scheduler slurm|pbspro)
     scaleout_parsl_group = parser.add_argument_group(
         "Scale-Out Parsl Options (--use-parsl --scheduler slurm|pbspro)"
@@ -2518,6 +2611,35 @@ def main():
     if args.optimizer is None and args.opt_level != "normal":
         parser.error("--opt-level requires --optimizer orca")
 
+    if args.globus_transfer and not args.use_parsl:
+        parser.error("--globus-transfer requires --use-parsl")
+    globus_config: GlobusTransferConfig | None = None
+    if args.globus_transfer:
+        globus_fields = [
+            (
+                args.globus_source_endpoint_id,
+                "--globus-source-endpoint-id or GLOBUS_SOURCE_ENDPOINT_ID",
+            ),
+            (
+                args.globus_destination_endpoint_id,
+                "--globus-destination-endpoint-id or GLOBUS_DESTINATION_ENDPOINT_ID",
+            ),
+            (args.globus_dest_root, "--globus-dest-root or GLOBUS_DEST_ROOT"),
+            (args.globus_access_token, "--globus-access-token or GLOBUS_ACCESS_TOKEN"),
+        ]
+        missing = [
+            label for value, label in globus_fields if not str(value or "").strip()
+        ]
+        if missing:
+            parser.error("--globus-transfer requires " + ", ".join(missing))
+
+        globus_config = GlobusTransferConfig(
+            source_endpoint_id=str(args.globus_source_endpoint_id).strip(),
+            destination_endpoint_id=str(args.globus_destination_endpoint_id).strip(),
+            dest_root=str(args.globus_dest_root).strip(),
+            access_token=str(args.globus_access_token).strip(),
+        )
+
     try:
         effective_job_dir_pattern = apply_job_dir_prefix(
             args.job_dir_pattern, args.job_prefix
@@ -2613,6 +2735,7 @@ def main():
             enable_monitoring=not args.no_parsl_monitoring,
             wandb_run=wandb_run,
             reroot=args.reroot,
+            globus_config=globus_config,
         )
     else:
         # Traditional mode: one job script per job
