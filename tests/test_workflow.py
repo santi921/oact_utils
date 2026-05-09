@@ -188,6 +188,7 @@ def test_claim_jobs_for_submission_marks_running_and_sets_worker_id(tmp_path):
         assert len(claimed) == 2
         assert {job.status for job in claimed} == {JobStatus.RUNNING}
         assert {job.worker_id for job in claimed} == {"pid_123"}
+        assert all(job.geometry == "H 0 0 0\nH 0 0 0.74" for job in claimed)
 
         running = workflow.get_jobs_by_status(JobStatus.RUNNING)
         ready = workflow.get_jobs_by_status(JobStatus.TO_RUN)

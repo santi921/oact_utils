@@ -720,10 +720,7 @@ class ArchitectorWorkflow:
 
         order_by = "ORDER BY RANDOM()" if randomize else "ORDER BY id"
         params: list[object] = [JobStatus.TO_RUN.value]
-        query = (
-            f"SELECT {self._LIGHT_COLS} FROM structures "
-            "WHERE status = ?"
-        )
+        query = "SELECT * FROM structures WHERE status = ?"
         if max_fail_count is not None:
             query += " AND COALESCE(fail_count, 0) < ?"
             params.append(max_fail_count)
@@ -756,7 +753,7 @@ class ArchitectorWorkflow:
                     ),
                 )
                 cur.execute(
-                    f"SELECT {self._LIGHT_COLS} FROM structures WHERE id IN ({placeholders})",
+                    f"SELECT * FROM structures WHERE id IN ({placeholders})",
                     tuple(job_ids),
                 )
                 claimed_rows = cur.fetchall()
