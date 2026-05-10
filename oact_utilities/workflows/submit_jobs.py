@@ -920,6 +920,7 @@ if PARSL_AVAILABLE:
         import subprocess
         import tempfile
         import time
+        from importlib import import_module
         from pathlib import Path
         from types import SimpleNamespace
 
@@ -931,7 +932,10 @@ if PARSL_AVAILABLE:
                     "error": "Missing root_dir for deferred job preparation",
                 }
             job_record = SimpleNamespace(**job_payload)
-            job_dir_path = prepare_job_directory(
+            prepare_job_directory_impl = import_module(
+                "oact_utilities.workflows.submit_jobs"
+            ).prepare_job_directory
+            job_dir_path = prepare_job_directory_impl(
                 job_record,
                 Path(root_dir),
                 job_dir_pattern=job_dir_pattern,
@@ -1387,7 +1391,6 @@ def _validate_parsl_worker_imports(
         import sys
         import tempfile
         from pathlib import Path
-        from types import SimpleNamespace
 
         payload = json.loads(os.environ["OACT_UTILITIES_VALIDATE_PAYLOAD"])
         modules = [
@@ -1400,9 +1403,9 @@ def _validate_parsl_worker_imports(
         for module_name in modules:
             importlib.import_module(module_name)
 
-        from oact_utilities.workflows.submit_jobs import prepare_job_directory
+        import oact_utilities.workflows.submit_jobs as sj
 
-        record = SimpleNamespace(
+        record_payload = dict(
             id=1,
             orig_index=1,
             elements="H;H",
@@ -1425,23 +1428,47 @@ def _validate_parsl_worker_imports(
         )
 
         with tempfile.TemporaryDirectory(prefix="oact_worker_validate_") as tmpdir:
-            job_dir = prepare_job_directory(
-                record,
-                Path(tmpdir),
-                orca_config=payload["orca_config"],
-                n_cores=payload["n_cores"],
+            def fake_prepare_job_directory(job_record, root_dir, **kwargs):
+                job_dir = Path(root_dir) / "job_1"
+                job_dir.mkdir(parents=True, exist_ok=True)
+                (job_dir / "orca.inp").write_text("! test\\n")
+                if payload["orca_config"].get("optimizer") == "sella":
+                    (job_dir / "run_sella.py").write_text("#!/usr/bin/env python\\n")
+                return job_dir
+
+            task_func = getattr(sj.orca_job_wrapper, "func", None) or getattr(
+                sj.orca_job_wrapper, "__wrapped__", None
             )
-            orca_inp = job_dir / "orca.inp"
-            if not orca_inp.exists():
-                raise RuntimeError(f"prepare_job_directory did not create {orca_inp}")
-            if payload["orca_config"].get("optimizer") == "sella":
-                shim = job_dir / "run_sella.py"
-                if not shim.exists():
-                    raise RuntimeError(f"Sella shim not created: {shim}")
+            if task_func is None:
+                raise RuntimeError("Could not access underlying orca_job_wrapper function")
+
+            original_prepare = sj.prepare_job_directory
+            original_global = task_func.__globals__.pop("prepare_job_directory", None)
+            sj.prepare_job_directory = fake_prepare_job_directory
+            try:
+                result = task_func(
+                    job_id=1,
+                    job_dir=str(Path(tmpdir) / "job_1"),
+                    orca_config={"orca_path": "/bin/true", **payload["orca_config"]},
+                    job_payload=record_payload,
+                    root_dir=tmpdir,
+                    n_cores=payload["n_cores"],
+                    timeout_seconds=1,
+                )
+            finally:
+                sj.prepare_job_directory = original_prepare
+                if original_global is not None:
+                    task_func.__globals__["prepare_job_directory"] = original_global
+
+            error_text = str(result.get("error", ""))
+            if "prepare_job_directory" in error_text and "not defined" in error_text:
+                raise RuntimeError(
+                    "orca_job_wrapper still depends on a missing prepare_job_directory global"
+                )
 
         print(f"worker_python={sys.executable}")
         print(f"repo_root={os.environ.get('OACT_UTILITIES_REPO_ROOT')}")
-        print("worker import and prep validation passed")
+        print("worker import and task-path validation passed")
         """
     )
 
