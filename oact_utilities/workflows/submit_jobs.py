@@ -496,7 +496,7 @@ def _classify_claimed_job(
                 "error_message": error_message,
             }
 
-    if scheduler == "flux":
+    if scheduler in {"flux", "slurm", "pbspro"}:
         prepared_job_dir = prepare_job_directory(
             job,
             root_dir,
@@ -2388,7 +2388,7 @@ def submit_batch_parsl(
             job_dir = result["job_dir"]
             try:
                 workflow.update_job_metrics_bulk([{"job_id": job_id, "job_dir": job_dir}])
-                if scheduler_key == "flux":
+                if scheduler_key in {"flux", "slurm", "pbspro"}:
                     print(f"Prepared job {job_id} in {job_dir}")
                 else:
                     print(f"Reserved job {job_id} for worker preparation in {job_dir}")
@@ -2404,7 +2404,7 @@ def submit_batch_parsl(
                 job_dir=job_dir,
                 orca_config=dict(config),
                 job_payload=result.get("job_payload"),
-                root_dir=None if scheduler_key == "flux" else str(root_dir),
+                root_dir=None if scheduler_key in {"flux", "slurm", "pbspro"} else str(root_dir),
                 job_dir_pattern=job_dir_pattern,
                 n_cores=n_cores,
                 setup_func=setup_func,
