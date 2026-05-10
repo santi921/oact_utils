@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import os
 import random
 import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -1306,6 +1308,163 @@ def _get_parsl_worker_python(conda_base: str, conda_env: str) -> str:
     if conda_env == "base":
         return str(Path(conda_base) / "bin" / "python")
     return str(Path(conda_base) / "envs" / conda_env / "bin" / "python")
+
+
+def _validate_parsl_worker_imports(
+    scheduler: str,
+    conda_env: str,
+    conda_base: str,
+    orca_config: dict[str, Any],
+    n_cores: int,
+    ld_library_path: str | None = None,
+    mpirun_path: str | None = None,
+) -> bool:
+    """Validate worker-side imports and deferred prep locally.
+
+    Runs a short Python program under the exact worker interpreter path with
+    the same repo-root/PYTHONPATH hints and worker PATH/LD_LIBRARY_PATH setup
+    used by Parsl HTEX workers. This catches import failures and
+    ``prepare_job_directory()`` regressions without waiting for a queued block.
+    """
+    worker_python = Path(_get_parsl_worker_python(conda_base, conda_env))
+    if not worker_python.exists():
+        print(f"Worker python not found: {worker_python}")
+        return False
+
+    env = os.environ.copy()
+    repo_root = str(_get_repo_root())
+    env["OACT_UTILITIES_REPO_ROOT"] = repo_root
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{repo_root}:{existing_pythonpath}" if existing_pythonpath else repo_root
+    )
+    env["JAX_PLATFORMS"] = "cpu"
+    env["OMP_NUM_THREADS"] = "1"
+
+    orca_bin_dir = (
+        os.path.dirname(orca_config.get("orca_path"))
+        if orca_config.get("orca_path")
+        and os.path.isabs(orca_config.get("orca_path"))
+        else None
+    )
+    resolved_mpirun = mpirun_path or shutil.which("mpirun")
+    mpirun_bin_dir = (
+        os.path.dirname(resolved_mpirun)
+        if resolved_mpirun and os.path.isabs(resolved_mpirun)
+        else None
+    )
+    path_entries = [
+        entry for entry in [mpirun_bin_dir, orca_bin_dir] if entry is not None
+    ]
+    path_entries = list(dict.fromkeys(path_entries))
+    if path_entries:
+        existing_path = env.get("PATH")
+        env["PATH"] = ":".join(path_entries + ([existing_path] if existing_path else []))
+
+    resolved_ld = ld_library_path
+    if resolved_ld is None:
+        if scheduler == "flux":
+            resolved_ld = DEFAULT_LD_LIBRARY_PATHS.get("flux", "")
+        elif scheduler in {"slurm", "pbspro"}:
+            resolved_ld = f"{conda_base}/envs/{conda_env}/lib"
+    if resolved_ld:
+        existing_ld = env.get("LD_LIBRARY_PATH")
+        env["LD_LIBRARY_PATH"] = (
+            f"{resolved_ld}:{existing_ld}" if existing_ld else resolved_ld
+        )
+
+    validation_payload = {
+        "n_cores": n_cores,
+        "orca_config": orca_config,
+    }
+    env["OACT_UTILITIES_VALIDATE_PAYLOAD"] = json.dumps(validation_payload)
+
+    validation_script = textwrap.dedent(
+        """\
+        import importlib
+        import json
+        import os
+        import sys
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        payload = json.loads(os.environ["OACT_UTILITIES_VALIDATE_PAYLOAD"])
+        modules = [
+            "parsl",
+            "parsl.executors.high_throughput.process_worker_pool",
+            "oact_utilities",
+            "oact_utilities.workflows.submit_jobs",
+            "oact_utilities.core.orca.sella_runner",
+        ]
+        for module_name in modules:
+            importlib.import_module(module_name)
+
+        from oact_utilities.workflows.submit_jobs import prepare_job_directory
+
+        record = SimpleNamespace(
+            id=1,
+            orig_index=1,
+            elements="H;H",
+            natoms=2,
+            status="to_run",
+            charge=0,
+            spin=1,
+            geometry="H 0.0 0.0 0.0\\nH 0.0 0.0 0.74",
+            job_dir=None,
+            max_forces=None,
+            scf_steps=None,
+            final_energy=None,
+            error_message=None,
+            fail_count=0,
+            wall_time=None,
+            n_cores=None,
+            optimizer=None,
+            worker_id=None,
+            generator_data=None,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="oact_worker_validate_") as tmpdir:
+            job_dir = prepare_job_directory(
+                record,
+                Path(tmpdir),
+                orca_config=payload["orca_config"],
+                n_cores=payload["n_cores"],
+            )
+            orca_inp = job_dir / "orca.inp"
+            if not orca_inp.exists():
+                raise RuntimeError(f"prepare_job_directory did not create {orca_inp}")
+            if payload["orca_config"].get("optimizer") == "sella":
+                shim = job_dir / "run_sella.py"
+                if not shim.exists():
+                    raise RuntimeError(f"Sella shim not created: {shim}")
+
+        print(f"worker_python={sys.executable}")
+        print(f"repo_root={os.environ.get('OACT_UTILITIES_REPO_ROOT')}")
+        print("worker import and prep validation passed")
+        """
+    )
+
+    result = subprocess.run(
+        [str(worker_python), "-c", validation_script],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.returncode == 0:
+        return True
+
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    print(
+        "Worker validation failed. This used the same worker python and import "
+        "environment as Parsl HTEX, but without waiting for a queued block.",
+        file=sys.stderr,
+    )
+    return False
 
 
 def _build_parsl_htex_launch_cmd(
@@ -2661,14 +2820,22 @@ def main():
     parser = argparse.ArgumentParser(
         description="Submit architector workflow jobs to HPC scheduler"
     )
-    parser.add_argument("db_path", help="Path to workflow SQLite database")
-    parser.add_argument("root_dir", help="Root directory for job directories")
+    parser.add_argument("db_path", nargs="?", help="Path to workflow SQLite database")
+    parser.add_argument("root_dir", nargs="?", help="Root directory for job directories")
 
     # Submission mode
     parser.add_argument(
         "--use-parsl",
         action="store_true",
         help="Use Parsl for concurrent execution on exclusive or provisioned nodes",
+    )
+    parser.add_argument(
+        "--validate-worker-imports",
+        action="store_true",
+        help=(
+            "Run a local worker-env validation using the target worker python and "
+            "deferred prepare_job_directory path, without waiting for a queued block."
+        ),
     )
 
     parser.add_argument(
@@ -3005,6 +3172,11 @@ def main():
 
     args = parser.parse_args()
 
+    if not args.validate_worker_imports and (
+        not args.db_path or not args.root_dir
+    ):
+        parser.error("db_path and root_dir are required unless --validate-worker-imports is used")
+
     # Validate multi-node Parsl args
     if args.nodes_per_block < 1:
         parser.error("--nodes-per-block must be >= 1")
@@ -3013,7 +3185,11 @@ def main():
             "--nodes-per-block > 1 is only supported with --scheduler slurm or pbspro. "
             "Flux uses LocalProvider which does not support multi-node blocks."
         )
-    if args.scheduler == "pbspro" and not args.use_parsl:
+    if (
+        args.scheduler == "pbspro"
+        and not args.use_parsl
+        and not args.validate_worker_imports
+    ):
         parser.error("--scheduler pbspro is currently only supported with --use-parsl")
     if (
         args.scheduler in {"slurm", "pbspro"}
@@ -3104,6 +3280,22 @@ def main():
     }
     if args.orca_path:
         orca_config["orca_path"] = args.orca_path
+    elif orca_config.get("orca_path") is None:
+        orca_config["orca_path"] = DEFAULT_ORCA_PATHS.get(
+            args.scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
+        )
+
+    if args.validate_worker_imports:
+        success = _validate_parsl_worker_imports(
+            scheduler=args.scheduler,
+            conda_env=args.conda_env,
+            conda_base=args.conda_base,
+            orca_config=dict(orca_config),
+            n_cores=args.n_cores,
+            ld_library_path=args.ld_library_path,
+            mpirun_path=args.mpirun_path,
+        )
+        raise SystemExit(0 if success else 1)
 
     # Open workflow (higher retry budget for Parsl to survive Lustre contention)
     try:

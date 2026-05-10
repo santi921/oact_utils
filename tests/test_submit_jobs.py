@@ -750,6 +750,42 @@ class TestLegacySubmitBatch:
 class TestSubmitJobsCli:
     """CLI regression tests for submit_jobs.main()."""
 
+    def test_validate_worker_imports_short_circuits_without_db(self, monkeypatch):
+        """Validation mode should not require db/root or open the workflow DB."""
+        from oact_utilities.workflows import submit_jobs as sj
+
+        captured: dict[str, object] = {}
+
+        def fake_validate_worker_imports(**kwargs):
+            captured.update(kwargs)
+            return True
+
+        class FailingWorkflow:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("ArchitectorWorkflow should not be opened")
+
+        monkeypatch.setattr(sj, "_validate_parsl_worker_imports", fake_validate_worker_imports)
+        monkeypatch.setattr(sj, "ArchitectorWorkflow", FailingWorkflow)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "submit_jobs.py",
+                "--validate-worker-imports",
+                "--scheduler",
+                "pbspro",
+                "--optimizer",
+                "sella",
+            ],
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            sj.main()
+
+        assert excinfo.value.code == 0
+        assert captured["scheduler"] == "pbspro"
+        assert captured["orca_config"]["optimizer"] == "sella"
+
     def test_use_parsl_forwards_mpirun_path(self, monkeypatch, tmp_path):
         """The --mpirun-path CLI option must reach submit_batch_parsl()."""
         from oact_utilities.workflows import submit_jobs as sj
