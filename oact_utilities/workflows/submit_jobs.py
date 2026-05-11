@@ -3352,6 +3352,7 @@ def main():
             scheduler=args.scheduler,
             root_dir=args.root_dir if args.reroot else None,
             job_dir_pattern=effective_job_dir_pattern,
+            workers=16,
         )
         print(
             f"Launch-time orphan recovery touched {recovery_result['recovered']} "
