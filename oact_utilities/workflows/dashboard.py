@@ -1493,6 +1493,7 @@ def recover_orphaned_jobs(
     job_dir_pattern: str = DEFAULT_JOB_DIR_PATTERN,
     hours_cutoff: float = 24.0,
     verbose: bool = False,
+    workers: int = 4,
 ) -> dict[str, int]:
     """Detect and recover jobs orphaned by dead scheduler allocations.
 
@@ -1516,16 +1517,28 @@ def recover_orphaned_jobs(
             {charge}, and {spin}.
         hours_cutoff: Hours threshold for timeout detection.
         verbose: Print per-job details.
+        workers: Number of parallel worker threads for on-disk status checks.
 
     Returns:
         Dict with counts: {"recovered": N, "completed": N, "failed": N,
         "reset": N, "dead_jobs": N, "skipped": N}.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from ..utils.scheduler import get_active_scheduler_jobs
 
-    # Step 1: Get all RUNNING jobs with a worker_id
-    running = workflow.get_jobs_by_status(JobStatus.RUNNING)
-    tracked = [j for j in running if j.worker_id is not None]
+    # Step 1: Get all RUNNING jobs with a worker_id using only the columns
+    # needed for orphan recovery. This avoids materializing the heavy default
+    # JobRecord payload for every RUNNING row.
+    cur = workflow._execute_with_retry(
+        """
+        SELECT id, orig_index, elements, charge, spin, job_dir, worker_id
+        FROM structures
+        WHERE status = ? AND worker_id IS NOT NULL
+        """,
+        (JobStatus.RUNNING.value,),
+    )
+    tracked = cur.fetchall()
 
     if not tracked:
         print("No RUNNING jobs with worker_id found -- nothing to recover.")
@@ -1538,7 +1551,7 @@ def recover_orphaned_jobs(
             "skipped": 0,
         }
 
-    unique_workers = {j.worker_id for j in tracked}
+    unique_workers = {row["worker_id"] for row in tracked}
     print(
         f"Found {len(tracked)} RUNNING jobs across {len(unique_workers)} "
         f"scheduler job(s)"
@@ -1573,56 +1586,58 @@ def recover_orphaned_jobs(
             "skipped": 0,
         }
 
-    orphans = [j for j in tracked if j.worker_id in dead_workers]
+    orphans = [row for row in tracked if row["worker_id"] in dead_workers]
     print(
         f"Detected {len(dead_workers)} dead scheduler job(s) with "
         f"{len(orphans)} orphaned molecule(s)"
     )
 
-    # Step 4: Check each orphan on disk, classify into batches
+    # Step 4: Resolve directories, then check each orphan on disk in parallel.
     completed_ids: list[int] = []
     failed_updates: list[tuple[int, str]] = []  # (job_id, error_msg)
     reset_ids: list[int] = []
 
     fallback_root = Path(root_dir) if root_dir is not None else None
+    probe_items: list[tuple[int, Path]] = []
 
     for job in orphans:
         job_dir_path: Path | None = None
-        if job.job_dir:
-            candidate = Path(job.job_dir)
+        if job["job_dir"]:
+            candidate = Path(job["job_dir"])
             if candidate.is_dir():
                 job_dir_path = candidate
 
         if job_dir_path is None and fallback_root is not None:
             fallback_dir = fallback_root / render_job_dir_pattern(
                 job_dir_pattern,
-                orig_index=job.orig_index,
-                job_id=job.id,
-                elements=job.elements,
-                charge=job.charge,
-                spin=job.spin,
+                orig_index=job["orig_index"],
+                job_id=job["id"],
+                elements=job["elements"],
+                charge=job["charge"],
+                spin=job["spin"],
             )
             if fallback_dir.is_dir():
                 job_dir_path = fallback_dir
 
         if job_dir_path is None:
-            reset_ids.append(job.id)
+            reset_ids.append(job["id"])
             if verbose:
-                print(f"  Job {job.id}: no recoverable job_dir -- reset to TO_RUN")
+                print(
+                    f"  Job {job['id']}: no recoverable job_dir -- reset to TO_RUN"
+                )
             continue
 
-        job_dir = str(job_dir_path)
+        probe_items.append((job["id"], job_dir_path))
 
-        # Check output files on disk (content-based, preserves content > age rule)
+    def _probe_orphaned_job(
+        job_id: int, job_dir_path: Path
+    ) -> tuple[int, int, str | None]:
+        """Return (job_id, disk_status, error_message) for one orphaned job."""
+        job_dir = str(job_dir_path)
         disk_status = check_job_termination(job_dir, hours_cutoff=hours_cutoff)
 
-        if disk_status == 1:
-            completed_ids.append(job.id)
-            if verbose:
-                print(f"  Job {job.id}: completed on disk -- marked COMPLETED")
-        elif disk_status == -1:
-            # Find the output file for error extraction
-            error_msg = None
+        error_msg = None
+        if disk_status == -1:
             try:
                 from ..utils.status import pull_log_file
 
@@ -1630,13 +1645,38 @@ def recover_orphaned_jobs(
                 error_msg = parse_failure_reason(log_file)
             except (FileNotFoundError, Exception):
                 pass
-            failed_updates.append((job.id, error_msg or "Orphaned job failed on disk"))
-            if verbose:
-                print(f"  Job {job.id}: failed on disk -- marked FAILED")
-        else:
-            reset_ids.append(job.id)
-            if verbose:
-                print(f"  Job {job.id}: inconclusive on disk -- reset to TO_RUN")
+
+        return job_id, disk_status, error_msg
+
+    if probe_items:
+        max_workers = max(1, min(workers, len(probe_items)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_job = {
+                executor.submit(_probe_orphaned_job, job_id, job_dir_path): job_id
+                for job_id, job_dir_path in probe_items
+            }
+
+            for future in as_completed(future_to_job):
+                job_id = future_to_job[future]
+                probed_job_id, disk_status, error_msg = future.result()
+                assert probed_job_id == job_id
+
+                if disk_status == 1:
+                    completed_ids.append(job_id)
+                    if verbose:
+                        print(
+                            f"  Job {job_id}: completed on disk -- marked COMPLETED"
+                        )
+                elif disk_status == -1:
+                    failed_updates.append(
+                        (job_id, error_msg or "Orphaned job failed on disk")
+                    )
+                    if verbose:
+                        print(f"  Job {job_id}: failed on disk -- marked FAILED")
+                else:
+                    reset_ids.append(job_id)
+                    if verbose:
+                        print(f"  Job {job_id}: inconclusive on disk -- reset to TO_RUN")
 
     # Step 5: Batch DB writes (minimizes commits on Lustre)
     if completed_ids:
@@ -1802,7 +1842,10 @@ def main():
         "--workers",
         type=int,
         default=4,
-        help="Number of parallel workers for metrics extraction (default: 4)",
+        help=(
+            "Number of parallel workers for status checks, metrics extraction, "
+            "and orphan recovery (default: 4)"
+        ),
     )
     parser.add_argument(
         "--recheck-completed",
@@ -1988,6 +2031,7 @@ def main():
             scheduler=args.scheduler,
             hours_cutoff=args.hours_cutoff,
             verbose=getattr(args, "verbose", False),
+            workers=args.workers,
         )
 
     # Always show summary
