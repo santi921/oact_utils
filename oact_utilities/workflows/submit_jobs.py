@@ -172,13 +172,13 @@ def _parsl_active_window(
     scheduler: str,
     num_jobs: int,
     nodes_per_block: int,
-    init_blocks: int,
+    max_blocks: int,
     max_workers: int,
 ) -> int:
     """Return the number of Parsl futures to keep active."""
     if scheduler.lower() == "flux":
         return num_jobs
-    return nodes_per_block * init_blocks * max_workers
+    return nodes_per_block * max_blocks * max_workers
 
 
 def _submit_globus_backup_if_verified(
@@ -1971,7 +1971,7 @@ def submit_batch_parsl(
         root_dir: Root directory for job directories
         num_jobs: Active job window for Flux Parsl mode. Ignored for Slurm
             and PBS Pro, where the active window is derived from
-            ``nodes_per_block * init_blocks * max_workers``.
+            ``nodes_per_block * max_blocks * max_workers``.
         max_workers: Maximum number of concurrent workers
         cores_per_worker: CPU cores per worker
         cpus_per_node: Scheduler CPU cores reserved/requested per node. When
@@ -2068,7 +2068,7 @@ def submit_batch_parsl(
         scheduler=scheduler_key,
         num_jobs=num_jobs,
         nodes_per_block=nodes_per_block,
-        init_blocks=init_blocks,
+        max_blocks=max_blocks,
         max_workers=max_workers,
     )
 
@@ -2872,7 +2872,7 @@ def main():
         help=(
             "Traditional mode batch size, and Flux Parsl active window "
             "(default: 10). Ignored for Slurm/PBS Pro Parsl, where the "
-            "window is nodes_per_block * init_blocks * max_workers."
+            "window is nodes_per_block * max_blocks * max_workers."
         ),
     )
     parser.add_argument(

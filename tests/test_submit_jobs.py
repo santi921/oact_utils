@@ -106,36 +106,36 @@ class TestParslActiveWindow:
                 scheduler="flux",
                 num_jobs=500,
                 nodes_per_block=39,
-                init_blocks=1,
+                max_blocks=7,
                 max_workers=8,
             )
             == 500
         )
 
     def test_pbspro_ignores_batch_size_window(self):
-        """PBS Pro derives the active window from initial scheduler capacity."""
+        """PBS Pro derives the active window from max scheduler capacity."""
         assert (
             _parsl_active_window(
                 scheduler="pbspro",
-                num_jobs=8336,
+                num_jobs=10,
                 nodes_per_block=521,
-                init_blocks=1,
+                max_blocks=2,
                 max_workers=8,
             )
-            == 4168
+            == 8336
         )
 
     def test_slurm_ignores_batch_size_window(self):
-        """Slurm derives the active window from initial scheduler capacity."""
+        """Slurm derives the active window from max scheduler capacity."""
         assert (
             _parsl_active_window(
                 scheduler="slurm",
-                num_jobs=999999,
+                num_jobs=10,
                 nodes_per_block=10,
-                init_blocks=2,
+                max_blocks=4,
                 max_workers=4,
             )
-            == 80
+            == 160
         )
 
 
