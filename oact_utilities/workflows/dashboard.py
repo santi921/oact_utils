@@ -1873,7 +1873,7 @@ def main():
     parser.add_argument(
         "--scheduler",
         type=str,
-        choices=["slurm", "flux"],
+        choices=["slurm", "pbspro", "flux"],
         default=None,
         help="Scheduler type for --recover-orphans (required with --recover-orphans)",
     )
