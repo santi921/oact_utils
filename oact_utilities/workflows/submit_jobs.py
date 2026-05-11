@@ -73,6 +73,10 @@ class OrcaConfig(TypedDict, total=False):
         save_all_steps: Save all ORCA output files per Sella step (only with optimizer="sella").
         orca_path: Path to ORCA executable (default: scheduler-specific).
         ks_method: KS wavefunction type: "rks", "uks", or "roks" (default: None, ORCA auto-detects).
+        mem_per_job_mb: Optional total-job ORCA memory budget in MB. When set,
+            `%maxcore` is sized so total memory stays under 85% of this value.
+            Recommended on memory-constrained nodes (Sandia CTS-1: ~60000,
+            TLCC2: ~30000). Default: None (no clamp; per-process floor only).
     """
 
     functional: str
@@ -91,6 +95,7 @@ class OrcaConfig(TypedDict, total=False):
     orca_path: str
     diis_option: str | None
     ks_method: str | None
+    mem_per_job_mb: int | None
 
 
 DEFAULT_ORCA_CONFIG: OrcaConfig = {
@@ -265,6 +270,7 @@ def prepare_job_directory(
             actinide_ecp=config.get("actinide_ecp"),
             non_actinide_basis=config.get("non_actinide_basis", "def2-TZVPD"),
             ks_method=config.get("ks_method"),
+            mem_per_job_mb=config.get("mem_per_job_mb"),
         )
 
         # For Sella jobs: generate the runner shim script
@@ -2625,6 +2631,18 @@ def main():
         help="Number of cores per job (default: 4)",
     )
     parser.add_argument(
+        "--mem-per-job",
+        type=int,
+        default=None,
+        metavar="MB",
+        help=(
+            "Optional per-ORCA-job memory budget in MB. When set, %%maxcore "
+            "is sized so total memory stays under 85%% of this value. "
+            "Recommended on memory-constrained nodes (Sandia CTS-1: ~60000, "
+            "TLCC2: ~30000). Default: no clamp (per-process floor only)."
+        ),
+    )
+    parser.add_argument(
         "--n-hours",
         type=int,
         default=2,
@@ -2953,6 +2971,7 @@ def main():
         "save_all_steps": args.save_all_steps,
         "diis_option": "KDIIS" if args.kdiis else None,
         "ks_method": args.ks_method,
+        "mem_per_job_mb": args.mem_per_job,
     }
     if args.orca_path:
         orca_config["orca_path"] = args.orca_path
