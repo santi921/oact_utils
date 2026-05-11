@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -104,6 +105,7 @@ def _build_env(
     env["FAKE_GCP_ARGS_FILE"] = str(gcp_args_file)
     env["FAKE_GLOBUS_TASK_ID"] = "task-123"
     env["GLOBUS_CONNECT_STARTUP_WAIT"] = "0"
+    env["GLOBUS_TRANSFER_MIN_FILE_AGE_MINUTES"] = "0"
     return env
 
 
@@ -249,3 +251,53 @@ class TestGlobusTransferCompletedScript:
         assert result.returncode != 0
         assert "unsupported hostname" in result.stderr
         assert not globus_args_file.exists()
+
+    def test_skips_recently_modified_job_dirs(self, tmp_path):
+        db_path = tmp_path / "workflow.db"
+        old_job_dir = tmp_path / "jobs" / "job_123"
+        recent_job_dir = tmp_path / "jobs" / "job_456"
+        old_job_dir.mkdir(parents=True)
+        recent_job_dir.mkdir(parents=True)
+
+        old_file = old_job_dir / "orca.out"
+        recent_file = recent_job_dir / "orca.out"
+        old_file.write_text("done\n")
+        recent_file.write_text("done\n")
+        old_mtime = time.time() - 600
+        os.utime(old_file, (old_mtime, old_mtime))
+
+        _create_db(
+            db_path,
+            [
+                ("completed", str(old_job_dir)),
+                ("completed", str(recent_job_dir)),
+            ],
+        )
+
+        fake_bin = tmp_path / "fake_bin"
+        fake_bin.mkdir()
+        globus_args_file, globus_batch_copy, gcp_args_file = _install_fake_commands(
+            fake_bin
+        )
+        env = _build_env(
+            fake_bin,
+            globus_args_file,
+            globus_batch_copy,
+            gcp_args_file,
+            hostname="carpenter-login-01",
+            gcp_running=True,
+        )
+        env["GLOBUS_TRANSFER_MIN_FILE_AGE_MINUTES"] = "5"
+
+        result = subprocess.run(
+            ["bash", str(SCRIPT_PATH), str(db_path), "/BLASTNet/carpenter"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Skipped recently modified job directories: 1" in result.stderr
+        assert globus_batch_copy.read_text().strip() == (
+            f"{old_job_dir} /BLASTNet/carpenter/job_123 --recursive"
+        )
