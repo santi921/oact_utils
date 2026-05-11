@@ -136,6 +136,8 @@ DEFAULT_LD_LIBRARY_PATHS = {
 
 # Number of completed jobs to accumulate before flushing to DB.
 _BATCH_COMMIT_SIZE = 10
+_WORKER_STARTUP_FILE_WAIT_SECONDS = 60.0
+_WORKER_STARTUP_FILE_POLL_SECONDS = 1.0
 
 
 def _flush_pending_updates(
@@ -179,6 +181,31 @@ def _parsl_active_window(
     if scheduler.lower() == "flux":
         return num_jobs
     return nodes_per_block * max_blocks * max_workers
+
+
+def _wait_for_worker_startup_file(
+    path: Path,
+    timeout_seconds: float = _WORKER_STARTUP_FILE_WAIT_SECONDS,
+) -> None:
+    """Wait briefly for a freshly prepared worker file to become readable.
+
+    Shared filesystems can momentarily hide new directory entries or reject
+    immediate cross-node opens even after the coordinator has closed the file.
+    """
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    last_exc: OSError | None = None
+
+    while True:
+        try:
+            with path.open("rb") as fh:
+                fh.read(1)
+            return
+        except OSError as exc:
+            last_exc = exc
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise last_exc
+            time.sleep(min(_WORKER_STARTUP_FILE_POLL_SECONDS, remaining))
 
 
 def _submit_globus_backup_if_verified(
@@ -924,6 +951,8 @@ if PARSL_AVAILABLE:
         from pathlib import Path
         from types import SimpleNamespace
 
+        submit_jobs_mod = import_module("oact_utilities.workflows.submit_jobs")
+
         if job_payload is not None:
             if root_dir is None:
                 return {
@@ -932,9 +961,7 @@ if PARSL_AVAILABLE:
                     "error": "Missing root_dir for deferred job preparation",
                 }
             job_record = SimpleNamespace(**job_payload)
-            prepare_job_directory_impl = import_module(
-                "oact_utilities.workflows.submit_jobs"
-            ).prepare_job_directory
+            prepare_job_directory_impl = submit_jobs_mod.prepare_job_directory
             job_dir_path = prepare_job_directory_impl(
                 job_record,
                 Path(root_dir),
@@ -947,26 +974,40 @@ if PARSL_AVAILABLE:
         else:
             job_dir_path = Path(job_dir)
         optimizer = orca_config.get("optimizer")
+        wait_for_startup_file = submit_jobs_mod._wait_for_worker_startup_file
+        startup_wait_seconds = submit_jobs_mod._WORKER_STARTUP_FILE_WAIT_SECONDS
 
         # Determine command based on optimizer
         if optimizer == "sella":
             sella_script = job_dir_path / "run_sella.py"
-            if not sella_script.exists():
+            try:
+                wait_for_startup_file(sella_script)
+            except OSError as exc:
                 return {
                     "job_id": job_id,
                     "status": "failed",
-                    "error": f"Sella script not found: {sella_script}",
+                    "error": (
+                        "Sella script not accessible after waiting "
+                        f"{int(startup_wait_seconds)}s: "
+                        f"{sella_script} ({type(exc).__name__}: {exc})"
+                    ),
                 }
             cmd = ["python", str(sella_script)]
             stdout_path = job_dir_path / "sella_driver.log"
             stderr_path = job_dir_path / "sella_driver.err"
         else:
             input_file = job_dir_path / "orca.inp"
-            if not input_file.exists():
+            try:
+                wait_for_startup_file(input_file)
+            except OSError as exc:
                 return {
                     "job_id": job_id,
                     "status": "failed",
-                    "error": f"Input file not found: {input_file}",
+                    "error": (
+                        "Input file not accessible after waiting "
+                        f"{int(startup_wait_seconds)}s: "
+                        f"{input_file} ({type(exc).__name__}: {exc})"
+                    ),
                 }
             orca_cmd = orca_config.get("orca_path", "orca")
             cmd = [orca_cmd, str(input_file)]

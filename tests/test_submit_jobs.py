@@ -26,6 +26,7 @@ from oact_utilities.workflows.submit_jobs import (
     _deserialize_job_record,
     _serialize_job_record,
     _submit_globus_backup_if_verified,
+    _wait_for_worker_startup_file,
     _write_job_update,
     prepare_job_directory,
     write_flux_job_file,
@@ -137,6 +138,59 @@ class TestParslActiveWindow:
             )
             == 160
         )
+
+
+class TestWorkerStartupFileWait:
+    """Tests for worker-side startup file visibility retries."""
+
+    def test_returns_immediately_when_file_is_readable(self, tmp_path):
+        """Readable startup files should pass without waiting."""
+        input_file = tmp_path / "orca.inp"
+        input_file.write_text("! test\n")
+
+        _wait_for_worker_startup_file(input_file, timeout_seconds=0.0)
+
+    def test_retries_once_for_transient_file_not_found(self, monkeypatch, tmp_path):
+        """A transient open failure should be retried within the timeout window."""
+        input_file = tmp_path / "orca.inp"
+        input_file.write_text("! test\n")
+        real_open = Path.open
+        state = {"calls": 0}
+
+        def flaky_open(self, *args, **kwargs):
+            if self == input_file and state["calls"] == 0:
+                state["calls"] += 1
+                raise FileNotFoundError("transient metadata miss")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "oact_utilities.workflows.submit_jobs.time.sleep",
+            lambda _: None,
+        )
+        monkeypatch.setattr(Path, "open", flaky_open)
+
+        _wait_for_worker_startup_file(input_file, timeout_seconds=0.01)
+
+        assert state["calls"] == 1
+
+    def test_raises_real_exception_after_timeout(self, monkeypatch, tmp_path):
+        """The last filesystem exception should be preserved after timeout."""
+        input_file = tmp_path / "orca.inp"
+        real_open = Path.open
+
+        def denied_open(self, *args, **kwargs):
+            if self == input_file:
+                raise PermissionError("access denied")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "oact_utilities.workflows.submit_jobs.time.sleep",
+            lambda _: None,
+        )
+        monkeypatch.setattr(Path, "open", denied_open)
+
+        with pytest.raises(PermissionError, match="access denied"):
+            _wait_for_worker_startup_file(input_file, timeout_seconds=0.0)
 
 
 class TestParslJobSerialization:
