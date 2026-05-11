@@ -18,8 +18,7 @@ readonly DESTINATION_ENDPOINT_ID="05d2c76a-e867-4f67-aa57-76edeb0beda0"
 
 GLOBUS_CONNECT_PERSONAL_BIN="${GLOBUS_CONNECT_PERSONAL_BIN:-globusconnectpersonal}"
 GLOBUS_CONNECT_STARTUP_WAIT="${GLOBUS_CONNECT_STARTUP_WAIT:-2}"
-GLOBUS_TRANSFER_MIN_FILE_AGE_MINUTES="${GLOBUS_TRANSFER_MIN_FILE_AGE_MINUTES:-5}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES="${GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES:-${GLOBUS_TRANSFER_MIN_FILE_AGE_MINUTES:-5}}"
 BATCH_FILE_TO_CLEAN=""
 
 usage() {
@@ -62,43 +61,6 @@ detect_source_endpoint_id() {
     exit 1
 }
 
-has_recently_modified_files() {
-    local job_dir="$1"
-    local min_file_age_minutes="$2"
-
-    if [[ "$min_file_age_minutes" == "0" ]]; then
-        return 1
-    fi
-
-    "$PYTHON_BIN" - "$job_dir" "$min_file_age_minutes" <<'PY'
-from __future__ import annotations
-
-import os
-import sys
-import time
-from pathlib import Path
-
-job_dir = Path(sys.argv[1])
-min_age_minutes = float(sys.argv[2])
-
-if min_age_minutes <= 0:
-    raise SystemExit(1)
-
-threshold = time.time() - (min_age_minutes * 60.0)
-
-for root, _, files in os.walk(job_dir):
-    for file_name in files:
-        file_path = Path(root) / file_name
-        try:
-            if file_path.stat().st_mtime > threshold:
-                raise SystemExit(0)
-        except OSError:
-            continue
-
-raise SystemExit(1)
-PY
-}
-
 ensure_globus_connect_personal() {
     if pgrep -f "globusconnectpersonal" >/dev/null 2>&1; then
         echo "Globus Connect Personal is already running."
@@ -138,9 +100,13 @@ main() {
     require_cmd sqlite3
     require_cmd globus
     require_cmd "$GLOBUS_CONNECT_PERSONAL_BIN"
-    require_cmd "$PYTHON_BIN"
     require_cmd pgrep
     require_cmd mktemp
+
+    if ! [[ "$GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES" =~ ^[0-9]+$ ]]; then
+        echo "Error: GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES must be a nonnegative integer." >&2
+        exit 1
+    fi
 
     local source_endpoint_id
     source_endpoint_id="$(detect_source_endpoint_id)"
@@ -161,6 +127,45 @@ main() {
     local dest_path=""
     local -a missing_examples=()
     local -a recent_examples=()
+    local recent_sql_clause=""
+    local recent_sql_suffix=""
+
+    if (( GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES > 0 )); then
+        recent_sql_clause="AND updated_at <= datetime('now', '-${GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES} minutes')"
+        recent_sql_suffix="AND updated_at > datetime('now', '-${GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES} minutes')"
+    fi
+
+    if ! sqlite3 -batch -noheader "$db_path" "SELECT updated_at FROM structures LIMIT 0;" >/dev/null 2>&1; then
+        echo "Error: database is missing required column 'updated_at' for transfer quiet-period filtering." >&2
+        exit 1
+    fi
+
+    if (( GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES > 0 )); then
+        skipped_recent="$(
+            sqlite3 -batch -noheader "$db_path" \
+                "SELECT COUNT(DISTINCT job_dir)
+                 FROM structures
+                 WHERE status = 'completed'
+                   AND job_dir IS NOT NULL
+                   AND TRIM(job_dir) != ''
+                   ${recent_sql_suffix};"
+        )"
+
+        while IFS= read -r job_dir; do
+            [[ -z "$job_dir" ]] && continue
+            recent_examples+=("$job_dir")
+        done < <(
+            sqlite3 -batch -noheader "$db_path" \
+                "SELECT DISTINCT job_dir
+                 FROM structures
+                 WHERE status = 'completed'
+                   AND job_dir IS NOT NULL
+                   AND TRIM(job_dir) != ''
+                   ${recent_sql_suffix}
+                 ORDER BY job_dir
+                 LIMIT 3;"
+        )
+    fi
 
     while IFS= read -r job_dir; do
         [[ -z "$job_dir" ]] && continue
@@ -170,16 +175,6 @@ main() {
             skipped_missing=$((skipped_missing + 1))
             if [[ ${#missing_examples[@]} -lt 3 ]]; then
                 missing_examples+=("$job_dir")
-            fi
-            continue
-        fi
-
-        if has_recently_modified_files \
-            "$job_dir" \
-            "$GLOBUS_TRANSFER_MIN_FILE_AGE_MINUTES"; then
-            skipped_recent=$((skipped_recent + 1))
-            if [[ ${#recent_examples[@]} -lt 3 ]]; then
-                recent_examples+=("$job_dir")
             fi
             continue
         fi
@@ -196,6 +191,7 @@ main() {
              WHERE status = 'completed'
                AND job_dir IS NOT NULL
                AND TRIM(job_dir) != ''
+               ${recent_sql_clause}
              ORDER BY job_dir;"
     )
 
@@ -210,7 +206,7 @@ main() {
 
     if (( skipped_recent > 0 )); then
         echo "Skipped recently modified job directories: $skipped_recent" >&2
-        echo "  quiet period: ${GLOBUS_TRANSFER_MIN_FILE_AGE_MINUTES} minutes" >&2
+        echo "  quiet period: ${GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES} minutes (from DB updated_at)" >&2
         for job_dir in "${recent_examples[@]}"; do
             echo "  recent: $job_dir" >&2
         done

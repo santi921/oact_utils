@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import sqlite3
 import subprocess
-import time
 from pathlib import Path
 
 
@@ -21,10 +20,27 @@ BARFOOT_SOURCE_ENDPOINT_ID = "1ea1ecb5-4d77-11f1-848e-0ea3589134b3"
 DESTINATION_ENDPOINT_ID = "05d2c76a-e867-4f67-aa57-76edeb0beda0"
 
 
-def _create_db(db_path: Path, rows: list[tuple[str, str | None]]) -> None:
+def _create_db(
+    db_path: Path,
+    rows: list[tuple[str, str | None] | tuple[str, str | None, str | None]],
+) -> None:
     conn = sqlite3.connect(str(db_path))
-    conn.execute("CREATE TABLE structures (status TEXT, job_dir TEXT)")
-    conn.executemany("INSERT INTO structures(status, job_dir) VALUES (?, ?)", rows)
+    conn.execute(
+        "CREATE TABLE structures (status TEXT, job_dir TEXT, updated_at TIMESTAMP)"
+    )
+    normalized_rows = []
+    for row in rows:
+        if len(row) == 2:
+            status, job_dir = row
+            updated_at = "2000-01-01 00:00:00"
+        else:
+            status, job_dir, updated_at = row
+        normalized_rows.append((status, job_dir, updated_at))
+
+    conn.executemany(
+        "INSERT INTO structures(status, job_dir, updated_at) VALUES (?, ?, ?)",
+        normalized_rows,
+    )
     conn.commit()
     conn.close()
 
@@ -105,7 +121,7 @@ def _build_env(
     env["FAKE_GCP_ARGS_FILE"] = str(gcp_args_file)
     env["FAKE_GLOBUS_TASK_ID"] = "task-123"
     env["GLOBUS_CONNECT_STARTUP_WAIT"] = "0"
-    env["GLOBUS_TRANSFER_MIN_FILE_AGE_MINUTES"] = "0"
+    env["GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES"] = "0"
     return env
 
 
@@ -259,18 +275,14 @@ class TestGlobusTransferCompletedScript:
         old_job_dir.mkdir(parents=True)
         recent_job_dir.mkdir(parents=True)
 
-        old_file = old_job_dir / "orca.out"
-        recent_file = recent_job_dir / "orca.out"
-        old_file.write_text("done\n")
-        recent_file.write_text("done\n")
-        old_mtime = time.time() - 600
-        os.utime(old_file, (old_mtime, old_mtime))
+        (old_job_dir / "orca.out").write_text("done\n")
+        (recent_job_dir / "orca.out").write_text("done\n")
 
         _create_db(
             db_path,
             [
-                ("completed", str(old_job_dir)),
-                ("completed", str(recent_job_dir)),
+                ("completed", str(old_job_dir), "2000-01-01 00:00:00"),
+                ("completed", str(recent_job_dir), "2999-01-01 00:00:00"),
             ],
         )
 
@@ -287,7 +299,7 @@ class TestGlobusTransferCompletedScript:
             hostname="carpenter-login-01",
             gcp_running=True,
         )
-        env["GLOBUS_TRANSFER_MIN_FILE_AGE_MINUTES"] = "5"
+        env["GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES"] = "5"
 
         result = subprocess.run(
             ["bash", str(SCRIPT_PATH), str(db_path), "/BLASTNet/carpenter"],
