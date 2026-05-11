@@ -180,6 +180,9 @@ class TestGlobusTransferCompletedScript:
         )
 
         assert result.returncode == 0, result.stderr
+        assert "Completed job directories in DB: 3" in result.stdout
+        assert "Eligible job directories after DB quiet period: 3" in result.stdout
+        assert "Valid job directories queued: 2" in result.stdout
         assert "Submitted Globus task: task-123" in result.stdout
         assert "Skipped missing job directories: 1" in result.stderr
 
@@ -309,7 +312,10 @@ class TestGlobusTransferCompletedScript:
         )
 
         assert result.returncode == 0, result.stderr
-        assert "Skipped recently modified job directories: 1" in result.stderr
+        assert "Completed job directories in DB: 2" in result.stdout
+        assert "Eligible job directories after DB quiet period: 1" in result.stdout
+        assert "Valid job directories queued: 1" in result.stdout
+        assert "Skipped recently updated job directories: 1" in result.stderr
         assert globus_batch_copy.read_text().strip() == (
             f"{old_job_dir} /BLASTNet/carpenter/job_123 --recursive"
         )

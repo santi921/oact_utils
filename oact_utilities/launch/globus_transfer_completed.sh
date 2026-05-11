@@ -118,7 +118,8 @@ main() {
     BATCH_FILE_TO_CLEAN="$batch_file"
     trap 'rm -f -- "${BATCH_FILE_TO_CLEAN:-}"' EXIT
 
-    local selected_count=0
+    local total_completed_count=0
+    local eligible_count=0
     local valid_count=0
     local skipped_missing=0
     local skipped_recent=0
@@ -139,6 +140,15 @@ main() {
         echo "Error: database is missing required column 'updated_at' for transfer quiet-period filtering." >&2
         exit 1
     fi
+
+    total_completed_count="$(
+        sqlite3 -batch -noheader "$db_path" \
+            "SELECT COUNT(DISTINCT job_dir)
+             FROM structures
+             WHERE status = 'completed'
+               AND job_dir IS NOT NULL
+               AND TRIM(job_dir) != '';"
+    )"
 
     if (( GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES > 0 )); then
         skipped_recent="$(
@@ -169,7 +179,7 @@ main() {
 
     while IFS= read -r job_dir; do
         [[ -z "$job_dir" ]] && continue
-        selected_count=$((selected_count + 1))
+        eligible_count=$((eligible_count + 1))
 
         if [[ ! -d "$job_dir" ]]; then
             skipped_missing=$((skipped_missing + 1))
@@ -195,7 +205,7 @@ main() {
              ORDER BY job_dir;"
     )
 
-    echo "Completed rows selected: $selected_count"
+    echo "Completed job directories in DB: $total_completed_count"
 
     if (( skipped_missing > 0 )); then
         echo "Skipped missing job directories: $skipped_missing" >&2
@@ -205,7 +215,7 @@ main() {
     fi
 
     if (( skipped_recent > 0 )); then
-        echo "Skipped recently modified job directories: $skipped_recent" >&2
+        echo "Skipped recently updated job directories: $skipped_recent" >&2
         echo "  quiet period: ${GLOBUS_TRANSFER_MIN_UPDATE_AGE_MINUTES} minutes (from DB updated_at)" >&2
         for job_dir in "${recent_examples[@]}"; do
             echo "  recent: $job_dir" >&2
@@ -235,6 +245,7 @@ main() {
         exit 1
     fi
 
+    echo "Eligible job directories after DB quiet period: $eligible_count"
     echo "Valid job directories queued: $valid_count"
     echo "Submitted Globus task: $task_id"
 }
