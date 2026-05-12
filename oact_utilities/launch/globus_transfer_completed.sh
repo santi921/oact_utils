@@ -239,7 +239,7 @@ main() {
             --label "$label" \
             --jmespath 'task_id' \
             --format unix \
-            --sync-level checksum \
+            --sync-level size \
             --notify off
     )"; then
         echo "Error: Globus transfer submission failed." >&2
