@@ -37,11 +37,14 @@ from .job_dir_patterns import (
     render_job_dir_pattern,
 )
 from .wandb_logger import (
+    SNAPSHOT_INTERVAL_SEC,
     WANDB_AVAILABLE,
     add_wandb_args,
+    backfill_terminal_cdfs,
     finish_wandb_run,
     init_wandb_run,
     log_job_result,
+    log_progress_snapshot,
 )
 
 try:
@@ -2163,6 +2166,13 @@ def submit_batch_parsl(
     # Create future->(job_id, job_dir) mapping for concurrent completion
     futures_map = {future: (job_id, job_dir) for job_id, job_dir, future in futures}
 
+    # W&B live-snapshot throttle. Force one snapshot at t0 so the chart has
+    # a point representing the initial state of this submission batch.
+    _last_snap = 0.0
+    if wandb_run is not None:
+        log_progress_snapshot(wandb_run, workflow)
+        _last_snap = time.time()
+
     try:
         # as_completed() yields futures as they finish (concurrent, not sequential!)
         for future in as_completed(futures_map.keys()):
@@ -2265,6 +2275,16 @@ def submit_batch_parsl(
             _write_job_update(workflow, pending_updates[-1])
             pending_updates.pop()
 
+            # Throttled live snapshot to W&B. One check covers all four event
+            # paths (completed/timeout/failed/exception) above. Inline rather
+            # than a class -- gate is two lines.
+            if (
+                wandb_run is not None
+                and time.time() - _last_snap >= SNAPSHOT_INTERVAL_SEC
+            ):
+                _last_snap = time.time()
+                log_progress_snapshot(wandb_run, workflow)
+
             # Check shutdown flag AFTER DB writes for this future.
             if _shutdown_requested:
                 print("Shutdown requested -- exiting monitoring loop...")
@@ -2325,6 +2345,9 @@ def submit_batch_parsl(
         except Exception:
             pass
 
+        # Final live snapshot so the chart's last point reflects the true end
+        # state (orphans reset to TO_RUN above; failures/completions all in DB).
+        log_progress_snapshot(wandb_run, workflow)
         finish_wandb_run(wandb_run)
 
     print("\nSubmission complete:")
@@ -3011,6 +3034,9 @@ def main():
                     run_name=args.wandb_run_name or Path(args.db_path).stem,
                     run_id=args.wandb_run_id,
                 )
+                # Seed terminal-state CDF curves with all prior history from
+                # the DB. Cheap one-shot scan; emits one log per terminal row.
+                backfill_terminal_cdfs(wandb_run, workflow)
 
         # Parsl mode: concurrent execution (single-node or multi-node)
         submitted_ids = submit_batch_parsl(

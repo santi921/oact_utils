@@ -60,6 +60,12 @@ except ImportError:
     wandb = None  # type: ignore[assignment]
 
 
+# Minimum seconds between automatic live snapshots inside the Parsl
+# submission loop. Tune by editing this constant; intentionally not a CLI
+# flag (no user has asked for runtime control).
+SNAPSHOT_INTERVAL_SEC = 30
+
+
 def init_wandb_run(
     project: str,
     run_name: str | None = None,
@@ -90,6 +96,8 @@ def init_wandb_run(
         run.define_metric("_timestamp")
         run.define_metric("metrics/*", step_metric="_timestamp")
         run.define_metric("progress/*", step_metric="_timestamp")
+        run.define_metric("cdf/*", step_metric="_timestamp")
+        run.define_metric("gauge/*", step_metric="_timestamp")
         return run
     except Exception as e:
         print(f"Warning: W&B init failed: {e}. Continuing without logging.")
@@ -248,6 +256,111 @@ def log_campaign_snapshot(
             run.log(payload)
     except Exception as e:
         print(f"Warning: W&B log failed: {e}")
+
+
+def backfill_terminal_cdfs(run: Any, workflow: ArchitectorWorkflow) -> None:
+    """Backfill cumulative completed/failed/timeout time-series from the DB.
+
+    Reads `(status, updated_at)` for every terminal-state row via
+    ``workflow.iter_terminal_history()``, walks them in time order, and emits
+    one ``run.log`` call per row with the running cumulative counts under
+    ``cdf/completed``, ``cdf/failed``, ``cdf/timeout``. The x-axis is
+    ``_timestamp`` (Unix epoch seconds), registered by ``init_wandb_run``.
+
+    Safe to re-invoke: W&B accepts non-monotonic step values when a custom
+    ``step_metric`` is in effect, so duplicate timestamps from a second
+    backfill render correctly. The series is monotonically non-decreasing
+    by construction.
+
+    Caveat: ``updated_at`` is overwritten on every status change. Rows that
+    were reset after a terminal state lose their prior history. The
+    backfilled series is therefore a lower bound on terminal events.
+
+    Args:
+        run: W&B run object from ``init_wandb_run``, or ``None``.
+        workflow: Open ``ArchitectorWorkflow`` instance.
+    """
+    if run is None:
+        return
+    try:
+        history = workflow.iter_terminal_history()
+        cum_completed = 0
+        cum_failed = 0
+        cum_timeout = 0
+        for status, ts in history:
+            if status == "completed":
+                cum_completed += 1
+            elif status == "failed":
+                cum_failed += 1
+            elif status == "timeout":
+                cum_timeout += 1
+            else:
+                continue
+            run.log(
+                {
+                    "_timestamp": ts,
+                    "cdf/completed": cum_completed,
+                    "cdf/failed": cum_failed,
+                    "cdf/timeout": cum_timeout,
+                }
+            )
+    except Exception as e:
+        print(f"Warning: W&B backfill_terminal_cdfs failed: {e}")
+
+
+def log_progress_snapshot(run: Any, workflow: ArchitectorWorkflow) -> None:
+    """Log a live snapshot of campaign state to W&B.
+
+    Issues a single ``run.log`` call that updates the three terminal CDF
+    curves (``cdf/completed``, ``cdf/failed``, ``cdf/timeout``) with the
+    current counts plus the two live gauges ``gauge/running`` and
+    ``gauge/to_run``. The x-axis is wall-clock time (``_timestamp``).
+
+    Also refreshes ``run.summary`` with the same counts so the W&B run
+    overview reflects the latest snapshot.
+
+    Cumulative curves derived from a live snapshot are correct under the
+    "lower bound on terminal events" semantics documented for
+    ``backfill_terminal_cdfs``: terminal counts only grow.
+
+    Args:
+        run: W&B run object from ``init_wandb_run``, or ``None``.
+        workflow: Open ``ArchitectorWorkflow`` instance.
+    """
+    if run is None:
+        return
+    try:
+        from .architector_workflow import JobStatus
+
+        counts = workflow.count_by_status()
+        total = sum(counts.values())
+        completed = counts.get(JobStatus.COMPLETED, 0)
+        failed = counts.get(JobStatus.FAILED, 0)
+        timeout = counts.get(JobStatus.TIMEOUT, 0)
+        running = counts.get(JobStatus.RUNNING, 0)
+        to_run = counts.get(JobStatus.TO_RUN, 0)
+        run.log(
+            {
+                "_timestamp": time.time(),
+                "cdf/completed": completed,
+                "cdf/failed": failed,
+                "cdf/timeout": timeout,
+                "gauge/running": running,
+                "gauge/to_run": to_run,
+            }
+        )
+        run.summary.update(
+            {
+                "campaign/completed": completed,
+                "campaign/failed": failed,
+                "campaign/to_run": to_run,
+                "campaign/running": running,
+                "campaign/timeout": timeout,
+                "campaign/progress_pct": (100 * completed / total if total > 0 else 0),
+            }
+        )
+    except Exception as e:
+        print(f"Warning: W&B log_progress_snapshot failed: {e}")
 
 
 def add_wandb_args(parser: argparse.ArgumentParser) -> None:
