@@ -662,27 +662,23 @@ class ArchitectorWorkflow:
         rows = cur.fetchall()
         return {JobStatus(status): count for status, count in rows}
 
-    def iter_terminal_history(self) -> list[tuple[str, float]]:
-        """Return terminal-state rows as (status, updated_at_epoch), sorted by time.
+    def iter_terminal_history(self) -> list[tuple[str, str]]:
+        """Return (status, updated_at_string) for terminal-state rows.
 
-        Reads only rows whose current status is one of completed/failed/timeout,
-        and returns the wall-clock time of their last status transition (the
-        ``updated_at`` column, parsed to a Unix epoch in seconds).
-
-        Note on fidelity: ``updated_at`` is overwritten on every status change.
-        A row that failed and was later reset + recompleted is reported only
-        as ``completed`` at its most-recent timestamp; its prior failure is
-        lost. Backfilled CDFs are therefore a lower bound on terminal events.
+        Reads only rows whose current status is one of completed/failed/timeout
+        and returns the raw ``updated_at`` SQL string sorted ascending. Callers
+        parse the timestamp themselves (the workflow class is intentionally
+        unaware of how callers want time formatted).
 
         Returns:
-            List of ``(status_value, epoch_seconds)`` pairs sorted ascending by
-            ``epoch_seconds``. Rows with unparseable timestamps are skipped.
+            List of ``(status_value, updated_at_string)`` pairs sorted by
+            ``updated_at``. Rows with NULL ``updated_at`` are excluded by the
+            SQL filter.
         """
-        import datetime as _dt
-
         query = (
             "SELECT status, updated_at FROM structures "
-            "WHERE status IN (?, ?, ?) AND updated_at IS NOT NULL"
+            "WHERE status IN (?, ?, ?) AND updated_at IS NOT NULL "
+            "ORDER BY updated_at ASC"
         )
         cur = self._execute_with_retry(
             query,
@@ -692,24 +688,7 @@ class ArchitectorWorkflow:
                 JobStatus.TIMEOUT.value,
             ),
         )
-        out: list[tuple[str, float]] = []
-        for status, updated_at in cur.fetchall():
-            if updated_at is None:
-                continue
-            try:
-                if isinstance(updated_at, (int, float)):
-                    ts = float(updated_at)
-                else:
-                    # SQLite CURRENT_TIMESTAMP yields 'YYYY-MM-DD HH:MM:SS' (UTC).
-                    dt = _dt.datetime.strptime(
-                        str(updated_at), "%Y-%m-%d %H:%M:%S"
-                    ).replace(tzinfo=_dt.timezone.utc)
-                    ts = dt.timestamp()
-            except (ValueError, TypeError):
-                continue
-            out.append((status, ts))
-        out.sort(key=lambda x: x[1])
-        return out
+        return [(status, str(ts)) for status, ts in cur.fetchall()]
 
     def get_summary(self) -> pd.DataFrame:
         """Get summary statistics as a DataFrame.

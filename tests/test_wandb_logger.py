@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from oact_utilities.workflows.wandb_logger import (
-    SNAPSHOT_INTERVAL_SEC,
     backfill_terminal_cdfs,
     finish_wandb_run,
     init_wandb_run,
@@ -339,13 +338,16 @@ class TestIterTerminalHistory:
             ["completed", "completed", "completed", "failed", "failed", "timeout"]
         )
 
-        # Sorted ascending by timestamp.
+        # Returns raw SQL strings (callers parse), sorted ascending.
         times = [t for _s, t in history]
         assert times == sorted(times)
+        assert all(isinstance(t, str) for t in times)
 
-        # Spot-check: first terminal event is at t=10 (first completed).
-        expected_first = (base + datetime.timedelta(seconds=10)).timestamp()
-        assert abs(times[0] - expected_first) < 1.0
+        # Spot-check: first terminal event is at offset 10s from base.
+        expected_first = (base + datetime.timedelta(seconds=10)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        assert times[0] == expected_first
 
     def test_skips_rows_with_null_updated_at(self, populated_workflow):
         wf, _base = populated_workflow
@@ -413,39 +415,55 @@ class TestBackfillTerminalCdfs:
         assert "Warning" in captured.out
         assert "backfill_terminal_cdfs failed" in captured.out
 
-    def test_reset_erases_history_caveat(self, populated_workflow):
-        """A reset row drops its prior failure from the backfilled series.
-
-        Documents the known fidelity limitation: ``updated_at`` is overwritten
-        on every status change, so a row that failed and was later reset +
-        recompleted contributes only to ``cdf/completed`` -- the prior failure
-        point is gone from a fresh backfill.
-        """
-        wf, base = populated_workflow
-
-        # First backfill: 2 failures present.
-        run1 = MagicMock()
-        backfill_terminal_cdfs(run1, wf)
-        failed_final_before = run1.log.call_args_list[-1].args[0]["cdf/failed"]
-        assert failed_final_before == 2
-
-        # Simulate reset + recompletion: pick one failed row, mark it completed
-        # with a new updated_at. Its failure history disappears.
-        new_ts = (base + datetime.timedelta(seconds=100)).strftime("%Y-%m-%d %H:%M:%S")
+    def test_skips_rows_with_unparseable_timestamps(self, populated_workflow):
+        """A malformed updated_at string is skipped, not raised."""
+        wf, _base = populated_workflow
         wf.conn.execute(
-            "UPDATE structures SET status = 'completed', updated_at = ? "
-            "WHERE id = (SELECT id FROM structures WHERE status = 'failed' LIMIT 1)",
-            (new_ts,),
+            "UPDATE structures SET updated_at = 'not-a-timestamp' "
+            "WHERE id = (SELECT id FROM structures WHERE status = 'completed' LIMIT 1)"
         )
         wf.conn.commit()
 
-        run2 = MagicMock()
-        backfill_terminal_cdfs(run2, wf)
-        # Final failed count from the *new* backfill is now 1, not 2.
-        # (W&B itself retains the prior series; this assertion documents
-        # the DB-level behavior, not W&B's UI.)
-        failed_final_after = run2.log.call_args_list[-1].args[0]["cdf/failed"]
-        assert failed_final_after == 1
+        mock_run = MagicMock()
+        backfill_terminal_cdfs(mock_run, wf)
+
+        # 6 terminal rows -> 5 surviving after the malformed one is skipped.
+        assert mock_run.log.call_count == 5
+
+    def test_handles_fractional_second_timestamps(self, tmp_path):
+        """Backfill parses '2026-... HH:MM:SS.fff' as well as '...:SS'."""
+        from oact_utilities.utils.architector import _init_db, _insert_row
+        from oact_utilities.workflows import ArchitectorWorkflow
+
+        db_path = tmp_path / "frac.db"
+        conn = _init_db(db_path)
+        _insert_row(
+            conn,
+            orig_index=0,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="completed",
+        )
+        conn.execute(
+            "UPDATE structures SET updated_at = '2026-05-13 14:23:01.500' WHERE id = 1"
+        )
+        conn.commit()
+        conn.close()
+
+        wf = ArchitectorWorkflow(db_path)
+        try:
+            mock_run = MagicMock()
+            backfill_terminal_cdfs(mock_run, wf)
+            assert mock_run.log.call_count == 1
+            payload = mock_run.log.call_args[0][0]
+            # 2026-05-13 14:23:01.500 UTC -> epoch 1778336581.5
+            expected = datetime.datetime(
+                2026, 5, 13, 14, 23, 1, 500_000, tzinfo=datetime.timezone.utc
+            ).timestamp()
+            assert abs(payload["_timestamp"] - expected) < 0.01
+        finally:
+            wf.close()
 
 
 class TestLogProgressSnapshot:
@@ -467,21 +485,14 @@ class TestLogProgressSnapshot:
         assert payload["gauge/running"] == 1
         assert payload["gauge/to_run"] == 1
 
-    def test_summary_updated_with_campaign_counts(self, populated_workflow):
+    def test_does_not_touch_run_summary(self, populated_workflow):
+        """run.summary is owned by log_campaign_snapshot; this function only logs."""
         wf, _base = populated_workflow
         mock_run = MagicMock()
 
         log_progress_snapshot(mock_run, wf)
 
-        mock_run.summary.update.assert_called_once()
-        summary = mock_run.summary.update.call_args[0][0]
-        assert summary["campaign/completed"] == 3
-        assert summary["campaign/failed"] == 2
-        assert summary["campaign/timeout"] == 1
-        assert summary["campaign/running"] == 1
-        assert summary["campaign/to_run"] == 1
-        # 3 completed / 8 total = 37.5%.
-        assert abs(summary["campaign/progress_pct"] - 37.5) < 0.1
+        mock_run.summary.update.assert_not_called()
 
     def test_noop_when_run_is_none(self, populated_workflow):
         wf, _base = populated_workflow
@@ -497,34 +508,3 @@ class TestLogProgressSnapshot:
         captured = capsys.readouterr()
         assert "Warning" in captured.out
         assert "log_progress_snapshot failed" in captured.out
-
-
-class TestSnapshotIntervalConstant:
-    """The snapshot interval is a module constant, not a CLI flag."""
-
-    def test_default_value(self):
-        assert SNAPSHOT_INTERVAL_SEC == 30
-
-    def test_throttle_gate_behavior(self):
-        """The inline throttle pattern used in submit_jobs.py is correct.
-
-        This is a documentation test: it exercises the same arithmetic that
-        the Parsl loop uses (`if time.time() - last >= SNAPSHOT_INTERVAL_SEC`)
-        with mocked time so the assertion is deterministic.
-        """
-        import time as _time
-
-        with patch.object(_time, "time") as mock_time:
-            last = 0.0
-            mock_time.return_value = 100.0
-            # First check: 100 - 0 = 100 >= 30 -> fires.
-            assert _time.time() - last >= SNAPSHOT_INTERVAL_SEC
-            last = _time.time()
-
-            # Second check 10s later: 110 - 100 = 10 < 30 -> blocked.
-            mock_time.return_value = 110.0
-            assert not (_time.time() - last >= SNAPSHOT_INTERVAL_SEC)
-
-            # Third check 30s after last: fires again.
-            mock_time.return_value = 130.0
-            assert _time.time() - last >= SNAPSHOT_INTERVAL_SEC

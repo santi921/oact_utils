@@ -45,6 +45,7 @@ Usage (V2 -- dashboard --update scan)::
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -60,9 +61,6 @@ except ImportError:
     wandb = None  # type: ignore[assignment]
 
 
-# Minimum seconds between automatic live snapshots inside the Parsl
-# submission loop. Tune by editing this constant; intentionally not a CLI
-# flag (no user has asked for runtime control).
 SNAPSHOT_INTERVAL_SEC = 30
 
 
@@ -258,23 +256,28 @@ def log_campaign_snapshot(
         print(f"Warning: W&B log failed: {e}")
 
 
+def _parse_sqlite_timestamp(ts: str) -> float | None:
+    """Parse a SQLite TIMESTAMP string (UTC) to a Unix epoch in seconds.
+
+    Handles both integer-second (`'2026-05-13 14:23:01'`) and fractional
+    (`'2026-05-13 14:23:01.123'`) forms. Returns ``None`` on any parse
+    failure so callers can skip the row.
+    """
+    try:
+        dt = _dt.datetime.fromisoformat(ts.replace(" ", "T"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt.timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def backfill_terminal_cdfs(run: Any, workflow: ArchitectorWorkflow) -> None:
-    """Backfill cumulative completed/failed/timeout time-series from the DB.
+    """Backfill cdf/completed, cdf/failed, cdf/timeout from DB history.
 
-    Reads `(status, updated_at)` for every terminal-state row via
-    ``workflow.iter_terminal_history()``, walks them in time order, and emits
-    one ``run.log`` call per row with the running cumulative counts under
-    ``cdf/completed``, ``cdf/failed``, ``cdf/timeout``. The x-axis is
-    ``_timestamp`` (Unix epoch seconds), registered by ``init_wandb_run``.
-
-    Safe to re-invoke: W&B accepts non-monotonic step values when a custom
-    ``step_metric`` is in effect, so duplicate timestamps from a second
-    backfill render correctly. The series is monotonically non-decreasing
-    by construction.
-
-    Caveat: ``updated_at`` is overwritten on every status change. Rows that
-    were reset after a terminal state lose their prior history. The
-    backfilled series is therefore a lower bound on terminal events.
+    Walks ``workflow.iter_terminal_history()`` in time order and emits one
+    ``run.log`` per terminal row with the running cumulative counts.
+    Fidelity caveat: see ``docs/parsl_integration.md``.
 
     Args:
         run: W&B run object from ``init_wandb_run``, or ``None``.
@@ -283,11 +286,13 @@ def backfill_terminal_cdfs(run: Any, workflow: ArchitectorWorkflow) -> None:
     if run is None:
         return
     try:
-        history = workflow.iter_terminal_history()
         cum_completed = 0
         cum_failed = 0
         cum_timeout = 0
-        for status, ts in history:
+        for status, ts_str in workflow.iter_terminal_history():
+            ts = _parse_sqlite_timestamp(ts_str)
+            if ts is None:
+                continue
             if status == "completed":
                 cum_completed += 1
             elif status == "failed":
@@ -309,19 +314,10 @@ def backfill_terminal_cdfs(run: Any, workflow: ArchitectorWorkflow) -> None:
 
 
 def log_progress_snapshot(run: Any, workflow: ArchitectorWorkflow) -> None:
-    """Log a live snapshot of campaign state to W&B.
+    """Log a live snapshot of cdf/* and gauge/* at the current time.
 
-    Issues a single ``run.log`` call that updates the three terminal CDF
-    curves (``cdf/completed``, ``cdf/failed``, ``cdf/timeout``) with the
-    current counts plus the two live gauges ``gauge/running`` and
-    ``gauge/to_run``. The x-axis is wall-clock time (``_timestamp``).
-
-    Also refreshes ``run.summary`` with the same counts so the W&B run
-    overview reflects the latest snapshot.
-
-    Cumulative curves derived from a live snapshot are correct under the
-    "lower bound on terminal events" semantics documented for
-    ``backfill_terminal_cdfs``: terminal counts only grow.
+    Emits a single ``run.log`` with three cdf curves and two live gauges.
+    ``run.summary`` is owned by ``log_campaign_snapshot``; not touched here.
 
     Args:
         run: W&B run object from ``init_wandb_run``, or ``None``.
@@ -333,30 +329,14 @@ def log_progress_snapshot(run: Any, workflow: ArchitectorWorkflow) -> None:
         from .architector_workflow import JobStatus
 
         counts = workflow.count_by_status()
-        total = sum(counts.values())
-        completed = counts.get(JobStatus.COMPLETED, 0)
-        failed = counts.get(JobStatus.FAILED, 0)
-        timeout = counts.get(JobStatus.TIMEOUT, 0)
-        running = counts.get(JobStatus.RUNNING, 0)
-        to_run = counts.get(JobStatus.TO_RUN, 0)
         run.log(
             {
                 "_timestamp": time.time(),
-                "cdf/completed": completed,
-                "cdf/failed": failed,
-                "cdf/timeout": timeout,
-                "gauge/running": running,
-                "gauge/to_run": to_run,
-            }
-        )
-        run.summary.update(
-            {
-                "campaign/completed": completed,
-                "campaign/failed": failed,
-                "campaign/to_run": to_run,
-                "campaign/running": running,
-                "campaign/timeout": timeout,
-                "campaign/progress_pct": (100 * completed / total if total > 0 else 0),
+                "cdf/completed": counts.get(JobStatus.COMPLETED, 0),
+                "cdf/failed": counts.get(JobStatus.FAILED, 0),
+                "cdf/timeout": counts.get(JobStatus.TIMEOUT, 0),
+                "gauge/running": counts.get(JobStatus.RUNNING, 0),
+                "gauge/to_run": counts.get(JobStatus.TO_RUN, 0),
             }
         )
     except Exception as e:
