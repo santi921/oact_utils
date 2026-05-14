@@ -1,9 +1,9 @@
-normalizer_rmsd: 1.3053976527500468
+normalizer_rmsd: 2.2470040945551677
 regress_stress: false
 act_train:
   splits:
     train:
-      src: /pscratch/sd/i/ishan_a/open_actinides/act/train
+      src: /global/u2/i/ishan_a/oact_utils/data/v1_data/act/train
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0
@@ -21,7 +21,7 @@ act_train:
 act_val:
   splits:
     val:
-      src: /pscratch/sd/i/ishan_a/open_actinides/act/val
+      src: /global/u2/i/ishan_a/oact_utils/data/v1_data/act/val
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0
@@ -39,7 +39,7 @@ act_val:
 nonact_train:
   splits:
     train:
-      src: /pscratch/sd/i/ishan_a/open_actinides/nonact/train
+      src: /global/u2/i/ishan_a/oact_utils/data/v1_data/nonact/train
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0
@@ -57,7 +57,7 @@ nonact_train:
 nonact_val:
   splits:
     val:
-      src: /pscratch/sd/i/ishan_a/open_actinides/nonact/val
+      src: /global/u2/i/ishan_a/oact_utils/data/v1_data/nonact/val
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0

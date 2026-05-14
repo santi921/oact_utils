@@ -24,7 +24,7 @@ job:
       qos: premium
       account: m5250_g
       mem_gb: 0
-      timeout_hr: 24
+      timeout_hr: 12
       cpus_per_task: 5
       additional_parameters:
         constraint: gpu
