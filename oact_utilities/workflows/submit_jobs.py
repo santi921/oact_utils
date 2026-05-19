@@ -138,6 +138,7 @@ DEFAULT_LD_LIBRARY_PATHS = {
 _BATCH_COMMIT_SIZE = 10
 _WORKER_STARTUP_FILE_WAIT_SECONDS = 60.0
 _WORKER_STARTUP_FILE_POLL_SECONDS = 1.0
+_COORDINATOR_CLEANUP_LEAD_MINUTES = 5.0
 
 
 def _flush_pending_updates(
@@ -181,6 +182,56 @@ def _parsl_active_window(
     if scheduler.lower() == "flux":
         return num_jobs
     return nodes_per_block * max_blocks * max_workers
+
+
+def _compute_cleanup_deadline(
+    coordinator_walltime_hours: float | None,
+    cleanup_lead_minutes: float,
+    now: float | None = None,
+) -> float | None:
+    """Return the monotonic deadline when coordinator cleanup should begin.
+
+    Args:
+        coordinator_walltime_hours: Total coordinator allocation walltime in
+            hours. ``None`` disables the deadline.
+        cleanup_lead_minutes: Minutes to reserve for coordinator cleanup and
+            scheduler-side block cancellation.
+        now: Optional current monotonic timestamp for testability.
+
+    Returns:
+        Monotonic timestamp at which new submissions should stop and cleanup
+        should begin, or ``None`` if no coordinator deadline is configured.
+    """
+    if coordinator_walltime_hours is None:
+        return None
+
+    current_time = time.monotonic() if now is None else now
+    coordinator_seconds = max(0.0, coordinator_walltime_hours * 3600.0)
+    cleanup_lead_seconds = max(0.0, cleanup_lead_minutes * 60.0)
+    return current_time + max(0.0, coordinator_seconds - cleanup_lead_seconds)
+
+
+def _get_coordinator_walltime_hours() -> float | None:
+    """Read coordinator walltime from the explicit runtime environment."""
+    raw_value = os.environ.get("COORDINATOR_WALLTIME")
+    if not raw_value:
+        return None
+    try:
+        return float(raw_value)
+    except ValueError:
+        return None
+
+
+def _cleanup_deadline_reached(cleanup_deadline: float | None) -> bool:
+    """Return True once the coordinator should stop submitting new work."""
+    return cleanup_deadline is not None and time.monotonic() >= cleanup_deadline
+
+
+def _seconds_until_cleanup_deadline(cleanup_deadline: float | None) -> float | None:
+    """Return seconds remaining until coordinator cleanup should begin."""
+    if cleanup_deadline is None:
+        return None
+    return cleanup_deadline - time.monotonic()
 
 
 def _wait_for_worker_startup_file(
@@ -2112,6 +2163,10 @@ def submit_batch_parsl(
         max_blocks=max_blocks,
         max_workers=max_workers,
     )
+    cleanup_deadline = _compute_cleanup_deadline(
+        coordinator_walltime_hours=_get_coordinator_walltime_hours(),
+        cleanup_lead_minutes=_COORDINATOR_CLEANUP_LEAD_MINUTES,
+    )
 
     if dry_run:
         jobs_to_submit = filter_jobs_for_submission(
@@ -2302,6 +2357,15 @@ def submit_batch_parsl(
         f"\nSubmitting jobs to Parsl with a refill window of {active_window} "
         "claimed jobs..."
     )
+    if cleanup_deadline is not None:
+        cleanup_hours = max(
+            0.0, (_seconds_until_cleanup_deadline(cleanup_deadline) or 0.0) / 3600.0
+        )
+        print(
+            "Coordinator cleanup deadline enabled: "
+            f"shutdown begins in {cleanup_hours:.2f} hours "
+            f"({_COORDINATOR_CLEANUP_LEAD_MINUTES:g} min lead)"
+        )
     print("(Press Ctrl+C for graceful shutdown)\n")
 
     task_map_path = Path(parsl_config.run_dir).resolve() / "parsl_task_map.tsv"
@@ -2327,6 +2391,8 @@ def submit_batch_parsl(
 
     def _claim_and_submit_window(task_map_fh: Any) -> bool:
         nonlocal pending_updates
+        if _cleanup_deadline_reached(cleanup_deadline):
+            return False
         needed = active_window - len(active_futures)
         if needed <= 0:
             return False
@@ -2460,7 +2526,7 @@ def submit_batch_parsl(
             print(f"Submitted job {job_id} to Parsl")
             _flush_if_buffered()
 
-            if _shutdown_requested:
+            if _shutdown_requested or _cleanup_deadline_reached(cleanup_deadline):
                 return True
 
         return True
@@ -2480,6 +2546,13 @@ def submit_batch_parsl(
 
                 claimed_any = _claim_and_submit_window(task_map_fh)
 
+                if _cleanup_deadline_reached(cleanup_deadline):
+                    print(
+                        "Coordinator cleanup deadline reached -- stopping new "
+                        "submissions and beginning shutdown..."
+                    )
+                    _shutdown_requested = True
+
                 if _shutdown_requested:
                     print("Shutdown requested -- exiting monitoring loop...")
                     break
@@ -2489,7 +2562,33 @@ def submit_batch_parsl(
                         break
                     continue
 
-                done, _ = wait(active_futures.keys(), return_when=FIRST_COMPLETED)
+                wait_timeout = None
+                remaining_until_cleanup = _seconds_until_cleanup_deadline(cleanup_deadline)
+                if remaining_until_cleanup is not None:
+                    if remaining_until_cleanup <= 0:
+                        _shutdown_requested = True
+                        print(
+                            "Coordinator cleanup deadline reached while waiting "
+                            "for active tasks..."
+                        )
+                        break
+                    wait_timeout = min(remaining_until_cleanup, 60.0)
+
+                done, _ = wait(
+                    active_futures.keys(),
+                    timeout=wait_timeout,
+                    return_when=FIRST_COMPLETED,
+                )
+
+                if not done:
+                    if _cleanup_deadline_reached(cleanup_deadline):
+                        _shutdown_requested = True
+                        print(
+                            "Coordinator cleanup deadline reached with "
+                            "active tasks still running..."
+                        )
+                        break
+                    continue
 
                 for future in done:
                     job_id, job_dir = active_futures.pop(future)

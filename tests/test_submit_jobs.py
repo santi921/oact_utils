@@ -19,7 +19,11 @@ from oact_utilities.workflows.submit_jobs import (
     OrcaConfig,
     _classify_parsl_future_failure,
     _classify_claimed_job,
+    _cleanup_deadline_reached,
+    _compute_cleanup_deadline,
+    _COORDINATOR_CLEANUP_LEAD_MINUTES,
     _flush_pending_updates,
+    _get_coordinator_walltime_hours,
     _get_scheduler_job_id,
     _is_manager_lost_exception,
     _parsl_active_window,
@@ -138,6 +142,43 @@ class TestParslActiveWindow:
             )
             == 160
         )
+
+
+class TestCoordinatorCleanupDeadline:
+    """Tests for coordinator shutdown timing in Parsl mode."""
+
+    def test_deadline_starts_five_minutes_before_168_hour_limit(self):
+        """Cleanup begins 5 minutes before the detected coordinator limit."""
+        now = 1000.0
+        deadline = _compute_cleanup_deadline(
+            coordinator_walltime_hours=168.0,
+            cleanup_lead_minutes=_COORDINATOR_CLEANUP_LEAD_MINUTES,
+            now=now,
+        )
+
+        assert deadline == pytest.approx(now + (168 * 3600) - (5 * 60))
+
+    def test_deadline_reached_uses_monotonic_clock(self, monkeypatch):
+        """Deadline checks trip once the monotonic clock crosses the target."""
+        monkeypatch.setattr(
+            "oact_utilities.workflows.submit_jobs.time.monotonic",
+            lambda: 10.0,
+        )
+        assert _cleanup_deadline_reached(9.0) is True
+        assert _cleanup_deadline_reached(10.5) is False
+        assert _cleanup_deadline_reached(None) is False
+
+    def test_get_coordinator_walltime_prefers_environment(self, monkeypatch):
+        """Coordinator deadline should come from COORDINATOR_WALLTIME."""
+        monkeypatch.setenv("COORDINATOR_WALLTIME", "168.0")
+
+        assert _get_coordinator_walltime_hours() == pytest.approx(168.0)
+
+    def test_get_coordinator_walltime_rejects_non_float(self, monkeypatch):
+        """Malformed coordinator walltime disables the deadline."""
+        monkeypatch.setenv("COORDINATOR_WALLTIME", "7-00:00:00")
+
+        assert _get_coordinator_walltime_hours() is None
 
 
 class TestWorkerStartupFileWait:
