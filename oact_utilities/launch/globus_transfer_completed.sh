@@ -164,6 +164,7 @@ main() {
 
     python3 - "$all_dirs_file" "$eligible_dirs_file" "$recent_dirs_file" >"$analysis_file" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -206,7 +207,7 @@ if not eligible_existing:
 if len(eligible_existing) == 1:
     source_root = eligible_existing[0].parent
 else:
-    source_root = Path(Path.commonpath([str(path) for path in eligible_existing]))
+    source_root = Path(os.path.commonpath([str(path) for path in eligible_existing]))
 
 completed_rel = []
 for path in eligible_existing:
