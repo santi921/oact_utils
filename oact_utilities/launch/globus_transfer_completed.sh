@@ -108,7 +108,7 @@ main() {
 
     local temp_dir all_dirs_file analysis_file
     temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/globus-transfer-bulk.XXXXXX")"
-    trap 'rm -rf -- "$temp_dir"' EXIT
+    trap 'rm -rf -- "${temp_dir:-}"' EXIT
     all_dirs_file="$temp_dir/all_dirs.txt"
     analysis_file="$temp_dir/analysis.json"
 
