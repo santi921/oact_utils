@@ -184,6 +184,13 @@ Three schedulers are wired into `submit_jobs.py` (`--scheduler {flux,slurm,pbspr
 
 When writing HPC utilities, support Flux, SLURM, and PBS Pro with configurable parameters and avoid hardcoding paths/accounts/modules at the call site.
 
+**Site-specific defaults to override on first use:** Several CLI defaults are seeded with the original developer's paths/accounts and will fail elsewhere. New users must override one or more of:
+
+- `--orca-path` -- `DEFAULT_ORCA_PATHS` in `submit_jobs.py` has user-specific paths (Flux: `/usr/workspace/vargas58/...`, Sandia: `/home/svargas/...`). Always pass `--orca-path` until the binary is in `PATH`.
+- `--conda-base` -- Defaults to `/usr/WS1/vargas58/miniconda3` (LLNL Tuolumne). Override on every other site.
+- `--conda-env` -- Defaults to `py10mpi`. Sandia launch scripts use `oact`. Pick whatever matches `pip install -e .` on the target host.
+- `--qos` / `--account` -- Scale-out defaults `frontier` / `ODEFN5169CYFZ` are LLNL-only. Pass site-correct values or use the per-site launch scripts under `launch/` which already encode them.
+
 ### Job Submission Modes
 
 **Traditional Mode** — submits each job as a separate Flux/SLURM batch job:
@@ -320,6 +327,16 @@ python -m oact_utilities.workflows.submit_jobs <db> <root_dir> [options]
 --queue pbatch                    --allocation dnn-sim
 --max-fail-count 3                # Skip jobs that failed N+ times
 
+# Common per-site overrides (often required on a new cluster)
+--orca-path /path/to/orca         # Override scheduler-keyed default in DEFAULT_ORCA_PATHS
+--conda-env py10mpi               # Conda env name in worker_init / job script
+--conda-base /path/to/miniconda3  # Conda root (Parsl worker_init)
+--ld-library-path PATH            # Override LD_LIBRARY_PATH in generated job scripts
+--job-dir-pattern '{hostname}_job_{orig_index}'   # Template for job directory names
+--job-prefix campaignA            # Stable prefix prepended to job_dir (survives requeues)
+--reroot                          # Ignore stored job_dir, rebuild from <root_dir>
+--dry-run                         # Prepare jobs but do not submit
+
 # HPC site profile (SLURM only)
 --hpc-site {default,sandia}       # Selects job-script writer + worker_init
 --partition PART                  # Sandia: SLURM partition (default: attaway)
@@ -346,9 +363,13 @@ python -m oact_utilities.workflows.submit_jobs <db> <root_dir> [options]
 # ORCA config
 --functional wB97M-V              --simple-input {omol,omol_base,x2c,dk3,pm3}
 --actinide-basis ma-def-TZVP      --non-actinide-basis def2-TZVPD
+--actinide-ecp def-ECP            # Pass 'none' (case-insensitive) to disable the ECP
 --scf-maxiter N                   --ks-method {rks,uks,roks}
 --optimizer {orca,sella}          --opt-level {loose,normal,tight,verytight}
---mbis                            --kdiis
+--fmax 0.05                       # Sella force convergence threshold (Eh/Bohr)
+--max-opt-steps N                 # Sella max steps (default: 100)
+--save-all-steps                  # Sella: keep per-step ORCA outputs for replay/debug
+--nbo                             --mbis             --kdiis
 --mem-per-job MB                  # Total-job memory clamp; sizes %maxcore per MPI rank
 ```
 

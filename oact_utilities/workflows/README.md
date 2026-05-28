@@ -136,7 +136,7 @@ python -m oact_utilities.workflows.submit_jobs \\
 | `--functional` | wB97M-V | DFT functional |
 | `--simple-input` | omol | Input template: `omol`, `omol_base`, `x2c`, `dk3`, or `pm3` |
 | `--actinide-basis` | ma-def-TZVP | Basis set for actinides |
-| `--actinide-ecp` | None | ECP for actinides |
+| `--actinide-ecp` | def-ECP | ECP for actinides. Pass `none` (case-insensitive) to disable. |
 | `--non-actinide-basis` | def2-TZVPD | Basis set for other elements |
 | `--scf-maxiter` | ORCA default | Maximum SCF iterations |
 | `--ks-method` | None | KS wavefunction: `rks`, `uks`, `roks` (None = ORCA auto-detect) |
