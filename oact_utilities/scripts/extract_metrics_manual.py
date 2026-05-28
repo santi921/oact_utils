@@ -1,6 +1,7 @@
 """
 Walk a root directory of ORCA job subdirectories and write
-``orca_metrics.json`` and ``generator_metrics.json`` next to each ORCA output.
+``orca_metrics.json`` and ``generator_metrics.json`` next to each ORCA output
+(or, with ``--output-root``, into a mirrored tree at a writable location).
 
 Useful when you have a folder of completed jobs without the corresponding
 workflow SQLite DB and want the same per-job caches that the Parsl pipeline
@@ -10,20 +11,34 @@ Usage:
     python -m oact_utilities.scripts.extract_metrics_manual /path/to/root
     python -m oact_utilities.scripts.extract_metrics_manual /path/to/root \
         --workers 8 --recompute --no-generator
+    # Read-only source tree -> mirror outputs elsewhere:
+    python -m oact_utilities.scripts.extract_metrics_manual /lus/.../barfoot \
+        --output-root /home/me/barfoot_metrics --workers 8
 """
 
 import argparse
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from oact_utilities.utils.analysis import (
     GENERATOR_AVAILABLE,
+    _sanitize_for_json,
     find_timings_and_cores,
     parse_generator_data,
     parse_job_metrics,
 )
 from oact_utilities.utils.status import pull_log_file
+
+try:
+    from qtaim_gen.source.core.parse_orca import (
+        find_orca_output_file,
+        parse_orca_output,
+    )
+except ImportError:
+    find_orca_output_file = None  # type: ignore[assignment]
+    parse_orca_output = None  # type: ignore[assignment]
 
 
 def _has_orca_output(job_dir: Path) -> bool:
@@ -47,8 +62,37 @@ def _find_job_dirs(root: Path, recursive: bool) -> list[Path]:
     return results
 
 
+def _mirrored_dir(job_dir: Path, source_root: Path, output_root: Path) -> Path:
+    rel = job_dir.relative_to(source_root)
+    out = output_root / rel
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _generator_to_path(job_dir: Path, dest_file: Path, recompute: bool) -> bool:
+    """Parse generator data and write JSON to dest_file. Returns True on success."""
+    if find_orca_output_file is None or parse_orca_output is None:
+        return False
+    if dest_file.exists() and not recompute:
+        return True
+    try:
+        out_path = find_orca_output_file(str(job_dir))
+    except Exception:
+        return False
+    if out_path is None:
+        return False
+    try:
+        result = parse_orca_output(out_path)
+        dest_file.write_text(json.dumps(_sanitize_for_json(result)))
+        return True
+    except Exception:
+        return False
+
+
 def process_job(
     job_dir: Path,
+    source_root: Path,
+    output_root: Path | None,
     recompute: bool,
     do_generator: bool,
     unzip: bool,
@@ -72,8 +116,6 @@ def process_job(
         result["metrics_ok"] = True
         result["success"] = bool(metrics.get("success"))
 
-        # Attach wall_time / n_cores into the cache so downstream tooling
-        # has the same fields the DB-driven path records.
         try:
             log_file = pull_log_file(str(job_dir))
             n_cores, time_dict = find_timings_and_cores(log_file)
@@ -84,14 +126,33 @@ def process_job(
         except Exception as exc:
             result["error"] = f"timing: {exc}"
 
+        if output_root is not None:
+            try:
+                dest = _mirrored_dir(job_dir, source_root, output_root)
+                payload = {k: v for k, v in metrics.items() if k != "_cache_hit"}
+                (dest / "orca_metrics.json").write_text(
+                    json.dumps(_sanitize_for_json(payload))
+                )
+            except Exception as exc:
+                prev = result["error"]
+                msg = f"mirror metrics: {exc}"
+                result["error"] = f"{prev}; {msg}" if prev else msg
+
     except Exception as exc:
         result["error"] = f"metrics: {exc}"
         return result
 
     if do_generator and GENERATOR_AVAILABLE and result["success"]:
         try:
-            gen = parse_generator_data(job_dir, recompute=recompute)
-            result["generator_ok"] = gen is not None
+            if output_root is not None:
+                dest = _mirrored_dir(job_dir, source_root, output_root)
+                ok = _generator_to_path(
+                    job_dir, dest / "generator_metrics.json", recompute
+                )
+                result["generator_ok"] = ok
+            else:
+                gen = parse_generator_data(job_dir, recompute=recompute)
+                result["generator_ok"] = gen is not None
         except Exception as exc:
             prev = result["error"]
             msg = f"generator: {exc}"
@@ -104,6 +165,16 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("root", type=Path, help="Root directory of job subdirectories")
     p.add_argument("--workers", type=int, default=4, help="Parallel workers")
+    p.add_argument(
+        "--output-root",
+        type=Path,
+        default=None,
+        help=(
+            "Write orca_metrics.json / generator_metrics.json to a parallel "
+            "tree under this directory instead of into each job_dir. "
+            "Use when the source tree is read-only."
+        ),
+    )
     p.add_argument(
         "--recompute",
         action="store_true",
@@ -136,6 +207,12 @@ def main() -> None:
     if not root.is_dir():
         raise SystemExit(f"Not a directory: {root}")
 
+    output_root: Path | None = None
+    if args.output_root is not None:
+        output_root = args.output_root.resolve()
+        output_root.mkdir(parents=True, exist_ok=True)
+        print(f"Mirroring outputs to {output_root}")
+
     if args.no_generator:
         do_generator = False
     else:
@@ -159,6 +236,8 @@ def main() -> None:
             ex.submit(
                 process_job,
                 jd,
+                root,
+                output_root,
                 args.recompute,
                 do_generator,
                 args.unzip,
@@ -184,7 +263,7 @@ def main() -> None:
                 )
 
     print()
-    print(f"Job directories scanned : {len(job_dirs)}")
+    print(f"Job directories scanned  : {len(job_dirs)}")
     print(f"orca_metrics.json written: {n_metrics}")
     print(f"generator_metrics.json   : {n_generator}")
     print(f"Successful ORCA jobs     : {n_success}")

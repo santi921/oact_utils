@@ -40,6 +40,7 @@ try:
     )
 
     GENERATOR_AVAILABLE = True
+
 except ImportError:
     find_orca_output_file = None  # type: ignore[assignment]
     parse_orca_output = None  # type: ignore[assignment]
