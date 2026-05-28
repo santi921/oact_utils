@@ -17,11 +17,6 @@
 #PBS -l select=1:ncpus=1:mpiprocs=1
 #PBS -j oe
 
-GLOBUS_TRANSFER_FLAG=""
-if [ "$1" = "--globus-transfer" ]; then
-    GLOBUS_TRANSFER_FLAG="--globus-transfer"
-fi
-
 # ---- Configuration (edit these) ----
 DB_PATH="/path/to/workflow.db"
 ROOT_DIR="/path/to/job_output_dir"
@@ -43,16 +38,6 @@ MAX_FAIL_COUNT=3
 WANDB_PROJECT=""        # e.g. "actinide-campaign"
 WANDB_RUN_NAME=""       # display name in W&B UI (default: db filename stem)
 WANDB_RUN_ID=""         # resume an existing run across batches
-
-# Globus backup (optional). Endpoint values may also be provided by the
-# environment. Use GLOBUS_TRANSFER_REFRESH_TOKEN for campaign runs.
-export GLOBUS_SOURCE_ENDPOINT_ID="${GLOBUS_SOURCE_ENDPOINT_ID:-}"
-export GLOBUS_DESTINATION_ENDPOINT_ID="${GLOBUS_DESTINATION_ENDPOINT_ID:-}"
-export GLOBUS_DEST_ROOT="${GLOBUS_DEST_ROOT:-}"
-export GLOBUS_CLIENT_ID="${GLOBUS_CLIENT_ID:-}"
-export GLOBUS_TRANSFER_REFRESH_TOKEN="${GLOBUS_TRANSFER_REFRESH_TOKEN:-}"
-export GLOBUS_CLIENT_SECRET="${GLOBUS_CLIENT_SECRET:-}"  # optional
-GLOBUS_CONNECT_PERSONAL_BIN="${GLOBUS_CONNECT_PERSONAL_BIN:-globusconnectpersonal}"
 
 # PBS Pro scale-out settings
 NODES_PER_BLOCK=39
@@ -76,17 +61,11 @@ cd "${PBS_O_WORKDIR}"
 source ~/.bashrc
 conda activate "${CONDA_ENV}"
 
-if [ "${GLOBUS_TRANSFER_FLAG}" = "--globus-transfer" ]; then
-    GLOBUS_CONNECT_JOB_ID="${SLURM_JOB_ID:-${PBS_JOBID:-${FLUX_JOB_ID:-$$}}}"
-    nohup "${GLOBUS_CONNECT_PERSONAL_BIN}" -start >"/tmp/globusconnectpersonal_${GLOBUS_CONNECT_JOB_ID}.log" 2>&1 &
-fi
-
 python -m oact_utilities.workflows.submit_jobs \
     "${DB_PATH}" \
     "${ROOT_DIR}" \
     --use-parsl \
     --scheduler pbspro \
-    ${GLOBUS_TRANSFER_FLAG} \
     ${JOB_PREFIX:+--job-prefix "${JOB_PREFIX}"} \
     --batch-size "${BATCH_SIZE}" \
     --max-workers "${MAX_WORKERS}" \
