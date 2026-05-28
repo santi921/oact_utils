@@ -91,12 +91,18 @@ oact_utilities/
 │   ├── clean.py                # Job directory cleanup utility (scratch, basis, purge failed)
 │   ├── dashboard.py            # CLI dashboard for monitoring + parallel status updates
 │   ├── submit_jobs.py          # Batch job submission (Traditional + Parsl modes)
+│   ├── parsl_launchers.py      # Parsl Config builders (LocalProvider, SlurmProvider, PBSProProvider, Sandia variants)
+│   ├── job_dir_patterns.py     # Job directory name templates (hostname/orig_index/id)
+│   ├── wandb_logger.py         # Optional W&B online monitoring hooks
 │   ├── README.md               # Detailed workflow documentation
 │   └── QUICKSTART.md           # Quick start guide
-├── launch/                     # HPC launch scripts
-│   ├── run_parsl_single_node.sh
-│   ├── run_parsl_multi_node.sh
-│   └── run_parsl_coordinator.sh
+├── launch/                     # HPC launch scripts (one per site/topology)
+│   ├── run_parsl_single_node.sh           # LLNL Tuolumne, Flux LocalProvider
+│   ├── run_parsl_multi_node.sh            # LLNL multi-node SLURM (SlurmProvider)
+│   ├── run_parsl_multi_node_pbs.sh        # Generic PBS Pro multi-node (PBSProProvider)
+│   ├── run_parsl_multi_node_sandia.sh     # Sandia CTS1/TLCC2 multi-block SlurmProvider
+│   ├── run_parsl_single_node_sandia.sh    # Sandia CTS1/TLCC2 single-node LocalProvider
+│   └── run_parsl_coordinator.sh           # Lightweight coordinator wrapper
 ├── scripts/                    # Campaign-specific workflow scripts
 │   ├── wave_one/               # First wave calculations
 │   ├── wave_two/               # Second wave calculations
@@ -151,19 +157,32 @@ All templates now include `Print[ P_Hirshfeld ] 1` in the `%output` block for Hi
 
 ## HPC Systems
 
+Three schedulers are wired into `submit_jobs.py` (`--scheduler {flux,slurm,pbspro}`) and the dashboard's `--recover-orphans` path (`--scheduler {slurm,pbspro,flux}`). Site-specific behavior (modules, partitions, MPI env, ORCA path) is selected with `--hpc-site` and a small set of overrides.
+
 ### Primary: Tuolumne (LLNL)
 
 - Scheduler: **Flux**
 - Job files: `flux_job.flux`
 - Submit command: `flux batch <job_file>`
+- Default conda env: `py10mpi`; default ORCA at `/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca`
 
-### Future: DoD Systems
+### Sandia CTS1 / TLCC2 (attaway, ecl)
 
-- Scheduler: **SLURM**
-- Job files: `slurm_job.sh`
-- Submit command: `sbatch <job_file>`
+- Scheduler: **SLURM**, selected via `--hpc-site sandia`
+- Job script writer: `write_slurm_sandia_job_file()` in `workflows/submit_jobs.py` (uses `module load`, OMPI MCA env, `--partition`)
+- Defaults: account `fy250086`, qos `normal`, partition `attaway`, OpenMPI module `aue/openmpi/4.1.6-gcc-12.3.0`, ntasks-per-node 36 (CTS1) / 16 (TLCC2)
+- OMPI MCA settings disable PSM2/Omni-Path: `pml=ob1`, `mtl=^psm2`, `btl=tcp,self,vader`
+- Default ORCA at `/home/${USER}/orca_6_1_0_linux_x86-64_shared_openmpi418/orca` (user-installed shared build)
+- Launch scripts: `launch/run_parsl_single_node_sandia.sh` (LocalProvider inside `salloc`), `launch/run_parsl_multi_node_sandia.sh` (multi-block SlurmProvider)
 
-When writing HPC utilities, always support both Flux and SLURM with configurable parameters.
+### Planned: Digital Research Alliance of Canada (Fir, Trillium, Narval, Nibi, Rorqual)
+
+- Scheduler: **SLURM**, CVMFS-shared StdEnv stack, ORCA module gated by license registration
+- Per-cluster storage is independent (no central shared filesystem); 3 of 5 clusters have no internet on compute nodes
+- ORCA must be invoked by absolute path, never via `srun`/`mpirun` (ORCA spawns its own MPI from `%pal nprocs`)
+- Trillium scheduling is whole-node only (192 cores/node) and home/project are read-only inside jobs
+
+When writing HPC utilities, support Flux, SLURM, and PBS Pro with configurable parameters and avoid hardcoding paths/accounts/modules at the call site.
 
 ### Job Submission Modes
 
@@ -182,7 +201,26 @@ python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
     --use-parsl --batch-size 200 --max-workers 4 --cores-per-worker 16
 ```
 
+**Parsl Mode (Sandia CTS1/TLCC2, multi-block SLURM)** — Parsl auto-provisions worker blocks; the coordinator only needs Python:
+
+```bash
+sbatch oact_utilities/launch/run_parsl_multi_node_sandia.sh
+# or, inside an interactive allocation:
+salloc -N1 -p attaway -A fy250086 -t 8:00:00 && \
+    bash oact_utilities/launch/run_parsl_single_node_sandia.sh
+```
+
 See `docs/parsl_integration.md` for full Parsl architecture details.
+
+### ORCA Memory Sizing
+
+ORCA interprets `%maxcore` as memory **per MPI rank**, not per job. `get_mem_estimate()` in `core/orca/calc.py` returns a per-process value with a 1500 MB floor. Pass `--mem-per-job MB` on `submit_jobs` to clamp total job memory to 85% of a budget; recommended on memory-constrained nodes:
+
+- Sandia CTS1 (attaway, ~64 GB/node, 36 cores): `--mem-per-job 60000`
+- Sandia TLCC2 (~32 GB/node, 16 cores): `--mem-per-job 30000`
+- Tuolumne / large-memory nodes: leave unset
+
+The PM3 debug path bypasses this and uses `%maxcore 512`.
 
 ## Workflow Database Schema
 
@@ -277,24 +315,41 @@ Creating job submission scripts from custom datasets:
 python -m oact_utilities.workflows.submit_jobs <db> <root_dir> [options]
 
 # Scheduler options
---scheduler {flux,slurm}     --batch-size N
---n-cores 4                  --n-hours 2
---queue pbatch               --allocation dnn-sim
---max-fail-count 3           # Skip jobs that failed N+ times
+--scheduler {flux,slurm,pbspro}   --batch-size N
+--n-cores 4                       --n-hours 2
+--queue pbatch                    --allocation dnn-sim
+--max-fail-count 3                # Skip jobs that failed N+ times
 
-# Parsl mode
---use-parsl                  --max-workers 4
---cores-per-worker 16        --job-timeout 7200
+# HPC site profile (SLURM only)
+--hpc-site {default,sandia}       # Selects job-script writer + worker_init
+--partition PART                  # Sandia: SLURM partition (default: attaway)
+--openmpi-module MOD              # Sandia: OpenMPI module (default: aue/openmpi/4.1.6-gcc-12.3.0)
+
+# Parsl mode (any scheduler)
+--use-parsl                       --max-workers 4
+--cores-per-worker 16             --job-timeout 7200
+--clean-on-complete               # Inline clean.py --clean-all per completed job
+--purge-on-fail                   # Inline clean.py --purge-failed per failed job
+--no-parsl-monitoring             # Skip MonitoringHub / monitoring.db
+
+# Parsl scale-out (--use-parsl --scheduler slurm|pbspro)
+--nodes-per-block 1               --max-blocks 10
+--init-blocks 2                   --min-blocks 1
+--walltime-hours 2                --cpus-per-node N
+--qos frontier                    --account ODEFN5169CYFZ
+--mpirun-path /path/to/mpirun     # PBS Pro: override mpirun discovery
 
 # W&B online monitoring (Parsl mode only, optional)
---wandb-project PROJECT      --wandb-run-name NAME
+--wandb-project PROJECT           --wandb-run-name NAME
 --wandb-run-id ID
 
 # ORCA config
---functional wB97M-V         --simple-input {omol,x2c,dk3,omol_base}
---actinide-basis ma-def-TZVP --non-actinide-basis def2-TZVPD
---opt                        --nbo
---mbis                       --diis-option KDIIS
+--functional wB97M-V              --simple-input {omol,omol_base,x2c,dk3,pm3}
+--actinide-basis ma-def-TZVP      --non-actinide-basis def2-TZVPD
+--scf-maxiter N                   --ks-method {rks,uks,roks}
+--optimizer {orca,sella}          --opt-level {loose,normal,tight,verytight}
+--mbis                            --kdiis
+--mem-per-job MB                  # Total-job memory clamp; sizes %maxcore per MPI rank
 ```
 
 ### 3. Job Monitoring & Dashboards
@@ -337,8 +392,8 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --max-retries N              # Only reset jobs with fail_count < N
 
 # Crash recovery
---recover-orphans            # Detect jobs orphaned by dead scheduler allocations
---scheduler {slurm,flux}     # Scheduler type (required with --recover-orphans)
+--recover-orphans                 # Detect jobs orphaned by dead scheduler allocations
+--scheduler {slurm,pbspro,flux}   # Scheduler type (required with --recover-orphans)
 
 # Performance
 --debug N                    # Limit to N jobs for testing

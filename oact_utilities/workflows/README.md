@@ -134,15 +134,17 @@ python -m oact_utilities.workflows.submit_jobs \\
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--functional` | wB97M-V | DFT functional |
-| `--simple-input` | omol | Input template: `omol`, `omol_base`, `x2c`, or `dk3` |
+| `--simple-input` | omol | Input template: `omol`, `omol_base`, `x2c`, `dk3`, or `pm3` |
 | `--actinide-basis` | ma-def-TZVP | Basis set for actinides |
 | `--actinide-ecp` | None | ECP for actinides |
 | `--non-actinide-basis` | def2-TZVPD | Basis set for other elements |
 | `--scf-maxiter` | ORCA default | Maximum SCF iterations |
+| `--ks-method` | None | KS wavefunction: `rks`, `uks`, `roks` (None = ORCA auto-detect) |
 | `--nbo` | False | Enable NBO analysis |
 | `--mbis` | False | Enable MBIS population analysis |
 | `--kdiis` | False | Use KDIIS SCF convergence accelerator |
-| `--opt` | False | Enable geometry optimization |
+| `--optimizer` | None | Geometry optimizer: `orca` (native) or `sella` (external ASE) |
+| `--mem-per-job` | None | Total-job memory budget (MB). Sizes `%maxcore` per MPI rank under 85% of this value. Recommended on memory-constrained nodes (Sandia CTS-1: ~60000, TLCC2: ~30000) |
 | `--orca-path` | scheduler-specific | Path to ORCA executable |
 | `--conda-env` | py10mpi | Conda environment to activate |
 
@@ -156,16 +158,71 @@ python -m oact_utilities.workflows.submit_jobs \\
 | `--job-timeout` | 72000 | Per-job timeout in seconds (20 hours) |
 | `--conda-base` | /usr/WS1/vargas58/miniconda3 | Conda base path for worker init |
 
-**SLURM Multi-Node Parsl Options (`--use-parsl --scheduler slurm`):**
+**Scale-Out Parsl Options (`--use-parsl --scheduler slurm|pbspro`):**
+
+Parsl provisions worker allocations ("blocks") on the scheduler's behalf. Total capacity is `max_blocks * nodes_per_block * max_workers`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--max-blocks` | 10 | Maximum SLURM nodes to provision |
-| `--init-blocks` | 2 | Nodes to request at startup |
-| `--min-blocks` | 1 | Minimum nodes to keep alive |
-| `--walltime-hours` | 2 | Walltime per SLURM node allocation (hours) |
+| `--nodes-per-block` | 1 | Nodes per scheduler block (>1 enables multi-node blocks with SrunLauncher) |
+| `--max-blocks` | 10 | Maximum scheduler blocks Parsl will provision |
+| `--init-blocks` | 2 | Blocks to request at startup |
+| `--min-blocks` | 1 | Minimum blocks to keep alive |
+| `--walltime-hours` | 2 | Walltime per block allocation (hours) |
+| `--cpus-per-node` | `max_workers * cores_per_worker` | Scheduler CPU cores reserved per node (useful when a system requires whole-node requests but you intentionally idle some cores) |
 | `--qos` | frontier | SLURM QOS |
-| `--account` | ODEFN5169CYFZ | SLURM account/allocation |
+| `--account` | ODEFN5169CYFZ | Scheduler account/allocation |
+| `--mpirun-path` | autodetect via `which mpirun` | PBS Pro only: override mpirun discovery when the queue's default module set lacks it |
+
+For single-node Parsl runs (`--max-blocks 1`), use the single-node launch scripts under `launch/` and run Parsl with `LocalProvider` inside an existing allocation.
+
+### HPC Site Profiles
+
+`--hpc-site` selects a per-site bundle of defaults (modules, partition, MPI env, ORCA path) so a single submit command works on every cluster. Only `slurm` schedulers consult this flag.
+
+| `--hpc-site` | Job-script writer | When to use |
+|--------------|-------------------|-------------|
+| `default` | `write_slurm_job_file()` | Generic SLURM with `conda activate` + `--constraint=standard` (LLNL-style). ORCA expected on `PATH` unless `--orca-path` is set. |
+| `sandia` | `write_slurm_sandia_job_file()` | Sandia CTS1/TLCC2 (attaway/ecl). Emits `module load <openmpi>`, sets `OMPI_MCA_pml/mtl/btl` to bypass PSM2/Omni-Path, requests `--partition`, and points at the user-installed shared ORCA build. |
+
+**Sandia defaults** (overridable via CLI):
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--partition` | `attaway` | SLURM partition. CTS1 uses `attaway`; TLCC2 partitions differ. |
+| `--openmpi-module` | `aue/openmpi/4.1.6-gcc-12.3.0` | Must match ORCA's shared-library build. |
+| `--allocation` | `fy250086` | Sandia account. |
+| `--queue` (QOS) | `normal` | |
+| `--n-cores` | 36 | CTS1 attaway = 36 cores/node; TLCC2 = 16. |
+
+**Sandia launch scripts** (under `oact_utilities/launch/`):
+
+- `run_parsl_single_node_sandia.sh` -- LocalProvider inside an existing `salloc`. Best for development and short campaigns. Includes `--max-blocks 1` to pin to a single allocation.
+- `run_parsl_multi_node_sandia.sh` -- Multi-block SlurmProvider. Parsl auto-provisions worker allocations; the coordinator script itself can run on a login node or as a small sbatch job, and only needs Python (no OpenMPI in the coordinator's env).
+
+```bash
+# Single-node, inside an interactive allocation
+salloc -N1 -p attaway -A fy250086 -t 8:00:00
+conda activate oact
+bash oact_utilities/launch/run_parsl_single_node_sandia.sh
+
+# Multi-block (Parsl provisions its own SLURM blocks)
+sbatch oact_utilities/launch/run_parsl_multi_node_sandia.sh
+```
+
+**Adding a new HPC site:** mirror the Sandia pattern in `submit_jobs.py`:
+
+1. Add `<SITE>_DEFAULT_*` constants near the existing `SANDIA_DEFAULT_*` block.
+2. Add a `write_slurm_<site>_job_file()` if the site needs module loads / MPI env / partition not covered by the default writer.
+3. Add `_build_parsl_<site>_worker_init*()` and a `build_parsl_config_<site>()` if multi-block Parsl behavior diverges from the generic SlurmProvider.
+4. Extend the `--hpc-site` choices and the dispatch in `submit_batch_traditional()` / `submit_batch_parsl()`.
+5. Add launch script templates under `launch/` (single-node and multi-block).
+
+### PBS Pro Multi-Node Parsl
+
+`--scheduler pbspro` selects `PBSProProvider` (via `build_parsl_config_pbspro()`). The per-block resource request is derived from `nodes_per_block` and the worker count; PBS Pro has no `exclusive` keyword, so request whole nodes via `--cpus-per-node`. `--mpirun-path` is recommended on systems where the default module set omits an MPI runtime from the coordinator's `PATH`.
+
+Orphan recovery (`dashboard.py --recover-orphans --scheduler pbspro`) is supported: the dashboard queries the active PBS Pro job set and resets molecules whose `worker_id` no longer exists.
 
 ### 3. Monitor Progress
 
@@ -724,13 +781,16 @@ When a scheduler allocation is killed (walltime limit, scancel, node crash), job
 # Check SLURM for dead allocations and recover orphaned jobs
 python -m oact_utilities.workflows.dashboard workflow.db --recover-orphans --scheduler slurm
 
+# Same for PBS Pro / OpenPBS
+python -m oact_utilities.workflows.dashboard workflow.db --recover-orphans --scheduler pbspro
+
 # Same for Flux
 python -m oact_utilities.workflows.dashboard workflow.db --recover-orphans --scheduler flux
 ```
 
 The recovery process:
 1. Finds all RUNNING jobs with a `worker_id` (scheduler job ID set at submission time)
-2. Queries the scheduler (`squeue` or `flux jobs`) for active jobs -- single call for all
+2. Queries the scheduler (`squeue`, `qstat`, or `flux jobs`) for active jobs -- single call for all
 3. Jobs whose `worker_id` is no longer active are orphans
 4. Each orphan is checked on disk: completed -> COMPLETED, failed -> FAILED, inconclusive -> TO_RUN
 5. Content-based checks always take priority (a completed job is never incorrectly reset)
