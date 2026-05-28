@@ -1,6 +1,7 @@
 """Tests for submit_jobs module."""
 
 import importlib.util
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -1952,3 +1953,207 @@ class TestSubmitBatchParslSandiaRouting:
         )
         assert len(local_calls) == 1
         assert len(slurm_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Inline cleanup hooks (--clean-on-complete / --purge-on-fail)
+# ---------------------------------------------------------------------------
+
+
+class TestInlineCleanupHooks:
+    """Tests for the Parsl-mode inline cleanup hooks in submit_jobs."""
+
+    @staticmethod
+    def _make_completed_job_dir(root: Path, name: str) -> Path:
+        """Create a job_dir with the file mix --clean-all targets."""
+        job_dir = root / name
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "orca.out").write_text("Some output\nORCA TERMINATED NORMALLY\n")
+        (job_dir / "orca.inp").write_text("! wB97M-V")
+        (job_dir / "orca.engrad").write_text("0 1")
+        (job_dir / "orca.tmp").write_text("scratch")
+        (job_dir / "orca.tmp.7").write_text("scratch")
+        (job_dir / "orca.bas").write_text("basis")
+        (job_dir / "orca.bas0").write_text("basis")
+        (job_dir / "orca_tmp_abc123").mkdir()
+        (job_dir / "orca_tmp_abc123" / "guess.gbw").write_text("x")
+        return job_dir
+
+    def test_cleanup_completed_removes_scratch_keeps_critical(self, tmp_path):
+        """--clean-on-complete strips tmp/bas/orca_tmp_* and preserves outputs."""
+        from oact_utilities.workflows.submit_jobs import (
+            _cleanup_completed_job_inline,
+        )
+
+        job_dir = self._make_completed_job_dir(tmp_path, "job_1")
+
+        _cleanup_completed_job_inline(str(job_dir), tmp_path, optimizer=None)
+
+        # Scratch + basis removed
+        assert not (job_dir / "orca.tmp").exists()
+        assert not (job_dir / "orca.tmp.7").exists()
+        assert not (job_dir / "orca.bas").exists()
+        assert not (job_dir / "orca.bas0").exists()
+        assert not (job_dir / "orca_tmp_abc123").exists()
+        # Critical outputs preserved
+        assert (job_dir / "orca.out").exists()
+        assert (job_dir / "orca.inp").exists()
+        assert (job_dir / "orca.engrad").exists()
+
+    def test_cleanup_completed_swallows_errors(self, tmp_path, capsys):
+        """A cleanup failure must not raise; it must only print a warning."""
+        from unittest.mock import patch
+
+        from oact_utilities.workflows.submit_jobs import (
+            _cleanup_completed_job_inline,
+        )
+
+        job_dir = self._make_completed_job_dir(tmp_path, "job_2")
+
+        with patch(
+            "oact_utilities.workflows.submit_jobs._process_job",
+            side_effect=RuntimeError("boom"),
+        ):
+            _cleanup_completed_job_inline(str(job_dir), tmp_path, optimizer=None)
+
+        assert "cleanup error" in capsys.readouterr().out
+
+    def test_cleanup_skips_revalidation(self, tmp_path):
+        """Inline cleanup passes skip_revalidation=True (Parsl already verified)."""
+        from unittest.mock import patch
+
+        from oact_utilities.workflows.submit_jobs import (
+            _cleanup_completed_job_inline,
+        )
+
+        job_dir = self._make_completed_job_dir(tmp_path, "job_3")
+
+        with patch(
+            "oact_utilities.workflows.submit_jobs._process_job",
+            return_value=([], 0, []),
+        ) as mock_proc:
+            _cleanup_completed_job_inline(str(job_dir), tmp_path, optimizer="sella")
+
+        _, kwargs = mock_proc.call_args
+        assert kwargs["skip_revalidation"] is True
+        assert kwargs["categories"] == {"tmp", "bas"}
+        assert kwargs["execute"] is True
+        assert kwargs["optimizer"] == "sella"
+
+    @staticmethod
+    def _make_failed_db(tmp_path: Path, job_id: int) -> Path:
+        import sqlite3
+
+        db_path = tmp_path / "wf.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE structures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO structures (id, status) VALUES (?, ?)",
+            (job_id, "failed"),
+        )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_purge_failed_writes_marker_and_deletes(self, tmp_path):
+        """--purge-on-fail writes .do_not_rerun.json and removes other files."""
+        from unittest.mock import MagicMock
+
+        from oact_utilities.workflows.clean import MARKER_FILENAME
+        from oact_utilities.workflows.submit_jobs import (
+            _purge_failed_job_inline,
+        )
+
+        job_id = 17
+        db_path = self._make_failed_db(tmp_path, job_id)
+
+        job_dir = tmp_path / "job_17"
+        job_dir.mkdir()
+        (job_dir / "orca.out").write_text("aborting the run\n")
+        (job_dir / "orca.inp").write_text("! BP86")
+        (job_dir / "orca.tmp").write_text("scratch")
+        (job_dir / "orca_tmp_xyz").mkdir()
+        (job_dir / "orca_tmp_xyz" / "guess.gbw").write_text("x")
+
+        job_record = MagicMock()
+        job_record.id = job_id
+        job_record.orig_index = 99
+        job_record.elements = "U;O;O"
+        job_record.charge = 0
+        job_record.spin = 1
+        job_record.fail_count = 1  # pre-increment value
+
+        _purge_failed_job_inline(
+            str(job_dir),
+            tmp_path,
+            db_path,
+            job_record,
+            error_message="ORCA exited with code 1",
+        )
+
+        # Only marker remains
+        remaining = {p.name for p in job_dir.iterdir()}
+        assert remaining == {MARKER_FILENAME}, remaining
+
+        # Marker content reflects the increment + the new error message
+        marker = json.loads((job_dir / MARKER_FILENAME).read_text())
+        assert marker["orig_index"] == 99
+        assert marker["elements"] == "U;O;O"
+        assert marker["charge"] == 0
+        assert marker["spin"] == 1
+        assert marker["fail_count"] == 2  # +1 over the pre-increment record
+        assert marker["error_message"] == "ORCA exited with code 1"
+
+    def test_purge_failed_skips_when_db_status_mismatch(self, tmp_path):
+        """TOCTOU re-check: if DB says not failed, contents are preserved."""
+        import sqlite3
+        from unittest.mock import MagicMock
+
+        from oact_utilities.workflows.submit_jobs import (
+            _purge_failed_job_inline,
+        )
+
+        job_id = 5
+        db_path = tmp_path / "wf.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE structures (id INTEGER PRIMARY KEY, status TEXT)")
+        # status != "failed" -- TOCTOU should bail
+        conn.execute(
+            "INSERT INTO structures (id, status) VALUES (?, ?)",
+            (job_id, "completed"),
+        )
+        conn.commit()
+        conn.close()
+
+        job_dir = tmp_path / "job_5"
+        job_dir.mkdir()
+        (job_dir / "orca.out").write_text("ORCA TERMINATED NORMALLY\n")
+        (job_dir / "orca.tmp").write_text("scratch")
+
+        job_record = MagicMock()
+        job_record.id = job_id
+        job_record.orig_index = 1
+        job_record.elements = "U"
+        job_record.charge = 0
+        job_record.spin = 1
+        job_record.fail_count = 0
+
+        _purge_failed_job_inline(
+            str(job_dir),
+            tmp_path,
+            db_path,
+            job_record,
+            error_message="should not be purged",
+        )
+
+        # Nothing was deleted, no marker written
+        assert (job_dir / "orca.out").exists()
+        assert (job_dir / "orca.tmp").exists()
+        assert not (job_dir / ".do_not_rerun.json").exists()

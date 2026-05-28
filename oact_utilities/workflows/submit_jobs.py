@@ -30,7 +30,12 @@ from ..utils.analysis import (
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobStatus
-from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
+from .clean import (
+    MARKER_ERROR_MESSAGE,
+    _process_job,
+    _purge_failed_job,
+    is_marker_blocked,
+)
 from .job_dir_patterns import (
     DEFAULT_JOB_DIR_PATTERN,
     apply_job_dir_prefix,
@@ -196,6 +201,70 @@ def _write_job_update(
     params.append(job_id)
     workflow._execute_with_retry(query, tuple(params))
     workflow._commit_with_retry()
+
+
+def _cleanup_completed_job_inline(
+    job_dir: str,
+    root_dir: Path,
+    optimizer: str | None,
+) -> None:
+    """Run --clean-all (tmp + bas) on a job_dir that just completed.
+
+    Reuses ``clean._process_job`` with ``skip_revalidation=True`` since the
+    Parsl worker already verified ``ORCA TERMINATED NORMALLY``. Errors are
+    printed but never propagate -- cleanup must not derail the submitter.
+    """
+    try:
+        _matched, _freed, errs = _process_job(
+            Path(job_dir).resolve(),
+            root_dir.resolve(),
+            categories={"tmp", "bas"},
+            execute=True,
+            hours_cutoff=24,
+            optimizer=optimizer,
+            skip_revalidation=True,
+        )
+        for e in errs[:3]:
+            print(f"  cleanup warning ({Path(job_dir).name}): {e}")
+    except Exception as e:
+        print(f"  cleanup error ({Path(job_dir).name}): {e}")
+
+
+def _purge_failed_job_inline(
+    job_dir: str,
+    root_dir: Path,
+    db_path: Path,
+    job,
+    error_message: str | None,
+) -> None:
+    """Purge a just-failed job_dir: write marker, delete contents.
+
+    Reuses ``clean._purge_failed_job``; its TOCTOU DB re-check still applies
+    and is satisfied because we wrote ``FAILED`` to the DB immediately before
+    calling this. ``job.fail_count`` reflects the pre-increment value from the
+    in-memory record; ``+1`` matches the SQL-side increment.
+    """
+    metadata: dict[str, str | int | None] = {
+        "orig_index": job.orig_index,
+        "elements": job.elements,
+        "charge": job.charge,
+        "spin": job.spin,
+        "fail_count": (job.fail_count or 0) + 1,
+        "error_message": error_message,
+    }
+    try:
+        _matched, _freed, errs = _purge_failed_job(
+            Path(job_dir).resolve(),
+            root_dir.resolve(),
+            db_path,
+            job.id,
+            execute=True,
+            job_metadata=metadata,
+        )
+        for e in errs[:3]:
+            print(f"  purge warning ({Path(job_dir).name}): {e}")
+    except Exception as e:
+        print(f"  purge error ({Path(job_dir).name}): {e}")
 
 
 def prepare_job_directory(
@@ -1749,6 +1818,8 @@ def submit_batch_parsl(
     site: str = "default",
     partition: str | None = None,
     openmpi_module: str = SANDIA_DEFAULT_OPENMPI_MODULE,
+    clean_on_complete: bool = False,
+    purge_on_fail: bool = False,
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -1793,6 +1864,12 @@ def submit_batch_parsl(
         reroot: If True, ignore job_dir paths stored in the database and
             always construct paths from root_dir + job_dir_pattern. Useful
             when the database has been relocated.
+        clean_on_complete: If True, run --clean-all (remove .tmp/.core/
+            orca_tmp_*/ and .bas/.basN) on each job_dir immediately after
+            it completes successfully.
+        purge_on_fail: If True, purge each job_dir immediately after the
+            job fails: write a .do_not_rerun.json marker with failure
+            metadata, then delete all other contents.
 
     Returns:
         List of submitted job IDs
@@ -2166,6 +2243,11 @@ def submit_batch_parsl(
     # Create future->(job_id, job_dir) mapping for concurrent completion
     futures_map = {future: (job_id, job_dir) for job_id, job_dir, future in futures}
 
+    # JobRecord lookup for inline purge metadata (orig_index, elements, etc.)
+    id_to_job = {j.id: j for j in jobs_to_submit}
+    optimizer = config.get("optimizer")
+    db_path = workflow.db_path
+
     # Seed t0 point.
     last_snap = 0.0
     if wandb_run is not None:
@@ -2271,8 +2353,25 @@ def submit_batch_parsl(
                 log_job_result(wandb_run, job_id, "failed")
 
             # Write this job's result to DB immediately (one commit per job).
-            _write_job_update(workflow, pending_updates[-1])
+            last_update = pending_updates[-1]
+            _write_job_update(workflow, last_update)
             pending_updates.pop()
+
+            # Inline cleanup: must run after the DB write so purge's TOCTOU
+            # re-check sees the FAILED status we just wrote.
+            terminal_status = last_update["status"]
+            if clean_on_complete and terminal_status == JobStatus.COMPLETED:
+                _cleanup_completed_job_inline(job_dir, root_dir, optimizer)
+            elif purge_on_fail and terminal_status == JobStatus.FAILED:
+                job_record = id_to_job.get(job_id)
+                if job_record is not None:
+                    _purge_failed_job_inline(
+                        job_dir,
+                        root_dir,
+                        db_path,
+                        job_record,
+                        last_update.get("error_message"),
+                    )
 
             if (
                 wandb_run is not None
@@ -2759,6 +2858,24 @@ def main():
         help="Disable Parsl MonitoringHub (skip monitoring.db). Useful on systems "
         "where the monitoring hub port or SQLAlchemy dependency causes issues.",
     )
+    parsl_group.add_argument(
+        "--clean-on-complete",
+        action="store_true",
+        default=False,
+        help="After each job completes, remove scratch files (.tmp, .core, "
+        "orca_tmp_*/) and basis-set files (.bas, .basN) from its job_dir. "
+        "Equivalent to running `clean.py --clean-all --execute` inline. "
+        "Parsl mode only.",
+    )
+    parsl_group.add_argument(
+        "--purge-on-fail",
+        action="store_true",
+        default=False,
+        help="After each job fails, write a .do_not_rerun.json marker with "
+        "failure metadata into its job_dir and delete all other contents. "
+        "Equivalent to running `clean.py --purge-failed --execute` inline. "
+        "Parsl mode only.",
+    )
 
     # W&B options (--use-parsl only)
     add_wandb_args(parser)
@@ -3012,6 +3129,11 @@ def main():
     if args.wandb_project and not args.use_parsl:
         parser.error("--wandb-project requires --use-parsl")
 
+    # Inline cleanup hooks only fire from the Parsl completion loop;
+    # traditional mode submits and exits before any job finishes.
+    if (args.clean_on_complete or args.purge_on_fail) and not args.use_parsl:
+        parser.error("--clean-on-complete / --purge-on-fail require --use-parsl")
+
     # Submit based on mode
     if args.use_parsl:
         # Initialize W&B run if requested
@@ -3064,6 +3186,8 @@ def main():
             site=args.hpc_site,
             partition=args.partition,
             openmpi_module=args.openmpi_module,
+            clean_on_complete=args.clean_on_complete,
+            purge_on_fail=args.purge_on_fail,
         )
     else:
         # Traditional mode: one job script per job

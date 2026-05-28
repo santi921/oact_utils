@@ -820,6 +820,25 @@ Revalidation:
 
 When `--purge-failed` creates a `.do_not_rerun.json` marker, the submit utility (`submit_jobs.py`) automatically detects it and skips the job. If the DB was reset (`--reset-failed`) but the marker file remains, the submit guard prevents resubmission and updates the job status to FAILED in the database.
 
+### Inline Cleanup During Submission (Parsl Mode)
+
+For long-running Parsl campaigns, you can have `submit_jobs.py` clean each job's directory the moment its future completes, instead of running `clean.py` afterwards. This prevents scratch files from accumulating during the run and keeps the workflow tree small on Lustre/VAST.
+
+Two opt-in flags, both Parsl-mode only:
+
+```bash
+python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
+    --use-parsl --batch-size 200 \
+    --clean-on-complete \
+    --purge-on-fail
+```
+
+- **`--clean-on-complete`** -- After each job completes successfully, removes scratch files (`*.tmp`, `*.core`, `orca_tmp_*/`) and basis-set files (`*.bas`, `*.basN`) from that job's directory. Equivalent to `clean.py --clean-all --execute` applied to a single job. Critical files (`orca.out`, `orca.inp`, `orca.engrad`, `orca.gbw`, `orca_metrics.json`, etc.) are never touched -- the same exclusion list as the standalone cleaner applies.
+
+- **`--purge-on-fail`** -- After each job fails, writes a `.do_not_rerun.json` marker file containing the job's failure metadata (orig_index, charge, spin, fail_count, error_message, parsed failure reason, SCF steps), then deletes all other contents of the job directory. Equivalent to `clean.py --purge-failed --execute` applied to a single job. The marker prevents resubmission via the existing submit guard.
+
+Both hooks run from the Parsl completion loop, after the per-job DB update commits. Failures inside the cleanup hooks are logged but never abort the submitter -- the campaign continues regardless. Traditional mode (`sbatch`/`flux batch`) does not support these flags because the submitter exits before any job finishes; continue to use `clean.py` for that path.
+
 ## Concurrency & Database Handling
 
 The workflow system uses SQLite with **WAL (Write-Ahead Logging)** mode for better concurrent access:
