@@ -29,11 +29,12 @@ from ..utils.analysis import (
 )
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
-from .architector_workflow import ArchitectorWorkflow, JobStatus
+from .architector_workflow import ArchitectorWorkflow, JobRecord, JobStatus
 from .clean import (
     MARKER_ERROR_MESSAGE,
     _process_job,
     _purge_failed_job,
+    _write_marker_file,
     is_marker_blocked,
 )
 from .job_dir_patterns import (
@@ -128,7 +129,10 @@ DEFAULT_ORCA_PATHS = {
     "flux": "/usr/workspace/vargas58/orca-6.1.0-f.0_linux_x86-64/bin/orca",
     "macos_arm64_openmpi411": "/Users/santiagovargas/Documents/orca_6_1_0_macosx_arm64_openmpi411/orca",
     "slurm": "orca",
-    "sandia": "/home/svargas/orca_6_1_0_linux_x86-64_shared_openmpi418/orca",
+    # Sandia intentionally has no default: ORCA is a user-installed shared
+    # build under each user's $HOME, so a single hardcoded path is wrong for
+    # every teammate but the one who installed it. The CLI requires
+    # --orca-path when --hpc-site sandia is selected.
 }
 
 DEFAULT_LD_LIBRARY_PATHS = {
@@ -203,6 +207,30 @@ def _write_job_update(
     workflow._commit_with_retry()
 
 
+def _resolve_scheduler_job_id() -> str:
+    """Return the scheduler-issued job ID for the current process.
+
+    Reads SLURM_JOB_ID, FLUX_JOB_ID, and PBS_JOBID. For PBS Pro the leading
+    numeric+host portion (e.g. ``123.server`` in ``123.server.fqdn``) is
+    retained so it matches the set returned by ``qstat -u $USER``.
+
+    Returns:
+        Scheduler job ID string, or ``"pid_<PID>"`` sentinel when no
+        scheduler env var is set. The sentinel is excluded from orphan
+        recovery to avoid resetting jobs launched outside an allocation.
+    """
+    slurm = os.environ.get("SLURM_JOB_ID")
+    if slurm:
+        return slurm
+    flux = os.environ.get("FLUX_JOB_ID")
+    if flux:
+        return flux
+    pbs = os.environ.get("PBS_JOBID")
+    if pbs:
+        return pbs
+    return f"pid_{os.getpid()}"
+
+
 def _cleanup_completed_job_inline(
     job_dir: str,
     root_dir: Path,
@@ -230,11 +258,39 @@ def _cleanup_completed_job_inline(
         print(f"  cleanup error ({Path(job_dir).name}): {e}")
 
 
+def _write_prefailure_marker(
+    job_dir: str,
+    job: JobRecord,
+    error_message: str | None,
+) -> None:
+    """Write the do-not-rerun marker before the DB is flipped to FAILED.
+
+    Crash-safety: if SIGTERM lands between this call and the FAILED commit,
+    the marker on disk still prevents resubmission via the existing submit
+    guard. The full ``_purge_failed_job`` (called after the commit) overwrites
+    this marker with richer failure metadata; here we only need enough to
+    identify the job and block reruns.
+    """
+    metadata: dict[str, str | int | None] = {
+        "orig_index": job.orig_index,
+        "elements": job.elements,
+        "charge": job.charge,
+        "spin": job.spin,
+        "fail_count": (job.fail_count or 0) + 1,
+        "error_message": error_message,
+    }
+    try:
+        _write_marker_file(Path(job_dir).resolve(), metadata)
+    except Exception as e:
+        # Best-effort: never block the FAILED DB commit on marker write.
+        print(f"  pre-failure marker write failed ({Path(job_dir).name}): {e}")
+
+
 def _purge_failed_job_inline(
     job_dir: str,
     root_dir: Path,
     db_path: Path,
-    job,
+    job: JobRecord,
     error_message: str | None,
 ) -> None:
     """Purge a just-failed job_dir: write marker, delete contents.
@@ -518,7 +574,7 @@ def write_slurm_sandia_job_file(
     qos: str = SANDIA_DEFAULT_QOS,
     partition: str = SANDIA_DEFAULT_PARTITION,
     account: str = SANDIA_DEFAULT_ACCOUNT,
-    orca_path: str = DEFAULT_ORCA_PATHS["sandia"],
+    orca_path: str | None = None,
     openmpi_module: str = SANDIA_DEFAULT_OPENMPI_MODULE,
     input_file: str = "orca.inp",
     optimizer: str | None = None,
@@ -551,7 +607,19 @@ def write_slurm_sandia_job_file(
 
     Returns:
         Path to the created SLURM job file.
+
+    Raises:
+        ValueError: when ``orca_path`` is not provided. Sandia has no shared
+            ORCA install; each user must point at their own shared-build
+            binary.
     """
+    if orca_path is None:
+        raise ValueError(
+            "write_slurm_sandia_job_file requires orca_path: "
+            "Sandia has no shared ORCA install. Pass --orca-path on the CLI "
+            "or set orca_path in your launch script."
+        )
+
     job_dir_abs = job_dir.resolve()
     slurm_script = job_dir_abs / "slurm_job.sh"
 
@@ -1902,11 +1970,14 @@ def submit_batch_parsl(
     config: OrcaConfig = {**DEFAULT_ORCA_CONFIG, **(orca_config or {})}
     if "orca_path" not in config or config.get("orca_path") is None:
         if site.lower() == "sandia":
-            config["orca_path"] = DEFAULT_ORCA_PATHS["sandia"]
-        else:
-            config["orca_path"] = DEFAULT_ORCA_PATHS.get(
-                scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
+            raise ValueError(
+                "site='sandia' requires an explicit orca_path: "
+                "Sandia has no shared ORCA install. Pass --orca-path on the "
+                "CLI or set orca_path in orca_config."
             )
+        config["orca_path"] = DEFAULT_ORCA_PATHS.get(
+            scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
+        )
 
     # Filter jobs for submission (DB status only)
     jobs_to_submit = filter_jobs_for_submission(
@@ -1952,11 +2023,7 @@ def submit_batch_parsl(
     # Detect scheduler job ID early so it can be set atomically with the
     # RUNNING status claim (avoids a window where jobs are RUNNING but have
     # no worker_id, which would make them invisible to --recover-orphans).
-    _scheduler_job_id = (
-        os.environ.get("SLURM_JOB_ID")
-        or os.environ.get("FLUX_JOB_ID")
-        or f"pid_{os.getpid()}"
-    )
+    _scheduler_job_id = _resolve_scheduler_job_id()
 
     # Claim jobs atomically BEFORE slow directory preparation to prevent
     # concurrent submitters from grabbing the same jobs (TOCTOU fix).
@@ -2352,26 +2419,46 @@ def submit_batch_parsl(
                 print(f"Job {job_id} exception: {str(e)[:100]}")
                 log_job_result(wandb_run, job_id, "failed")
 
-            # Write this job's result to DB immediately (one commit per job).
             last_update = pending_updates[-1]
+            terminal_status = last_update["status"]
+
+            # Crash-safety: write the do-not-rerun marker BEFORE the DB flips
+            # to FAILED. If SIGTERM lands between the marker write and the
+            # commit, the marker on disk still blocks resubmission via the
+            # existing submit guard; without it, the next --reset-failed
+            # cycle could re-queue a job we meant to purge.
+            prefailure_job_record: JobRecord | None = None
+            if purge_on_fail and terminal_status == JobStatus.FAILED:
+                prefailure_job_record = id_to_job.get(job_id)
+                if prefailure_job_record is not None:
+                    _write_prefailure_marker(
+                        job_dir,
+                        prefailure_job_record,
+                        last_update.get("error_message"),
+                    )
+
+            # Write this job's result to DB immediately (one commit per job).
             _write_job_update(workflow, last_update)
             pending_updates.pop()
 
-            # Inline cleanup: must run after the DB write so purge's TOCTOU
-            # re-check sees the FAILED status we just wrote.
-            terminal_status = last_update["status"]
+            # Destructive cleanup runs after the DB write so _purge_failed_job's
+            # TOCTOU re-check sees the FAILED status we just committed. It will
+            # idempotently overwrite the marker file written above with richer
+            # metadata (the in-loop _extract_failure_info pulls from disk).
             if clean_on_complete and terminal_status == JobStatus.COMPLETED:
                 _cleanup_completed_job_inline(job_dir, root_dir, optimizer)
-            elif purge_on_fail and terminal_status == JobStatus.FAILED:
-                job_record = id_to_job.get(job_id)
-                if job_record is not None:
-                    _purge_failed_job_inline(
-                        job_dir,
-                        root_dir,
-                        db_path,
-                        job_record,
-                        last_update.get("error_message"),
-                    )
+            elif (
+                purge_on_fail
+                and terminal_status == JobStatus.FAILED
+                and prefailure_job_record is not None
+            ):
+                _purge_failed_job_inline(
+                    job_dir,
+                    root_dir,
+                    db_path,
+                    prefailure_job_record,
+                    last_update.get("error_message"),
+                )
 
             if (
                 wandb_run is not None
@@ -2514,13 +2601,15 @@ def submit_batch(
     # Merge config with defaults and set scheduler/site-specific orca_path
     config: OrcaConfig = {**DEFAULT_ORCA_CONFIG, **(orca_config or {})}
     if "orca_path" not in config or config.get("orca_path") is None:
-        site_lower = site.lower()
-        if site_lower == "sandia":
-            config["orca_path"] = DEFAULT_ORCA_PATHS["sandia"]
-        else:
-            config["orca_path"] = DEFAULT_ORCA_PATHS.get(
-                scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
+        if site.lower() == "sandia":
+            raise ValueError(
+                "site='sandia' requires an explicit orca_path: "
+                "Sandia has no shared ORCA install. Pass --orca-path on the "
+                "CLI or set orca_path in orca_config."
             )
+        config["orca_path"] = DEFAULT_ORCA_PATHS.get(
+            scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
+        )
 
     jobs_to_submit = filter_jobs_for_submission(
         workflow,
@@ -3058,6 +3147,12 @@ def main():
         if not args.use_parsl and args.scheduler != "slurm":
             parser.error(
                 "--hpc-site sandia (traditional mode) requires --scheduler slurm"
+            )
+        if not args.orca_path:
+            parser.error(
+                "--hpc-site sandia requires --orca-path: Sandia has no shared "
+                "ORCA install. Point at your user-installed shared build, e.g. "
+                "--orca-path $HOME/orca_6_1_0_linux_x86-64_shared_openmpi418/orca"
             )
         # Swap LLNL-specific defaults for Sandia equivalents when not overridden.
         # The argparse default for --queue is the LLNL value "pbatch" and for

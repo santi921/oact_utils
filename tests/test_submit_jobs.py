@@ -18,7 +18,9 @@ from oact_utilities.workflows.submit_jobs import (
     OrcaConfig,
     _build_parsl_sandia_worker_init,
     _build_parsl_sandia_worker_init_multi_block,
+    _resolve_scheduler_job_id,
     _write_job_update,
+    _write_prefailure_marker,
     prepare_job_directory,
     write_flux_job_file,
     write_slurm_job_file,
@@ -541,11 +543,14 @@ class TestWriteSlurmJobFile:
 class TestWriteSlurmSandiaJobFile:
     """Tests for write_slurm_sandia_job_file (CTS1/TLCC2)."""
 
+    # Sandia has no shared ORCA install; tests must always pass an explicit path.
+    SANDIA_TEST_ORCA = "/opt/orca-test/orca_6_1_0_linux_x86-64_shared/orca"
+
     def test_creates_script_with_correct_name(self, tmp_path):
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir)
+        script = write_slurm_sandia_job_file(job_dir, orca_path=self.SANDIA_TEST_ORCA)
 
         assert script.exists()
         assert script.name == "slurm_job.sh"
@@ -554,7 +559,7 @@ class TestWriteSlurmSandiaJobFile:
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir)
+        script = write_slurm_sandia_job_file(job_dir, orca_path=self.SANDIA_TEST_ORCA)
 
         assert script.stat().st_mode & 0o755
 
@@ -563,7 +568,9 @@ class TestWriteSlurmSandiaJobFile:
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir, partition="attaway")
+        script = write_slurm_sandia_job_file(
+            job_dir, partition="attaway", orca_path=self.SANDIA_TEST_ORCA
+        )
         content = script.read_text()
 
         assert "#SBATCH --partition=attaway" in content
@@ -574,7 +581,7 @@ class TestWriteSlurmSandiaJobFile:
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir)
+        script = write_slurm_sandia_job_file(job_dir, orca_path=self.SANDIA_TEST_ORCA)
         content = script.read_text()
 
         assert f"module load {SANDIA_DEFAULT_OPENMPI_MODULE}" in content
@@ -585,7 +592,7 @@ class TestWriteSlurmSandiaJobFile:
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir)
+        script = write_slurm_sandia_job_file(job_dir, orca_path=self.SANDIA_TEST_ORCA)
         content = script.read_text()
 
         assert "export OMPI_MCA_pml=ob1" in content
@@ -597,7 +604,7 @@ class TestWriteSlurmSandiaJobFile:
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir)
+        script = write_slurm_sandia_job_file(job_dir, orca_path=self.SANDIA_TEST_ORCA)
         content = script.read_text()
 
         assert "export MPI_ROOT=$(dirname $(dirname $(which mpirun)))" in content
@@ -608,7 +615,7 @@ class TestWriteSlurmSandiaJobFile:
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir)
+        script = write_slurm_sandia_job_file(job_dir, orca_path=self.SANDIA_TEST_ORCA)
         content = script.read_text()
 
         assert "#SBATCH --ntasks-per-node=36" in content
@@ -618,7 +625,9 @@ class TestWriteSlurmSandiaJobFile:
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir, n_cores=16)
+        script = write_slurm_sandia_job_file(
+            job_dir, n_cores=16, orca_path=self.SANDIA_TEST_ORCA
+        )
         content = script.read_text()
 
         assert "#SBATCH --ntasks-per-node=16" in content
@@ -627,33 +636,47 @@ class TestWriteSlurmSandiaJobFile:
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir, account="fy250086", qos="normal")
+        script = write_slurm_sandia_job_file(
+            job_dir,
+            account="fy250086",
+            qos="normal",
+            orca_path=self.SANDIA_TEST_ORCA,
+        )
         content = script.read_text()
 
         assert "#SBATCH --account=fy250086" in content
         assert "#SBATCH --qos=normal" in content
 
-    def test_default_orca_path_is_in_orca_paths(self):
-        """DEFAULT_ORCA_PATHS must have a 'sandia' entry pointing to a real-looking path."""
-        assert "sandia" in DEFAULT_ORCA_PATHS
-        assert DEFAULT_ORCA_PATHS["sandia"].endswith("/orca")
+    def test_no_default_sandia_orca_path(self):
+        """Sandia intentionally has no DEFAULT_ORCA_PATHS entry: it would
+        hardcode one developer's homedir as every teammate's default."""
+        assert "sandia" not in DEFAULT_ORCA_PATHS
+
+    def test_requires_orca_path(self, tmp_path):
+        """Omitting orca_path must raise; there is no Sandia-wide shared install."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        with pytest.raises(ValueError, match="orca_path"):
+            write_slurm_sandia_job_file(job_dir)
 
     def test_orca_command_appears_with_input(self, tmp_path):
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        orca_path = "/home/svargas/orca_6_1_0_linux_x86-64_shared_openmpi418/orca"
-        script = write_slurm_sandia_job_file(job_dir, orca_path=orca_path)
+        script = write_slurm_sandia_job_file(job_dir, orca_path=self.SANDIA_TEST_ORCA)
         content = script.read_text()
 
-        assert f"{orca_path} orca.inp" in content
+        assert f"{self.SANDIA_TEST_ORCA} orca.inp" in content
 
     def test_sella_optimizer_runs_python_shim(self, tmp_path):
         """When optimizer=sella, the script runs the Sella shim instead of ORCA."""
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir, optimizer="sella")
+        script = write_slurm_sandia_job_file(
+            job_dir, optimizer="sella", orca_path=self.SANDIA_TEST_ORCA
+        )
         content = script.read_text()
 
         assert "python run_sella.py" in content
@@ -666,7 +689,7 @@ class TestWriteSlurmSandiaJobFile:
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()
 
-        script = write_slurm_sandia_job_file(job_dir)
+        script = write_slurm_sandia_job_file(job_dir, orca_path=self.SANDIA_TEST_ORCA)
         content = script.read_text()
 
         assert f"#SBATCH --partition={SANDIA_DEFAULT_PARTITION}" in content
@@ -1733,6 +1756,7 @@ class TestSubmitBatchSandiaDeprecation:
                 batch_size=3,
                 scheduler="slurm",
                 site="sandia",
+                orca_config={"orca_path": "/opt/orca-test/orca"},
                 dry_run=True,
             )
 
@@ -1930,6 +1954,7 @@ class TestSubmitBatchParslSandiaRouting:
             nodes_per_block=nodes_per_block,
             max_blocks=max_blocks,
             site="sandia",
+            orca_config={"orca_path": "/opt/orca-test/orca"},
         )
         return slurm_calls, local_calls
 
@@ -2157,3 +2182,94 @@ class TestInlineCleanupHooks:
         assert (job_dir / "orca.out").exists()
         assert (job_dir / "orca.tmp").exists()
         assert not (job_dir / ".do_not_rerun.json").exists()
+
+
+class TestResolveSchedulerJobId:
+    """Tests for the worker_id resolution helper (covers B1 review finding)."""
+
+    def test_slurm_takes_precedence(self, monkeypatch):
+        monkeypatch.setenv("SLURM_JOB_ID", "12345")
+        monkeypatch.setenv("FLUX_JOB_ID", "fAAA")
+        monkeypatch.setenv("PBS_JOBID", "99.server")
+        assert _resolve_scheduler_job_id() == "12345"
+
+    def test_flux_when_no_slurm(self, monkeypatch):
+        monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+        monkeypatch.setenv("FLUX_JOB_ID", "fAAA")
+        monkeypatch.setenv("PBS_JOBID", "99.server")
+        assert _resolve_scheduler_job_id() == "fAAA"
+
+    def test_pbs_jobid_picked_up_when_others_absent(self, monkeypatch):
+        """PBS Pro orphan recovery depends on PBS_JOBID being captured here."""
+        monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+        monkeypatch.delenv("FLUX_JOB_ID", raising=False)
+        monkeypatch.setenv("PBS_JOBID", "12345.pbs-server.fqdn")
+        assert _resolve_scheduler_job_id() == "12345.pbs-server.fqdn"
+
+    def test_pid_sentinel_when_no_scheduler(self, monkeypatch):
+        monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+        monkeypatch.delenv("FLUX_JOB_ID", raising=False)
+        monkeypatch.delenv("PBS_JOBID", raising=False)
+        result = _resolve_scheduler_job_id()
+        assert result.startswith("pid_")
+        assert result[4:].isdigit()
+
+
+class TestPrefailureMarker:
+    """Tests for the pre-commit marker write (covers B5 review finding)."""
+
+    def test_marker_written_with_metadata(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        job = MagicMock()
+        job.orig_index = 42
+        job.elements = "U;O;O"
+        job.charge = 0
+        job.spin = 3
+        job.fail_count = 1
+
+        _write_prefailure_marker(
+            str(job_dir), job, error_message="SCF did not converge"
+        )
+
+        marker_path = job_dir / ".do_not_rerun.json"
+        assert marker_path.exists()
+        data = json.loads(marker_path.read_text())
+        assert data["orig_index"] == 42
+        assert data["elements"] == "U;O;O"
+        assert data["fail_count"] == 2  # pre-increment + 1 to match SQL-side
+        assert data["error_message"] == "SCF did not converge"
+
+    def test_marker_fail_count_handles_none(self, tmp_path):
+        """job.fail_count is NULL on first failure; (None or 0) + 1 == 1."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        job = MagicMock()
+        job.orig_index = 1
+        job.elements = "H"
+        job.charge = 0
+        job.spin = 1
+        job.fail_count = None
+
+        _write_prefailure_marker(str(job_dir), job, error_message=None)
+
+        data = json.loads((job_dir / ".do_not_rerun.json").read_text())
+        assert data["fail_count"] == 1
+
+    def test_marker_write_failure_does_not_raise(self, tmp_path, capsys):
+        """Marker write must be best-effort: a missing job_dir cannot block
+        the FAILED DB commit that follows."""
+        nonexistent = tmp_path / "nope"  # parent dir does not exist
+        job = MagicMock()
+        job.orig_index = 1
+        job.elements = "H"
+        job.charge = 0
+        job.spin = 1
+        job.fail_count = 0
+
+        # Should not raise.
+        _write_prefailure_marker(str(nonexistent), job, error_message="x")
+        captured = capsys.readouterr()
+        assert "pre-failure marker write failed" in captured.out
