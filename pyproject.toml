@@ -24,6 +24,9 @@ dev = [
 generator = [
     "qtaim_generator",
 ]
+globus = [
+    "globus-sdk>=3.0",
+]
 jupyter = [
     "ipykernel>=6.0",
     "jupyter>=1.0",

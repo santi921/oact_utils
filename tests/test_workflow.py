@@ -163,6 +163,40 @@ def test_workflow_metrics(tmp_path):
         assert job.final_energy == pytest.approx(-1.23456)
 
 
+def test_claim_jobs_for_submission_marks_running_and_sets_worker_id(tmp_path):
+    """Claiming jobs should atomically move them to RUNNING."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+    for i in range(3):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="to_run",
+        )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        claimed = workflow.claim_jobs_for_submission(limit=2, worker_id="pid_123")
+
+        assert len(claimed) == 2
+        assert {job.status for job in claimed} == {JobStatus.RUNNING}
+        assert {job.worker_id for job in claimed} == {"pid_123"}
+        assert all(job.geometry == "H 0 0 0\nH 0 0 0.74" for job in claimed)
+
+        running = workflow.get_jobs_by_status(JobStatus.RUNNING)
+        ready = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+
+        assert len(running) == 2
+        assert len(ready) == 1
+
+
 def test_count_by_status(tmp_path):
     """Test status counting."""
     db_path = tmp_path / "test.db"
@@ -1049,6 +1083,29 @@ def test_get_active_scheduler_jobs_flux_mock(monkeypatch):
     assert active == {"f2xgUVYLJs27", "f2xgUVdyx8JK"}
 
 
+def test_get_active_scheduler_jobs_pbspro_mock(monkeypatch):
+    """get_active_scheduler_jobs returns PBS Pro job IDs from qstat output."""
+    from unittest.mock import MagicMock
+
+    from oact_utilities.utils.scheduler import get_active_scheduler_jobs
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        "Job id            Name             User              Time Use S Queue\n"
+        "----------------  ---------------- ----------------  -------- - -----\n"
+        "123.server        job_a            ritwik            00:01:00 R workq\n"
+        "124.server        job_b            ritwik            00:00:00 Q workq\n"
+    )
+
+    monkeypatch.setattr(
+        "oact_utilities.utils.scheduler.subprocess.run", lambda *a, **kw: mock_result
+    )
+
+    active = get_active_scheduler_jobs("pbspro")
+    assert active == {"123.server", "124.server"}
+
+
 def test_get_active_scheduler_jobs_empty(monkeypatch):
     """Empty scheduler queue returns empty set (not None)."""
     from unittest.mock import MagicMock
@@ -1235,6 +1292,118 @@ def test_recover_orphans_all_active(tmp_path, monkeypatch):
         # Job should still be RUNNING
         jobs = workflow.get_jobs_by_status(JobStatus.RUNNING)
         assert len(jobs) == 1
+
+
+def test_recover_orphans_reroot_keeps_existing_original_path(tmp_path, monkeypatch):
+    """Recovery should prefer the DB job_dir when it still exists."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        charge=0,
+        spin=1,
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    original_dir = tmp_path / "original" / "job_0"
+    original_dir.mkdir(parents=True)
+
+    fallback_root = tmp_path / "reroot"
+    fallback_dir = fallback_root / "job_0"
+    fallback_dir.mkdir(parents=True)
+
+    seen_dirs: list[str] = []
+
+    def mock_check(job_dir, **kwargs):
+        seen_dirs.append(str(job_dir))
+        return 0
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.mark_jobs_as_running([1], worker_id="slurm_100")
+        workflow.update_job_metrics(1, job_dir=str(original_dir))
+
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: set(),
+        )
+        monkeypatch.setattr(
+            "oact_utilities.workflows.dashboard.check_job_termination",
+            mock_check,
+        )
+
+        result = recover_orphaned_jobs(
+            workflow,
+            scheduler="slurm",
+            root_dir=fallback_root,
+            job_dir_pattern="job_{orig_index}",
+        )
+
+        assert result["reset"] == 1
+        assert seen_dirs == [str(original_dir)]
+
+
+def test_recover_orphans_reroots_when_original_path_missing(tmp_path, monkeypatch):
+    """Recovery should fall back to root_dir + pattern when DB job_dir is gone."""
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    _insert_row(
+        conn,
+        orig_index=0,
+        elements="H;H",
+        natoms=2,
+        geometry="H 0 0 0\nH 0 0 0.74",
+        charge=0,
+        spin=1,
+        status="to_run",
+    )
+    conn.commit()
+    conn.close()
+
+    missing_original = tmp_path / "missing" / "job_0"
+    fallback_root = tmp_path / "reroot"
+    fallback_dir = fallback_root / "job_0"
+    fallback_dir.mkdir(parents=True)
+
+    seen_dirs: list[str] = []
+
+    def mock_check(job_dir, **kwargs):
+        seen_dirs.append(str(job_dir))
+        return 0
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        workflow.mark_jobs_as_running([1], worker_id="slurm_100")
+        workflow.update_job_metrics(1, job_dir=str(missing_original))
+
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: set(),
+        )
+        monkeypatch.setattr(
+            "oact_utilities.workflows.dashboard.check_job_termination",
+            mock_check,
+        )
+
+        result = recover_orphaned_jobs(
+            workflow,
+            scheduler="slurm",
+            root_dir=fallback_root,
+            job_dir_pattern="job_{orig_index}",
+        )
+
+        assert result["reset"] == 1
+        assert seen_dirs == [str(fallback_dir)]
 
 
 # --- Tests for DELETE journal mode (Change 1) ---
