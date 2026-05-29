@@ -20,7 +20,6 @@ import textwrap
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable, Literal, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
@@ -34,7 +33,13 @@ from ..utils.analysis import (
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobRecord, JobStatus
-from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
+from .clean import (
+    MARKER_ERROR_MESSAGE,
+    _process_job,
+    _purge_failed_job,
+    _write_marker_file,
+    is_marker_blocked,
+)
 from .globus_transfer import (
     GlobusTransferConfig,
     GlobusTransferResult,
@@ -144,13 +149,38 @@ _COORDINATOR_CLEANUP_LEAD_MINUTES = 5.0
 def _flush_pending_updates(
     workflow: ArchitectorWorkflow,
     pending: list[dict],
+    root_dir: Path | None = None,
 ) -> None:
-    """Flush accumulated job updates to the DB in a single transaction."""
+    """Flush accumulated job updates to the DB in a single transaction.
+
+    When ``root_dir`` is provided and an update carries a ``_hook_payload``
+    key, the matching inline cleanup or purge hook is dispatched after the
+    DB write. The hook payload is popped from the update before
+    ``_write_job_update`` runs so it never reaches the DB layer. Purge
+    hooks must run after the DB commit so ``_purge_failed_job``'s TOCTOU
+    re-check sees ``status='failed'``.
+    """
     if not pending:
         return
 
     for update in pending:
+        hook = update.pop("_hook_payload", None)
         _write_job_update(workflow, update)
+        if hook is None or root_dir is None:
+            continue
+        kind = hook.get("kind")
+        if kind == "clean":
+            _cleanup_completed_job_inline(
+                hook["job_dir"], root_dir, hook.get("optimizer")
+            )
+        elif kind == "purge":
+            _purge_failed_job_inline(
+                hook["job_dir"],
+                root_dir,
+                hook["db_path"],
+                hook["job"],
+                hook.get("error_message"),
+            )
 
 
 def _is_manager_lost_exception(exc: BaseException) -> bool:
@@ -169,6 +199,98 @@ def _classify_parsl_future_failure(exc: BaseException) -> tuple[JobStatus, bool,
     if _is_manager_lost_exception(exc):
         return JobStatus.TO_RUN, False, "requeued"
     return JobStatus.FAILED, True, "failed"
+
+
+def _cleanup_completed_job_inline(
+    job_dir: str,
+    root_dir: Path,
+    optimizer: str | None,
+) -> None:
+    """Run --clean-all (tmp + bas) on a job_dir that just completed.
+
+    Reuses ``clean._process_job`` with ``skip_revalidation=True`` since the
+    Parsl worker already verified ``ORCA TERMINATED NORMALLY``. Errors are
+    printed but never propagate -- cleanup must not derail the submitter.
+    """
+    try:
+        _matched, _freed, errs = _process_job(
+            Path(job_dir).resolve(),
+            root_dir.resolve(),
+            categories={"tmp", "bas"},
+            execute=True,
+            hours_cutoff=24,
+            optimizer=optimizer,
+            skip_revalidation=True,
+        )
+        for e in errs[:3]:
+            print(f"  cleanup warning ({Path(job_dir).name}): {e}")
+    except Exception as e:
+        print(f"  cleanup error ({Path(job_dir).name}): {e}")
+
+
+def _write_prefailure_marker(
+    job_dir: str,
+    job: JobRecord,
+    error_message: str | None,
+) -> None:
+    """Write the do-not-rerun marker before the DB is flipped to FAILED.
+
+    Crash-safety: if SIGTERM lands between this call and the FAILED commit,
+    the marker on disk still prevents resubmission via the existing submit
+    guard. The full ``_purge_failed_job`` (called after the commit) overwrites
+    this marker with richer failure metadata; here we only need enough to
+    identify the job and block reruns.
+    """
+    metadata: dict[str, str | int | None] = {
+        "orig_index": job.orig_index,
+        "elements": job.elements,
+        "charge": job.charge,
+        "spin": job.spin,
+        "fail_count": (job.fail_count or 0) + 1,
+        "error_message": error_message,
+    }
+    try:
+        _write_marker_file(Path(job_dir).resolve(), metadata)
+    except Exception as e:
+        # Best-effort: never block the FAILED DB commit on marker write.
+        print(f"  pre-failure marker write failed ({Path(job_dir).name}): {e}")
+
+
+def _purge_failed_job_inline(
+    job_dir: str,
+    root_dir: Path,
+    db_path: Path,
+    job: JobRecord,
+    error_message: str | None,
+) -> None:
+    """Purge a just-failed job_dir: write marker, delete contents.
+
+    Reuses ``clean._purge_failed_job``; its TOCTOU DB re-check still applies
+    and is satisfied because we wrote ``FAILED`` to the DB immediately before
+    calling this. ``job.fail_count`` reflects the pre-increment value from the
+    in-memory record; ``+1`` matches the SQL-side increment.
+    """
+    metadata: dict[str, str | int | None] = {
+        "orig_index": job.orig_index,
+        "elements": job.elements,
+        "charge": job.charge,
+        "spin": job.spin,
+        "fail_count": (job.fail_count or 0) + 1,
+        "error_message": error_message,
+    }
+    try:
+        _matched, _freed, errs = _purge_failed_job(
+            Path(job_dir).resolve(),
+            root_dir.resolve(),
+            db_path,
+            job.id,
+            execute=True,
+            job_metadata=metadata,
+        )
+        for e in errs[:3]:
+            print(f"  purge warning ({Path(job_dir).name}): {e}")
+    except Exception as e:
+        print(f"  purge error ({Path(job_dir).name}): {e}")
 
 
 def _parsl_active_window(
@@ -255,7 +377,7 @@ def _wait_for_worker_startup_file(
             last_exc = exc
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise last_exc
+                raise last_exc from exc
             time.sleep(min(_WORKER_STARTUP_FILE_POLL_SECONDS, remaining))
 
 
@@ -993,8 +1115,8 @@ if PARSL_AVAILABLE:
             Dict with job_id, status, metrics
         """
         import os
-        import signal
         import shutil
+        import signal
         import subprocess
         import tempfile
         import time
@@ -1140,6 +1262,7 @@ if PARSL_AVAILABLE:
         proc = None
         proc_pgid = None
         try:
+
             def _process_group_is_alive() -> bool:
                 """Return True while any member of the launched process group lives."""
                 if proc_pgid is None:
@@ -1214,7 +1337,10 @@ if PARSL_AVAILABLE:
                 status_path = job_dir_path / "sella_status.txt"
                 try:
                     status_text = status_path.read_text()
-                    if "CONVERGED" in status_text and "NOT_CONVERGED" not in status_text:
+                    if (
+                        "CONVERGED" in status_text
+                        and "NOT_CONVERGED" not in status_text
+                    ):
                         termination_status = 1
                     elif "NOT_CONVERGED" in status_text or "ERROR" in status_text:
                         termination_status = -1
@@ -1232,8 +1358,7 @@ if PARSL_AVAILABLE:
                 if any("ORCA TERMINATED NORMALLY" in line for line in last_lines):
                     termination_status = 1
                 elif any(
-                    "aborting the run" in line or "Error" in line
-                    for line in last_lines
+                    "aborting the run" in line or "Error" in line for line in last_lines
                 ):
                     termination_status = -1
                 else:
@@ -1439,8 +1564,7 @@ def _validate_parsl_worker_imports(
 
     orca_bin_dir = (
         os.path.dirname(orca_config.get("orca_path"))
-        if orca_config.get("orca_path")
-        and os.path.isabs(orca_config.get("orca_path"))
+        if orca_config.get("orca_path") and os.path.isabs(orca_config.get("orca_path"))
         else None
     )
     resolved_mpirun = mpirun_path or shutil.which("mpirun")
@@ -1455,7 +1579,9 @@ def _validate_parsl_worker_imports(
     path_entries = list(dict.fromkeys(path_entries))
     if path_entries:
         existing_path = env.get("PATH")
-        env["PATH"] = ":".join(path_entries + ([existing_path] if existing_path else []))
+        env["PATH"] = ":".join(
+            path_entries + ([existing_path] if existing_path else [])
+        )
 
     resolved_ld = ld_library_path
     if resolved_ld is None:
@@ -2055,6 +2181,9 @@ def submit_batch_parsl(
     wandb_run: Any | None = None,
     reroot: bool = False,
     globus_config: GlobusTransferConfig | None = None,
+    clean_on_complete: bool = False,
+    purge_on_fail: bool = False,
+    db_path: str | Path | None = None,
 ) -> list[int]:
     """Submit batch of jobs using Parsl for concurrent execution.
 
@@ -2105,6 +2234,21 @@ def submit_batch_parsl(
         globus_config: Optional Globus transfer configuration. When provided,
             completed jobs are archived and submitted to Globus only after
             ``parse_job_metrics()`` confirms ``success``.
+        clean_on_complete: If True, remove scratch (``.tmp``, ``.core``,
+            ``orca_tmp_*``) and basis (``.bas``, ``.basN``) files from each
+            successful job directory as soon as its Parsl future resolves.
+            Critical outputs (``orca.out``, ``.engrad``, etc.) are preserved
+            via ``clean._process_job``'s exclusion list. Errors are logged
+            but never abort the campaign.
+        purge_on_fail: If True, write a ``.do_not_rerun.json`` marker and
+            delete the rest of the job directory for each failed job. A
+            light pre-failure marker is written synchronously before the
+            DB flip for crash safety; the rich marker + purge runs after
+            the FAILED row commits.
+        db_path: Path to the workflow SQLite database. Required when
+            ``purge_on_fail`` is set so the inline purge's TOCTOU re-check
+            can re-read the row. If omitted, falls back to
+            ``workflow.db_path``.
 
     Returns:
         List of submitted job IDs
@@ -2116,7 +2260,12 @@ def submit_batch_parsl(
         return []
 
     import signal
-    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+    from concurrent.futures import (
+        FIRST_COMPLETED,
+        ThreadPoolExecutor,
+        as_completed,
+        wait,
+    )
 
     import parsl
 
@@ -2377,6 +2526,17 @@ def submit_batch_parsl(
     failed_ids: list[int] = []
     pending_updates: list[dict] = []
     active_futures: dict[Any, tuple[int, str]] = {}
+    # JobRecord cache for inline cleanup/purge hooks; only populated when
+    # purge_on_fail is set (cleanup hook needs only job_dir + optimizer).
+    id_to_job: dict[int, JobRecord] = {}
+    hook_optimizer = config.get("optimizer")
+    hooks_enabled = clean_on_complete or purge_on_fail
+    hook_root_dir: Path | None = root_dir if hooks_enabled else None
+    effective_db_path: Path | None = (
+        Path(db_path) if db_path is not None else getattr(workflow, "db_path", None)
+    )
+    if purge_on_fail and effective_db_path is None:
+        raise ValueError("purge_on_fail requires db_path or workflow.db_path to be set")
 
     def _track_submitted(job_id: int) -> None:
         if job_id not in submitted_id_set:
@@ -2386,7 +2546,7 @@ def submit_batch_parsl(
     def _flush_if_buffered() -> None:
         nonlocal pending_updates
         if len(pending_updates) >= _BATCH_COMMIT_SIZE:
-            _flush_pending_updates(workflow, pending_updates)
+            _flush_pending_updates(workflow, pending_updates, root_dir=hook_root_dir)
             pending_updates.clear()
 
     def _claim_and_submit_window(task_map_fh: Any) -> bool:
@@ -2494,7 +2654,9 @@ def submit_batch_parsl(
 
             job_dir = result["job_dir"]
             try:
-                workflow.update_job_metrics_bulk([{"job_id": job_id, "job_dir": job_dir}])
+                workflow.update_job_metrics_bulk(
+                    [{"job_id": job_id, "job_dir": job_dir}]
+                )
                 if scheduler_key in {"flux", "slurm", "pbspro"}:
                     print(f"Prepared job {job_id} in {job_dir}")
                 else:
@@ -2511,7 +2673,11 @@ def submit_batch_parsl(
                 job_dir=job_dir,
                 orca_config=dict(config),
                 job_payload=result.get("job_payload"),
-                root_dir=None if scheduler_key in {"flux", "slurm", "pbspro"} else str(root_dir),
+                root_dir=(
+                    None
+                    if scheduler_key in {"flux", "slurm", "pbspro"}
+                    else str(root_dir)
+                ),
                 job_dir_pattern=job_dir_pattern,
                 n_cores=n_cores,
                 setup_func=setup_func,
@@ -2522,6 +2688,8 @@ def submit_batch_parsl(
             )
             active_futures[future] = (job_id, job_dir)
             _track_submitted(job_id)
+            if purge_on_fail and job_id is not None:
+                id_to_job[job_id] = claimed_job_map[job_id]
             task_map_fh.write(f"{future.tid}\t{job_id}\t{job_dir}\n")
             print(f"Submitted job {job_id} to Parsl")
             _flush_if_buffered()
@@ -2539,7 +2707,9 @@ def submit_batch_parsl(
             while True:
                 if pending_updates and not active_futures:
                     try:
-                        _flush_pending_updates(workflow, pending_updates)
+                        _flush_pending_updates(
+                            workflow, pending_updates, root_dir=hook_root_dir
+                        )
                         pending_updates.clear()
                     except Exception:
                         pass
@@ -2563,7 +2733,9 @@ def submit_batch_parsl(
                     continue
 
                 wait_timeout = None
-                remaining_until_cleanup = _seconds_until_cleanup_deadline(cleanup_deadline)
+                remaining_until_cleanup = _seconds_until_cleanup_deadline(
+                    cleanup_deadline
+                )
                 if remaining_until_cleanup is not None:
                     if remaining_until_cleanup <= 0:
                         _shutdown_requested = True
@@ -2629,9 +2801,9 @@ def submit_batch_parsl(
                                         try:
                                             gen_data = parse_generator_data(job_dir)
                                             if gen_data is not None:
-                                                metrics_dict[
-                                                    "generator_data"
-                                                ] = gen_data
+                                                metrics_dict["generator_data"] = (
+                                                    gen_data
+                                                )
                                         except Exception as e:
                                             print(
                                                 f"  Warning: generator parsing failed for job {job_id}: {e}"
@@ -2651,13 +2823,18 @@ def submit_batch_parsl(
                                 globus_transfer_client=globus_transfer_client,
                             )
 
-                            pending_updates.append(
-                                {
-                                    "job_id": job_id,
-                                    "status": JobStatus.COMPLETED,
-                                    "metrics": metrics_dict,
+                            completed_update: dict[str, Any] = {
+                                "job_id": job_id,
+                                "status": JobStatus.COMPLETED,
+                                "metrics": metrics_dict,
+                            }
+                            if clean_on_complete:
+                                completed_update["_hook_payload"] = {
+                                    "kind": "clean",
+                                    "job_dir": job_dir,
+                                    "optimizer": hook_optimizer,
                                 }
-                            )
+                            pending_updates.append(completed_update)
                             print(
                                 f" Job {job_id} completed ({len(completed_ids)}/{len(submitted_ids)} done)"
                             )
@@ -2674,16 +2851,35 @@ def submit_batch_parsl(
                             print(f"Job {job_id} timeout")
                             log_job_result(wandb_run, job_id, "timeout")
                         else:
-                            pending_updates.append(
-                                {
-                                    "job_id": job_id,
-                                    "status": JobStatus.FAILED,
-                                    "error_message": result.get("error"),
-                                    "increment_fail_count": True,
-                                }
+                            failed_error_message = result.get("error")
+                            failed_job_record = (
+                                id_to_job.get(job_id) if purge_on_fail else None
                             )
+                            if purge_on_fail and failed_job_record is not None:
+                                _write_prefailure_marker(
+                                    job_dir, failed_job_record, failed_error_message
+                                )
+                            failed_update: dict[str, Any] = {
+                                "job_id": job_id,
+                                "status": JobStatus.FAILED,
+                                "error_message": failed_error_message,
+                                "increment_fail_count": True,
+                            }
+                            if (
+                                purge_on_fail
+                                and failed_job_record is not None
+                                and effective_db_path is not None
+                            ):
+                                failed_update["_hook_payload"] = {
+                                    "kind": "purge",
+                                    "job_dir": job_dir,
+                                    "db_path": effective_db_path,
+                                    "job": failed_job_record,
+                                    "error_message": failed_error_message,
+                                }
+                            pending_updates.append(failed_update)
                             failed_ids.append(job_id)
-                            error_msg = result.get("error", "Unknown error")[:100]
+                            error_msg = (failed_error_message or "Unknown error")[:100]
                             print(f"Job {job_id} failed: {error_msg}")
                             log_job_result(wandb_run, job_id, "failed")
                     except Exception as e:
@@ -2692,16 +2888,42 @@ def submit_batch_parsl(
                             increment_fail_count,
                             outcome_label,
                         ) = _classify_parsl_future_failure(e)
-                        pending_updates.append(
-                            {
-                                "job_id": job_id,
-                                "status": failure_status,
-                                "error_message": None
-                                if failure_status == JobStatus.TO_RUN
-                                else str(e),
-                                "increment_fail_count": increment_fail_count,
-                            }
+                        exc_error_message = (
+                            None if failure_status == JobStatus.TO_RUN else str(e)
                         )
+                        exc_job_record = (
+                            id_to_job.get(job_id)
+                            if purge_on_fail and failure_status == JobStatus.FAILED
+                            else None
+                        )
+                        if (
+                            purge_on_fail
+                            and failure_status == JobStatus.FAILED
+                            and exc_job_record is not None
+                        ):
+                            _write_prefailure_marker(
+                                job_dir, exc_job_record, exc_error_message
+                            )
+                        exc_update: dict[str, Any] = {
+                            "job_id": job_id,
+                            "status": failure_status,
+                            "error_message": exc_error_message,
+                            "increment_fail_count": increment_fail_count,
+                        }
+                        if (
+                            purge_on_fail
+                            and failure_status == JobStatus.FAILED
+                            and exc_job_record is not None
+                            and effective_db_path is not None
+                        ):
+                            exc_update["_hook_payload"] = {
+                                "kind": "purge",
+                                "job_dir": job_dir,
+                                "db_path": effective_db_path,
+                                "job": exc_job_record,
+                                "error_message": exc_error_message,
+                            }
+                        pending_updates.append(exc_update)
                         if failure_status == JobStatus.TO_RUN:
                             print(f"Job {job_id} lost its manager; resetting to TO_RUN")
                         else:
@@ -2723,7 +2945,9 @@ def submit_batch_parsl(
     finally:
         if pending_updates:
             try:
-                _flush_pending_updates(workflow, pending_updates)
+                _flush_pending_updates(
+                    workflow, pending_updates, root_dir=hook_root_dir
+                )
                 pending_updates.clear()
             except Exception:
                 pass
@@ -2988,7 +3212,9 @@ def main():
         description="Submit architector workflow jobs to HPC scheduler"
     )
     parser.add_argument("db_path", nargs="?", help="Path to workflow SQLite database")
-    parser.add_argument("root_dir", nargs="?", help="Root directory for job directories")
+    parser.add_argument(
+        "root_dir", nargs="?", help="Root directory for job directories"
+    )
 
     # Submission mode
     parser.add_argument(
@@ -3117,6 +3343,24 @@ def main():
         default=False,
         help="Disable Parsl MonitoringHub (skip monitoring.db). Useful on systems "
         "where the monitoring hub port or SQLAlchemy dependency causes issues.",
+    )
+    parsl_group.add_argument(
+        "--clean-on-complete",
+        action="store_true",
+        default=False,
+        help="After each Parsl job completes successfully, inline-clean scratch "
+        "(.tmp, .core, orca_tmp_*) and basis (.bas, .basN) files from that job "
+        "directory. Critical outputs are preserved. Equivalent to applying "
+        "clean.py --clean-all --execute to each completed job.",
+    )
+    parsl_group.add_argument(
+        "--purge-on-fail",
+        action="store_true",
+        default=False,
+        help="After each Parsl job fails, write a .do_not_rerun.json marker "
+        "and delete the rest of the job directory's contents. Equivalent to "
+        "clean.py --purge-failed --execute for each failed job. The submit "
+        "guard then filters that job from any future submission.",
     )
 
     # W&B options (--use-parsl only)
@@ -3339,10 +3583,10 @@ def main():
 
     args = parser.parse_args()
 
-    if not args.validate_worker_imports and (
-        not args.db_path or not args.root_dir
-    ):
-        parser.error("db_path and root_dir are required unless --validate-worker-imports is used")
+    if not args.validate_worker_imports and (not args.db_path or not args.root_dir):
+        parser.error(
+            "db_path and root_dir are required unless --validate-worker-imports is used"
+        )
 
     # Validate multi-node Parsl args
     if args.nodes_per_block < 1:
@@ -3381,6 +3625,8 @@ def main():
 
     if args.globus_transfer and not args.use_parsl:
         parser.error("--globus-transfer requires --use-parsl")
+    if (args.clean_on_complete or args.purge_on_fail) and not args.use_parsl:
+        parser.error("--clean-on-complete / --purge-on-fail require --use-parsl")
     globus_config: GlobusTransferConfig | None = None
     if args.globus_transfer:
         globus_fields = [
@@ -3546,6 +3792,9 @@ def main():
             wandb_run=wandb_run,
             reroot=args.reroot,
             globus_config=globus_config,
+            clean_on_complete=args.clean_on_complete,
+            purge_on_fail=args.purge_on_fail,
+            db_path=args.db_path,
         )
     else:
         # Traditional mode: one job script per job
