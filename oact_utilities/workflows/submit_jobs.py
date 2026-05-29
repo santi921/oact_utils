@@ -155,17 +155,29 @@ def _flush_pending_updates(
 
     When ``root_dir`` is provided and an update carries a ``_hook_payload``
     key, the matching inline cleanup or purge hook is dispatched after the
-    DB write. The hook payload is popped from the update before
-    ``_write_job_update`` runs so it never reaches the DB layer. Purge
-    hooks must run after the DB commit so ``_purge_failed_job``'s TOCTOU
-    re-check sees ``status='failed'``.
+    DB write. Purge hooks must run after the DB commit so
+    ``_purge_failed_job``'s TOCTOU re-check sees ``status='failed'``.
+
+    The payload is read non-destructively so that if ``_write_job_update``
+    raises mid-batch, the caller can retry the same ``pending`` list and
+    every entry's hook is still attached. The DB write itself is
+    idempotent (same target row, same status), so re-running a partially
+    flushed batch is safe.
     """
     if not pending:
         return
 
     for update in pending:
-        hook = update.pop("_hook_payload", None)
-        _write_job_update(workflow, update)
+        hook = update.get("_hook_payload")
+        # Strip the hook payload from the DB-bound dict without mutating
+        # the source. A mid-batch _write_job_update failure must leave
+        # _hook_payload intact for retry.
+        write_payload = (
+            {k: v for k, v in update.items() if k != "_hook_payload"}
+            if hook is not None
+            else update
+        )
+        _write_job_update(workflow, write_payload)
         if hook is None or root_dir is None:
             continue
         kind = hook.get("kind")
@@ -2618,13 +2630,18 @@ def submit_batch_parsl(
 
             if action == "completed_on_disk":
                 job_dir = result["job_dir"]
-                pending_updates.append(
-                    {
-                        "job_id": job_id,
-                        "status": JobStatus.COMPLETED,
-                        "metrics": {"job_dir": job_dir},
+                completed_on_disk_update: dict[str, Any] = {
+                    "job_id": job_id,
+                    "status": JobStatus.COMPLETED,
+                    "metrics": {"job_dir": job_dir},
+                }
+                if clean_on_complete:
+                    completed_on_disk_update["_hook_payload"] = {
+                        "kind": "clean",
+                        "job_dir": job_dir,
+                        "optimizer": hook_optimizer,
                     }
-                )
+                pending_updates.append(completed_on_disk_update)
                 print(f"Detected completed job {job_id} on disk")
                 log_job_result(wandb_run, job_id, "completed")
                 _flush_if_buffered()
@@ -2632,14 +2649,41 @@ def submit_batch_parsl(
 
             if action == "failed_on_disk":
                 job_dir = result["job_dir"]
-                pending_updates.append(
-                    {
-                        "job_id": job_id,
-                        "status": JobStatus.FAILED,
-                        "error_message": result.get("error_message"),
-                        "increment_fail_count": True,
-                    }
+                failed_on_disk_error = result.get("error_message")
+                failed_on_disk_record = (
+                    claimed_job_map[job_id] if purge_on_fail else None
                 )
+                if (
+                    purge_on_fail
+                    and failed_on_disk_record is not None
+                    and effective_db_path is not None
+                ):
+                    # _classify_claimed_job dispatches the "marker_blocked"
+                    # branch first, so reaching here means no marker yet.
+                    # Write the pre-failure marker for crash-safety before
+                    # the buffered FAILED row reaches the DB.
+                    _write_prefailure_marker(
+                        job_dir, failed_on_disk_record, failed_on_disk_error
+                    )
+                failed_on_disk_update: dict[str, Any] = {
+                    "job_id": job_id,
+                    "status": JobStatus.FAILED,
+                    "error_message": failed_on_disk_error,
+                    "increment_fail_count": True,
+                }
+                if (
+                    purge_on_fail
+                    and failed_on_disk_record is not None
+                    and effective_db_path is not None
+                ):
+                    failed_on_disk_update["_hook_payload"] = {
+                        "kind": "purge",
+                        "job_dir": job_dir,
+                        "db_path": effective_db_path,
+                        "job": failed_on_disk_record,
+                        "error_message": failed_on_disk_error,
+                    }
+                pending_updates.append(failed_on_disk_update)
                 print(f"Detected failed job {job_id} on disk")
                 log_job_result(wandb_run, job_id, "failed")
                 _flush_if_buffered()
@@ -2930,6 +2974,13 @@ def submit_batch_parsl(
                             failed_ids.append(job_id)
                             print(f"Job {job_id} exception: {str(e)[:100]}")
                         log_job_result(wandb_run, job_id, outcome_label)
+
+                    # Future has resolved; drop the cached JobRecord (the
+                    # hook payload, if any, retains its own reference via
+                    # _hook_payload["job"]). Bounds id_to_job memory for
+                    # long campaigns: JobRecord carries the heavy geometry
+                    # field, ~58 KB per row.
+                    id_to_job.pop(job_id, None)
 
                     _flush_if_buffered()
                     if _shutdown_requested:

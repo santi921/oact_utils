@@ -2759,3 +2759,72 @@ class TestFlushPendingUpdatesHookDispatch:
             _flush_pending_updates(MagicMock(), pending, root_dir=None)
 
         assert clean_calls == []
+
+    def test_hook_payload_preserved_on_write_failure(self, tmp_path):
+        """If _write_job_update raises, the source dict must still carry
+        _hook_payload so a retry can reattempt the hook. Earlier versions
+        popped destructively and lost the hook on transient SQLite errors.
+        """
+        from unittest.mock import patch
+
+        def boom(_workflow, _update):
+            raise RuntimeError("transient sqlite lock")
+
+        pending = [
+            {
+                "job_id": 1,
+                "status": JobStatus.FAILED,
+                "error_message": "boom",
+                "_hook_payload": {
+                    "kind": "purge",
+                    "job_dir": str(tmp_path / "job_1"),
+                    "db_path": tmp_path / "wf.db",
+                    "job": MagicMock(id=1),
+                    "error_message": "boom",
+                },
+            }
+        ]
+
+        with patch(
+            "oact_utilities.workflows.submit_jobs._write_job_update",
+            side_effect=boom,
+        ):
+            with pytest.raises(RuntimeError, match="transient"):
+                _flush_pending_updates(MagicMock(), pending, root_dir=tmp_path)
+
+        # The hook payload must still be there for the retry to find.
+        assert "_hook_payload" in pending[0]
+        assert pending[0]["_hook_payload"]["kind"] == "purge"
+
+    def test_write_payload_excludes_hook_key(self, tmp_path):
+        """The dict reaching _write_job_update must not contain
+        _hook_payload (would corrupt the SQL UPDATE columns)."""
+        from unittest.mock import patch
+
+        seen: list[dict] = []
+        with (
+            patch(
+                "oact_utilities.workflows.submit_jobs._write_job_update",
+                side_effect=lambda _w, u: seen.append(dict(u)),
+            ),
+            patch(
+                "oact_utilities.workflows.submit_jobs._cleanup_completed_job_inline",
+            ),
+        ):
+            (tmp_path / "job_1").mkdir()
+            pending = [
+                {
+                    "job_id": 1,
+                    "status": JobStatus.COMPLETED,
+                    "_hook_payload": {
+                        "kind": "clean",
+                        "job_dir": str(tmp_path / "job_1"),
+                        "optimizer": None,
+                    },
+                }
+            ]
+            _flush_pending_updates(MagicMock(), pending, root_dir=tmp_path)
+
+        assert "_hook_payload" not in seen[0]
+        # Source dict retains the payload (idempotent re-flush stays safe).
+        assert "_hook_payload" in pending[0]
