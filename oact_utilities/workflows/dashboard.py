@@ -923,10 +923,8 @@ def backfill_metrics(
 
     if recompute:
         cur = workflow._execute_with_retry(
-            (
-                "SELECT id, orig_index, elements, charge, spin "
-                f"FROM structures WHERE status = 'completed'{limit_clause}"
-            )
+            "SELECT id, orig_index, elements, charge, spin "
+            f"FROM structures WHERE status = 'completed'{limit_clause}"
         )
     else:
         # Include jobs missing standard metrics OR (when available) missing qtaim data.
@@ -1538,17 +1536,28 @@ def recover_orphaned_jobs(
         """,
         (JobStatus.RUNNING.value,),
     )
-    tracked = cur.fetchall()
+    # Drop the "pid_<PID>" sentinel written when the submitter ran outside any
+    # scheduler allocation: those IDs are never in qstat/squeue/flux output, so
+    # leaving them in the set would mis-classify every such row as dead and
+    # spuriously reset active jobs to TO_RUN.
+    all_tracked = cur.fetchall()
+    tracked = [row for row in all_tracked if not row["worker_id"].startswith("pid_")]
+    skipped_pid = len(all_tracked) - len(tracked)
+    if skipped_pid:
+        print(
+            f"Skipping {skipped_pid} RUNNING job(s) with 'pid_*' worker_id "
+            "(submitter ran outside a scheduler allocation; not recoverable)"
+        )
 
     if not tracked:
-        print("No RUNNING jobs with worker_id found -- nothing to recover.")
+        print("No RUNNING jobs with scheduler worker_id found -- nothing to recover.")
         return {
             "recovered": 0,
             "completed": 0,
             "failed": 0,
             "reset": 0,
             "dead_jobs": 0,
-            "skipped": 0,
+            "skipped": skipped_pid,
         }
 
     unique_workers = {row["worker_id"] for row in tracked}
@@ -1570,7 +1579,7 @@ def recover_orphaned_jobs(
             "failed": 0,
             "reset": 0,
             "dead_jobs": 0,
-            "skipped": len(tracked),
+            "skipped": len(tracked) + skipped_pid,
         }
 
     # Step 3: Find dead scheduler jobs
@@ -1583,7 +1592,7 @@ def recover_orphaned_jobs(
             "failed": 0,
             "reset": 0,
             "dead_jobs": 0,
-            "skipped": 0,
+            "skipped": skipped_pid,
         }
 
     orphans = [row for row in tracked if row["worker_id"] in dead_workers]
@@ -1622,9 +1631,7 @@ def recover_orphaned_jobs(
         if job_dir_path is None:
             reset_ids.append(job["id"])
             if verbose:
-                print(
-                    f"  Job {job['id']}: no recoverable job_dir -- reset to TO_RUN"
-                )
+                print(f"  Job {job['id']}: no recoverable job_dir -- reset to TO_RUN")
             continue
 
         probe_items.append((job["id"], job_dir_path))
@@ -1664,9 +1671,7 @@ def recover_orphaned_jobs(
                 if disk_status == 1:
                     completed_ids.append(job_id)
                     if verbose:
-                        print(
-                            f"  Job {job_id}: completed on disk -- marked COMPLETED"
-                        )
+                        print(f"  Job {job_id}: completed on disk -- marked COMPLETED")
                 elif disk_status == -1:
                     failed_updates.append(
                         (job_id, error_msg or "Orphaned job failed on disk")
@@ -1676,7 +1681,9 @@ def recover_orphaned_jobs(
                 else:
                     reset_ids.append(job_id)
                     if verbose:
-                        print(f"  Job {job_id}: inconclusive on disk -- reset to TO_RUN")
+                        print(
+                            f"  Job {job_id}: inconclusive on disk -- reset to TO_RUN"
+                        )
 
     # Step 5: Batch DB writes (minimizes commits on Lustre)
     if completed_ids:

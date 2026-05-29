@@ -45,6 +45,7 @@ Usage (V2 -- dashboard --update scan)::
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +59,9 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
     wandb = None  # type: ignore[assignment]
+
+
+SNAPSHOT_INTERVAL_SEC = 30
 
 
 def init_wandb_run(
@@ -90,6 +94,8 @@ def init_wandb_run(
         run.define_metric("_timestamp")
         run.define_metric("metrics/*", step_metric="_timestamp")
         run.define_metric("progress/*", step_metric="_timestamp")
+        run.define_metric("cdf/*", step_metric="_timestamp")
+        run.define_metric("gauge/*", step_metric="_timestamp")
         return run
     except Exception as e:
         print(f"Warning: W&B init failed: {e}. Continuing without logging.")
@@ -248,6 +254,93 @@ def log_campaign_snapshot(
             run.log(payload)
     except Exception as e:
         print(f"Warning: W&B log failed: {e}")
+
+
+def _parse_sqlite_timestamp(ts: str) -> float | None:
+    """Parse a SQLite TIMESTAMP string (UTC) to a Unix epoch in seconds.
+
+    Handles both integer-second (`'2026-05-13 14:23:01'`) and fractional
+    (`'2026-05-13 14:23:01.123'`) forms. Returns ``None`` on any parse
+    failure so callers can skip the row.
+    """
+    try:
+        dt = _dt.datetime.fromisoformat(ts.replace(" ", "T"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt.timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def backfill_terminal_cdfs(run: Any, workflow: ArchitectorWorkflow) -> None:
+    """Backfill cdf/completed, cdf/failed, cdf/timeout from DB history.
+
+    Walks ``workflow.iter_terminal_history()`` in time order and emits one
+    ``run.log`` per terminal row with the running cumulative counts.
+    Fidelity caveat: see ``docs/parsl_integration.md``.
+
+    Args:
+        run: W&B run object from ``init_wandb_run``, or ``None``.
+        workflow: Open ``ArchitectorWorkflow`` instance.
+    """
+    if run is None:
+        return
+    try:
+        cum_completed = 0
+        cum_failed = 0
+        cum_timeout = 0
+        for status, ts_str in workflow.iter_terminal_history():
+            ts = _parse_sqlite_timestamp(ts_str)
+            if ts is None:
+                continue
+            if status == "completed":
+                cum_completed += 1
+            elif status == "failed":
+                cum_failed += 1
+            elif status == "timeout":
+                cum_timeout += 1
+            else:
+                continue
+            run.log(
+                {
+                    "_timestamp": ts,
+                    "cdf/completed": cum_completed,
+                    "cdf/failed": cum_failed,
+                    "cdf/timeout": cum_timeout,
+                }
+            )
+    except Exception as e:
+        print(f"Warning: W&B backfill_terminal_cdfs failed: {e}")
+
+
+def log_progress_snapshot(run: Any, workflow: ArchitectorWorkflow) -> None:
+    """Log a live snapshot of cdf/* and gauge/* at the current time.
+
+    Emits a single ``run.log`` with three cdf curves and two live gauges.
+    ``run.summary`` is owned by ``log_campaign_snapshot``; not touched here.
+
+    Args:
+        run: W&B run object from ``init_wandb_run``, or ``None``.
+        workflow: Open ``ArchitectorWorkflow`` instance.
+    """
+    if run is None:
+        return
+    try:
+        from .architector_workflow import JobStatus
+
+        counts = workflow.count_by_status()
+        run.log(
+            {
+                "_timestamp": time.time(),
+                "cdf/completed": counts.get(JobStatus.COMPLETED, 0),
+                "cdf/failed": counts.get(JobStatus.FAILED, 0),
+                "cdf/timeout": counts.get(JobStatus.TIMEOUT, 0),
+                "gauge/running": counts.get(JobStatus.RUNNING, 0),
+                "gauge/to_run": counts.get(JobStatus.TO_RUN, 0),
+            }
+        )
+    except Exception as e:
+        print(f"Warning: W&B log_progress_snapshot failed: {e}")
 
 
 def add_wandb_args(parser: argparse.ArgumentParser) -> None:

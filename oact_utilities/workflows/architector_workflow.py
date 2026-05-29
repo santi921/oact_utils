@@ -662,6 +662,34 @@ class ArchitectorWorkflow:
         rows = cur.fetchall()
         return {JobStatus(status): count for status, count in rows}
 
+    def iter_terminal_history(self) -> list[tuple[str, str]]:
+        """Return (status, updated_at_string) for terminal-state rows.
+
+        Reads only rows whose current status is one of completed/failed/timeout
+        and returns the raw ``updated_at`` SQL string sorted ascending. Callers
+        parse the timestamp themselves (the workflow class is intentionally
+        unaware of how callers want time formatted).
+
+        Returns:
+            List of ``(status_value, updated_at_string)`` pairs sorted by
+            ``updated_at``. Rows with NULL ``updated_at`` are excluded by the
+            SQL filter.
+        """
+        query = (
+            "SELECT status, updated_at FROM structures "
+            "WHERE status IN (?, ?, ?) AND updated_at IS NOT NULL "
+            "ORDER BY updated_at ASC"
+        )
+        cur = self._execute_with_retry(
+            query,
+            (
+                JobStatus.COMPLETED.value,
+                JobStatus.FAILED.value,
+                JobStatus.TIMEOUT.value,
+            ),
+        )
+        return [(status, str(ts)) for status, ts in cur.fetchall()]
+
     def get_summary(self) -> pd.DataFrame:
         """Get summary statistics as a DataFrame.
 

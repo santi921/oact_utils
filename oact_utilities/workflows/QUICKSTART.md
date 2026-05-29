@@ -82,6 +82,44 @@ python -m oact_utilities.workflows.submit_jobs \
 
 See README.md for full Parsl architecture details and SLURM multi-node options.
 
+#### C. Site-Specific Launch Scripts (recommended over hand-rolled commands)
+
+Pre-built launch scripts under `oact_utilities/launch/` wire up every flag a site needs. Copy one, edit the configuration block at the top, and submit.
+
+| Site / topology | Script | Notes |
+|-----------------|--------|-------|
+| LLNL Tuolumne (Flux, single-node) | `run_parsl_single_node.sh` | LocalProvider inside `flux alloc` |
+| LLNL multi-node (SLURM) | `run_parsl_multi_node.sh` | SlurmProvider multi-block |
+| Generic PBS Pro multi-node | `run_parsl_multi_node_pbs.sh` | PBSProProvider; supports `--mpirun-path` |
+| Sandia CTS1/TLCC2 single-node | `run_parsl_single_node_sandia.sh` | Run inside `salloc -p attaway`; uses `--hpc-site sandia --max-blocks 1` |
+| Sandia CTS1/TLCC2 multi-block | `run_parsl_multi_node_sandia.sh` | Parsl auto-provisions worker blocks; coordinator only needs Python |
+
+Sandia example:
+
+```bash
+# Single-node, inside an interactive allocation
+salloc -N1 -p attaway -A fy250086 -t 8:00:00
+conda activate oact
+bash oact_utilities/launch/run_parsl_single_node_sandia.sh
+
+# Multi-block (Parsl provisions its own SLURM allocations)
+sbatch oact_utilities/launch/run_parsl_multi_node_sandia.sh
+```
+
+The `--hpc-site sandia` profile switches the job-script writer to use `module load`, sets `OMPI_MCA_pml/mtl/btl` to bypass PSM2/Omni-Path, and requests `--partition` instead of `--constraint`. See README.md "HPC Site Profiles" for adding a new site.
+
+#### Memory-constrained nodes
+
+If your node has limited RAM per core (Sandia CTS1: ~64 GB / 36 cores; TLCC2: ~32 GB / 16 cores), pass `--mem-per-job MB` to clamp total ORCA memory:
+
+```bash
+python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
+    --use-parsl --hpc-site sandia --scheduler slurm \
+    --n-cores 12 --mem-per-job 60000   # CTS-1: ~60 GB total ORCA budget
+```
+
+`%maxcore` is sized per MPI rank so total memory stays under 85% of `mem_per_job`. Without this flag a 1500 MB per-rank floor is applied.
+
 ### 3. Monitor with dashboard
 
 ```bash
@@ -259,6 +297,39 @@ python -m oact_utilities.workflows.clean workflow.db jobs/ --purge-failed --exec
 
 The utility defaults to dry-run mode -- add `--execute` to actually delete files. See README.md for full CLI reference.
 
+### Inline Cleanup During Parsl Runs
+
+For long-running Parsl campaigns on scratch-tight systems (Sandia, Nibi), clean each job's directory the moment its future completes instead of running `clean.py` afterwards:
+
+```bash
+python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
+    --use-parsl --batch-size 500 \
+    --clean-on-complete \
+    --purge-on-fail
+```
+
+- `--clean-on-complete` removes `.tmp`, `.core`, `orca_tmp_*/`, `.bas`, `.basN` from each successful job. Critical outputs (`orca.out`, `orca.inp`, `orca.engrad`, `orca.gbw`, `orca_metrics.json`) are preserved.
+- `--purge-on-fail` writes `.do_not_rerun.json` (with failure metadata) and deletes everything else in the failed job's directory. The marker blocks resubmission.
+
+Both flags are Parsl-mode only. Failures inside the cleanup hooks are logged but never abort the campaign.
+
+## Crash Recovery
+
+When a node dies or a SLURM/PBS job is killed mid-run, molecules with `worker_id` set to the dead allocation become orphans. Recover them from any login node:
+
+```bash
+# SLURM (Tuolumne SLURM partitions, Sandia, Alliance Canada)
+python -m oact_utilities.workflows.dashboard workflow.db --recover-orphans --scheduler slurm
+
+# PBS Pro / OpenPBS
+python -m oact_utilities.workflows.dashboard workflow.db --recover-orphans --scheduler pbspro
+
+# Flux (Tuolumne default)
+python -m oact_utilities.workflows.dashboard workflow.db --recover-orphans --scheduler flux
+```
+
+Orphans whose ORCA output shows `ORCA TERMINATED NORMALLY` are marked COMPLETED; clear failures become FAILED; everything else is reset to TO_RUN.
+
 ## HPC Workflow Loop
 
 ```bash
@@ -274,9 +345,13 @@ python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --extrac
 python -m oact_utilities.workflows.dashboard workflow.db --reset-failed --max-retries 3
 
 # 5. Clean up scratch files from completed jobs
+#    (skip this step if you used --clean-on-complete during submission)
 python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --execute
 
-# 6. Repeat steps 1-5 until done
+# 6. If a node died: recover orphans before resubmitting
+python -m oact_utilities.workflows.dashboard workflow.db --recover-orphans --scheduler slurm
+
+# 7. Repeat steps 1-6 until done
 ```
 
 ## Full Documentation

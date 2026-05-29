@@ -1685,3 +1685,52 @@ def test_get_chronic_reset_counts_null_fail_count(tmp_path):
 
     with ArchitectorWorkflow(db_path) as workflow:
         assert workflow.get_chronic_reset_counts() == (0, 0)
+
+
+def test_recover_orphans_skips_pid_sentinel(tmp_path, monkeypatch):
+    """worker_id values starting with 'pid_' are submitter-process sentinels,
+    not real scheduler job IDs. They are never present in qstat/squeue/flux
+    output, so leaving them in the candidate set would misclassify every
+    such row as dead and spuriously reset active jobs to TO_RUN.
+    Covers B2 review finding.
+    """
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows.dashboard import recover_orphaned_jobs
+
+    db_path = tmp_path / "test.db"
+    conn = _init_db(db_path)
+    for i in range(3):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="to_run",
+        )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # Two jobs claimed under a pid_ sentinel (no scheduler env), one under
+        # a real SLURM ID. Scheduler reports the SLURM ID as still active.
+        workflow.mark_jobs_as_running([1, 2], worker_id="pid_99999")
+        workflow.mark_jobs_as_running([3], worker_id="slurm_42")
+
+        monkeypatch.setattr(
+            "oact_utilities.utils.scheduler.get_active_scheduler_jobs",
+            lambda sched: {"slurm_42"},
+        )
+
+        result = recover_orphaned_jobs(workflow, scheduler="slurm")
+
+        # Both pid_ rows are skipped; the real slurm_42 row is active.
+        assert result["recovered"] == 0
+        assert result["dead_jobs"] == 0
+        assert result["skipped"] == 2
+
+        # Critically, the pid_ rows are still RUNNING (not reset).
+        jobs = {j.id: j for j in workflow.get_jobs_by_status()}
+        assert jobs[1].status == JobStatus.RUNNING
+        assert jobs[2].status == JobStatus.RUNNING
+        assert jobs[3].status == JobStatus.RUNNING

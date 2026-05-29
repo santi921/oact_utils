@@ -235,21 +235,43 @@ python -m oact_utilities.workflows.dashboard \
 
 Keys logged: `campaign/completed`, `campaign/failed`, `campaign/to_run`, `campaign/running`, `campaign/timeout`, `campaign/progress_pct`, `metrics/max_forces_mean`, `metrics/wall_time_total_hours`, `metrics/core_hours_total`, etc.
 
+**Campaign-level CDF (automatic, no manual dashboard required):**
+
+Parsl mode also drives a wall-clock-time CDF chart of campaign progress so you can answer "how fast did this converge?" without ever running the dashboard. Five keys are logged under wall-clock-time axis (`_timestamp`):
+
+- `cdf/completed`, `cdf/failed`, `cdf/timeout`: monotonically non-decreasing cumulative counts of terminal-state rows.
+- `gauge/running`, `gauge/to_run`: live snapshot of current row counts in non-terminal states. **Not cumulative** -- they decrease as the campaign drains.
+
+How the chart stays current:
+
+1. **Backfill on init.** When `submit_jobs --use-parsl --wandb-project ...` starts, one scan of `(status, updated_at)` for terminal-state rows seeds the chart with all prior history. Re-running submit_jobs on the same `--wandb-run-id` appends additional keyframes; W&B accepts non-monotonic timestamps for series with a custom step metric, so duplicate points are tolerated.
+2. **Throttled live snapshots in the submission loop.** After every per-job event (completed/failed/timeout/exception), an inline check gates a live snapshot to one log per `SNAPSHOT_INTERVAL_SEC` (default 30, set as a module constant in `wandb_logger.py`).
+3. **Force-log on entry and exit.** One snapshot at t0 of the submission batch and one in the `finally` block ensure the chart's first and last points reflect reality even if the throttle window otherwise hides them.
+
+**Fidelity caveat.** `updated_at` is overwritten on every status change, so a row that failed and was later reset + recompleted no longer contributes to the historical `cdf/failed`. Once logged to W&B, prior series points persist in W&B regardless. The backfilled series is therefore a *lower bound* on terminal events. For exact historical fidelity (including `cumulative_running` and reset-aware `cdf/failed`), a future `status_history` table is required.
+
+**Deferred curves**. A true historical "currently running" curve and a historical `cumulative_to_run` are intentionally not shipped -- both require per-transition history. The live `gauge/*` keys provide a "now" view that is honest within those constraints.
+
 **W&B is optional and fail-safe.** All W&B calls are wrapped in try/except -- a network failure, missing install, or expired token never aborts a campaign. If wandb is not installed, `--wandb-project` prints a warning and is ignored.
 
 **Programmatic usage:**
 
 ```python
 from oact_utilities.workflows.wandb_logger import (
-    init_wandb_run,
-    log_job_result,
-    log_campaign_snapshot,
+    backfill_terminal_cdfs,
     compute_metrics_stats,
     finish_wandb_run,
+    init_wandb_run,
+    log_campaign_snapshot,
+    log_job_result,
+    log_progress_snapshot,
 )
 
 run = init_wandb_run(project="actinide-campaign", run_name="wave_two")
 try:
+    # Seed cdf/* time-series from prior DB history; throttled live snapshots
+    # in submit_batch_parsl keep them fresh during the campaign.
+    backfill_terminal_cdfs(run, workflow)
     submitted_ids = submit_batch_parsl(..., wandb_run=run)
 finally:
     finish_wandb_run(run)

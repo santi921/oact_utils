@@ -352,17 +352,40 @@ def get_n_basis(atoms: Atoms) -> int:
     return nbasis
 
 
-def get_mem_estimate(atoms: Atoms, mult: int = 1, has_actinides: bool = False) -> int:
-    """
-    Get an estimate of the memory requirement for given input in MB.
+# Per-process %maxcore floor in MB. Keeps ORCA's internal allocator happy on
+# def2-TZVPD-sized integrals; going below ~1500 risks buffer-shortage warnings.
+_MAXCORE_FLOOR_MB = 1500
+# Headroom fraction left for OS, Python workers, and ORCA scratch buffers when
+# clamping to a mem_per_job_mb budget.
+_MEM_BUDGET_HEADROOM = 0.85
 
-    If the estimate is less than 4000MB, we return 4000MB.
+
+def get_mem_estimate(
+    atoms: Atoms,
+    mult: int = 1,
+    has_actinides: bool = False,
+    cores: int = 1,
+    mem_per_job_mb: int | None = None,
+) -> int:
+    """
+    Return per-MPI-process memory in MB for ORCA's `%maxcore` directive.
+
+    ORCA interprets `%maxcore` as memory per MPI rank, so the fit's
+    total-job estimate must be divided by `cores`. When `mem_per_job_mb`
+    is provided, the total is first clamped to 85% of that budget to leave
+    headroom for OS, Python workers, and ORCA scratch buffers.
+
+    A per-process floor of 1500 MB is enforced unconditionally to keep
+    ORCA's internal allocator happy.
 
     :param atoms: atoms to compute the number of basis functions of
     :param mult: spin multiplicity of input
     :param has_actinides: whether the molecule contains actinides (forces UKS
                           scaling for singlets)
-    :return: estimated (upper-bound) to the memory requirement of this Orca job
+    :param cores: number of MPI ranks the job will run with
+    :param mem_per_job_mb: optional total-job memory budget in MB. When set,
+                           total ORCA memory is clamped to 85% of this value.
+    :return: per-process `%maxcore` value in MB
     """
     nbasis = get_n_basis(atoms)
     if mult == 1 and not has_actinides:
@@ -373,8 +396,13 @@ def get_mem_estimate(atoms: Atoms, mult: int = 1, has_actinides: bool = False) -
         # UKS scaling as determined by metal-organics in Orca5
         a = 0.016460518374501867
         b = -320.38502508802776
-    mem_est = int(max(a * nbasis**1.5 + b, 4000))
-    return mem_est
+    total_mb = a * nbasis**1.5 + b
+
+    if mem_per_job_mb is not None:
+        total_mb = min(total_mb, _MEM_BUDGET_HEADROOM * mem_per_job_mb)
+
+    per_proc = int(total_mb / max(cores, 1))
+    return max(per_proc, _MAXCORE_FLOOR_MB)
 
 
 def get_orca_blocks(
@@ -398,6 +426,7 @@ def get_orca_blocks(
     error_handle: bool = False,
     error_code: int = 0,
     ks_method: str | None = None,
+    mem_per_job_mb: int | None = None,
 ) -> tuple[str, list[str]]:
 
     if opt:
@@ -474,6 +503,8 @@ def get_orca_blocks(
         simple = ORCA_SIMPLE_INPUT_PM3.copy()
         simple.insert(0, job)
         orcasimpleinput = " ".join(["PM3"] + simple)
+        # PM3 is debug-only with negligible memory; hardcoded per-proc 512 MB
+        # is intentionally not routed through get_mem_estimate / mem_per_job_mb.
         orcablocks = [
             "%pal\n nprocs " + str(cores) + "\nend",
             "%maxcore 512",
@@ -515,9 +546,16 @@ def get_orca_blocks(
     orcablocks.append("end")
     orcablocks.append("%pal\n nprocs " + str(cores) + "\nend")
 
-    # Include estimate of memory needs
+    # Include estimate of memory needs. `%maxcore` is per MPI rank, so divide
+    # the total-job estimate by `cores` (handled inside get_mem_estimate).
     has_actinides = bool(elem_set & set(ACTINIDE_LIST))
-    mem_est = get_mem_estimate(atoms, mult, has_actinides=has_actinides)
+    mem_est = get_mem_estimate(
+        atoms,
+        mult,
+        has_actinides=has_actinides,
+        cores=cores,
+        mem_per_job_mb=mem_per_job_mb,
+    )
     orcablocks.append(f"%maxcore {mem_est}")
 
     if not nbo:
@@ -597,6 +635,7 @@ def write_orca_inputs(
     error_handle: bool = False,
     error_code: int = 0,
     ks_method: str | None = None,
+    mem_per_job_mb: int | None = None,
 ) -> tuple[str, list[str]]:
     """
     One-off method to be used if you wanted to write inputs for an arbitrary
@@ -634,6 +673,7 @@ def write_orca_inputs(
         tight_two_e_int=tight_two_e_int,
         diis_option=diis_option,
         ks_method=ks_method,
+        mem_per_job_mb=mem_per_job_mb,
     )
 
     # print(orcablocks)

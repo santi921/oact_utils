@@ -5,13 +5,18 @@ All tests use unittest.mock to avoid real W&B network calls.
 
 from __future__ import annotations
 
+import datetime
 from unittest.mock import MagicMock, call, patch
 
+import pytest
+
 from oact_utilities.workflows.wandb_logger import (
+    backfill_terminal_cdfs,
     finish_wandb_run,
     init_wandb_run,
     log_campaign_snapshot,
     log_job_result,
+    log_progress_snapshot,
 )
 
 
@@ -55,6 +60,14 @@ class TestInitWandbRun:
         )
         assert (
             call("progress/*", step_metric="_timestamp")
+            in mock_run.define_metric.call_args_list
+        )
+        assert (
+            call("cdf/*", step_metric="_timestamp")
+            in mock_run.define_metric.call_args_list
+        )
+        assert (
+            call("gauge/*", step_metric="_timestamp")
             in mock_run.define_metric.call_args_list
         )
 
@@ -250,3 +263,248 @@ class TestLogCampaignSnapshot:
         log_campaign_snapshot(mock_run, {}, total=0)
         summary = mock_run.summary.update.call_args[0][0]
         assert summary["campaign/progress_pct"] == 0
+
+
+# ------------------------------------------------------------------------
+# CDF backfill + live snapshot tests (V2 plan)
+# ------------------------------------------------------------------------
+
+
+@pytest.fixture
+def populated_workflow(tmp_path):
+    """Build a real ArchitectorWorkflow DB with a mix of terminal/non-terminal rows.
+
+    Layout:
+      - 3 completed rows at t=10, 20, 30
+      - 2 failed rows at t=15, 25
+      - 1 timeout row at t=28
+      - 1 running row at t=5  (excluded from terminal history)
+      - 1 to_run row at t=1   (excluded from terminal history)
+    Timestamps are stored as the SQLite TIMESTAMP string format the schema
+    uses (`%Y-%m-%d %H:%M:%S`, treated as UTC).
+    """
+    from oact_utilities.utils.architector import _init_db, _insert_row
+    from oact_utilities.workflows import ArchitectorWorkflow
+
+    db_path = tmp_path / "cdf.db"
+    conn = _init_db(db_path)
+
+    base = datetime.datetime(2026, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
+
+    rows = [
+        ("completed", 10),
+        ("completed", 20),
+        ("completed", 30),
+        ("failed", 15),
+        ("failed", 25),
+        ("timeout", 28),
+        ("running", 5),
+        ("to_run", 1),
+    ]
+    for i, (status, _offset) in enumerate(rows):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status=status,
+        )
+
+    # Overwrite updated_at to deterministic values (CURRENT_TIMESTAMP default
+    # gives "now" which would vary across runs).
+    for row_id, (_status, offset) in enumerate(rows, start=1):
+        ts = (base + datetime.timedelta(seconds=offset)).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("UPDATE structures SET updated_at = ? WHERE id = ?", (ts, row_id))
+    conn.commit()
+    conn.close()
+
+    wf = ArchitectorWorkflow(db_path)
+    yield wf, base
+    wf.close()
+
+
+class TestIterTerminalHistory:
+    """Tests for ArchitectorWorkflow.iter_terminal_history."""
+
+    def test_returns_only_terminal_rows_sorted_by_time(self, populated_workflow):
+        wf, base = populated_workflow
+        history = wf.iter_terminal_history()
+
+        # 3 completed + 2 failed + 1 timeout = 6 rows. running/to_run excluded.
+        assert len(history) == 6
+        statuses = [s for s, _t in history]
+        assert sorted(statuses) == sorted(
+            ["completed", "completed", "completed", "failed", "failed", "timeout"]
+        )
+
+        # Returns raw SQL strings (callers parse), sorted ascending.
+        times = [t for _s, t in history]
+        assert times == sorted(times)
+        assert all(isinstance(t, str) for t in times)
+
+        # Spot-check: first terminal event is at offset 10s from base.
+        expected_first = (base + datetime.timedelta(seconds=10)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        assert times[0] == expected_first
+
+    def test_skips_rows_with_null_updated_at(self, populated_workflow):
+        wf, _base = populated_workflow
+        # Null out one row's updated_at directly. Use a subquery rather than
+        # UPDATE ... LIMIT (which depends on a SQLite compile flag).
+        conn = wf.conn
+        conn.execute(
+            "UPDATE structures SET updated_at = NULL "
+            "WHERE id = (SELECT id FROM structures WHERE status = 'completed' LIMIT 1)"
+        )
+        conn.commit()
+
+        history = wf.iter_terminal_history()
+        # 6 - 1 = 5 surviving terminal rows.
+        assert len(history) == 5
+
+
+class TestBackfillTerminalCdfs:
+    """Tests for backfill_terminal_cdfs."""
+
+    def test_emits_one_log_per_terminal_row_with_cumulative_counts(
+        self, populated_workflow
+    ):
+        wf, _base = populated_workflow
+        mock_run = MagicMock()
+
+        backfill_terminal_cdfs(mock_run, wf)
+
+        # 6 terminal rows -> 6 run.log calls.
+        assert mock_run.log.call_count == 6
+
+        # Each payload has cumulative counts that monotonically grow.
+        payloads = [c.args[0] for c in mock_run.log.call_args_list]
+        completed_series = [p["cdf/completed"] for p in payloads]
+        failed_series = [p["cdf/failed"] for p in payloads]
+        timeout_series = [p["cdf/timeout"] for p in payloads]
+
+        # Final values match the fixture: 3 completed, 2 failed, 1 timeout.
+        assert completed_series[-1] == 3
+        assert failed_series[-1] == 2
+        assert timeout_series[-1] == 1
+
+        # All three series are monotonically non-decreasing.
+        assert completed_series == sorted(completed_series)
+        assert failed_series == sorted(failed_series)
+        assert timeout_series == sorted(timeout_series)
+
+        # Every payload has a _timestamp.
+        for p in payloads:
+            assert "_timestamp" in p
+
+    def test_noop_when_run_is_none(self, populated_workflow):
+        wf, _base = populated_workflow
+        # Should not raise; nothing to assert beyond non-explosion.
+        backfill_terminal_cdfs(None, wf)
+
+    def test_swallows_workflow_exception(self, capsys):
+        mock_run = MagicMock()
+        broken_wf = MagicMock()
+        broken_wf.iter_terminal_history.side_effect = RuntimeError("db gone")
+
+        backfill_terminal_cdfs(mock_run, broken_wf)
+
+        captured = capsys.readouterr()
+        assert "Warning" in captured.out
+        assert "backfill_terminal_cdfs failed" in captured.out
+
+    def test_skips_rows_with_unparseable_timestamps(self, populated_workflow):
+        """A malformed updated_at string is skipped, not raised."""
+        wf, _base = populated_workflow
+        wf.conn.execute(
+            "UPDATE structures SET updated_at = 'not-a-timestamp' "
+            "WHERE id = (SELECT id FROM structures WHERE status = 'completed' LIMIT 1)"
+        )
+        wf.conn.commit()
+
+        mock_run = MagicMock()
+        backfill_terminal_cdfs(mock_run, wf)
+
+        # 6 terminal rows -> 5 surviving after the malformed one is skipped.
+        assert mock_run.log.call_count == 5
+
+    def test_handles_fractional_second_timestamps(self, tmp_path):
+        """Backfill parses '2026-... HH:MM:SS.fff' as well as '...:SS'."""
+        from oact_utilities.utils.architector import _init_db, _insert_row
+        from oact_utilities.workflows import ArchitectorWorkflow
+
+        db_path = tmp_path / "frac.db"
+        conn = _init_db(db_path)
+        _insert_row(
+            conn,
+            orig_index=0,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="completed",
+        )
+        conn.execute(
+            "UPDATE structures SET updated_at = '2026-05-13 14:23:01.500' WHERE id = 1"
+        )
+        conn.commit()
+        conn.close()
+
+        wf = ArchitectorWorkflow(db_path)
+        try:
+            mock_run = MagicMock()
+            backfill_terminal_cdfs(mock_run, wf)
+            assert mock_run.log.call_count == 1
+            payload = mock_run.log.call_args[0][0]
+            # 2026-05-13 14:23:01.500 UTC -> epoch 1778336581.5
+            expected = datetime.datetime(
+                2026, 5, 13, 14, 23, 1, 500_000, tzinfo=datetime.timezone.utc
+            ).timestamp()
+            assert abs(payload["_timestamp"] - expected) < 0.01
+        finally:
+            wf.close()
+
+
+class TestLogProgressSnapshot:
+    """Tests for log_progress_snapshot."""
+
+    def test_logs_cdf_and_gauge_keys_with_current_counts(self, populated_workflow):
+        wf, _base = populated_workflow
+        mock_run = MagicMock()
+
+        log_progress_snapshot(mock_run, wf)
+
+        mock_run.log.assert_called_once()
+        payload = mock_run.log.call_args[0][0]
+        assert "_timestamp" in payload
+        # Fixture has 3 completed, 2 failed, 1 timeout, 1 running, 1 to_run.
+        assert payload["cdf/completed"] == 3
+        assert payload["cdf/failed"] == 2
+        assert payload["cdf/timeout"] == 1
+        assert payload["gauge/running"] == 1
+        assert payload["gauge/to_run"] == 1
+
+    def test_does_not_touch_run_summary(self, populated_workflow):
+        """run.summary is owned by log_campaign_snapshot; this function only logs."""
+        wf, _base = populated_workflow
+        mock_run = MagicMock()
+
+        log_progress_snapshot(mock_run, wf)
+
+        mock_run.summary.update.assert_not_called()
+
+    def test_noop_when_run_is_none(self, populated_workflow):
+        wf, _base = populated_workflow
+        log_progress_snapshot(None, wf)
+
+    def test_swallows_exception(self, capsys):
+        mock_run = MagicMock()
+        broken_wf = MagicMock()
+        broken_wf.count_by_status.side_effect = RuntimeError("db gone")
+
+        log_progress_snapshot(mock_run, broken_wf)
+
+        captured = capsys.readouterr()
+        assert "Warning" in captured.out
+        assert "log_progress_snapshot failed" in captured.out

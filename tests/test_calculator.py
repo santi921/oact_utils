@@ -5,6 +5,7 @@ from ase import Atoms
 from oact_utilities.core.orca.calc import (
     ACTINIDE_LIST,
     ECP_SIZE,
+    get_mem_estimate,
     get_orca_blocks,
     get_symm_break_block,
 )
@@ -241,3 +242,76 @@ class TestPm3Template:
         """The %pal nprocs block must still be present for PM3."""
         _, blocks = get_orca_blocks(_make_water(), mult=1, charge=0, simple_input="pm3")
         assert any("nprocs" in b for b in blocks)
+
+
+# ---------------------------------------------------------------------------
+# %maxcore memory sizing (per-process, optional clamp)
+# ---------------------------------------------------------------------------
+
+
+def _extract_maxcore(blocks: list[str]) -> int:
+    """Pull the integer MB value from the '%maxcore N' block."""
+    for b in blocks:
+        if "maxcore" in b.lower():
+            return int(b.lower().split("maxcore", 1)[1].strip())
+    raise AssertionError("No %maxcore block found")
+
+
+def _make_big_uranium_cluster() -> Atoms:
+    """Synthetic large-basis system to push past the per-process floor."""
+    # 150 U atoms -> nbasis ~15750 -> UKS fit ~32 GB total job memory.
+    # Large enough that cores=1 and cores=16 land on opposite sides of the floor.
+    n = 150
+    positions = [(i * 3.0, 0.0, 0.0) for i in range(n)]
+    return Atoms(f"U{n}", positions=positions)
+
+
+class TestMaxcoreSizing:
+    def test_maxcore_floor_small_system(self):
+        """Tiny H2O with nprocs=16: per-process value hits the 1500 MB floor."""
+        _, blocks = get_orca_blocks(_make_water(), mult=1, charge=0, cores=16)
+        assert _extract_maxcore(blocks) == 1500
+
+    def test_maxcore_scales_inverse_with_cores(self):
+        """Per-process value should decrease (or stay at floor) as cores grow."""
+        atoms = _make_big_uranium_cluster()
+        v1 = _extract_maxcore(get_orca_blocks(atoms, mult=2, charge=0, cores=1)[1])
+        v16 = _extract_maxcore(get_orca_blocks(atoms, mult=2, charge=0, cores=16)[1])
+        assert v1 > v16
+        # Per-rank floor must still hold on the high-cores side.
+        assert v16 >= 1500
+
+    def test_maxcore_clamp_floor_wins_when_tight(self):
+        """Aggressive budget below floor*cores still returns floor per process."""
+        _, blocks = get_orca_blocks(
+            _make_water(), mult=1, charge=0, cores=16, mem_per_job_mb=8000
+        )
+        # 0.85 * 8000 / 16 = 425 -> floor (1500) wins
+        assert _extract_maxcore(blocks) == 1500
+
+    def test_maxcore_clamp_actually_bites_on_large_system(self):
+        """Clamp must reduce %maxcore vs. unclamped for a large UKS system."""
+        atoms = _make_big_uranium_cluster()
+        unclamped = _extract_maxcore(
+            get_orca_blocks(atoms, mult=2, charge=0, cores=4)[1]
+        )
+        clamped = _extract_maxcore(
+            get_orca_blocks(atoms, mult=2, charge=0, cores=4, mem_per_job_mb=20000)[1]
+        )
+        # 0.85 * 20000 / 4 = 4250 MB cap per proc
+        assert clamped < unclamped
+        assert clamped <= 4250
+
+    def test_get_mem_estimate_direct_floor(self):
+        """get_mem_estimate respects the per-process floor for tiny systems."""
+        assert get_mem_estimate(_make_water(), mult=1, cores=16) == 1500
+
+    def test_get_mem_estimate_direct_clamp(self):
+        """Clamp passes through get_mem_estimate's per-process division."""
+        atoms = _make_big_uranium_cluster()
+        # 0.85 * 16000 / 8 = 1700 per proc cap, above floor of 1500
+        per_proc = get_mem_estimate(
+            atoms, mult=2, has_actinides=True, cores=8, mem_per_job_mb=16000
+        )
+        assert per_proc <= 1700
+        assert per_proc >= 1500
