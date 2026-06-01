@@ -2317,8 +2317,9 @@ class TestMaxAtomsFilter:
             )
         assert len(jobs) == 3
 
-    def test_null_natoms_excluded(self, tmp_path):
-        """A NULL natoms row is dropped rather than raising TypeError."""
+    def test_null_natoms_excluded(self, tmp_path, capsys):
+        """A NULL natoms row is dropped rather than raising TypeError, and is
+        reported separately from over-cap skips."""
         import sqlite3
 
         from oact_utilities.workflows.submit_jobs import filter_jobs_for_submission
@@ -2335,6 +2336,10 @@ class TestMaxAtomsFilter:
             )
         # orig_index 0 (now NULL) and orig_index 1 (natoms 100) both excluded.
         assert jobs == []
+        out = capsys.readouterr().out
+        # NULL row is not misreported as "natoms > 50"; the two reasons are split.
+        assert "Skipped 1 jobs with natoms > 50" in out
+        assert "Skipped 1 jobs with missing (NULL) natoms" in out
 
     def test_over_cap_jobs_left_to_run(self, tmp_path):
         """Filtering does not mutate status: over-cap jobs stay TO_RUN for a

@@ -856,16 +856,25 @@ def filter_jobs_for_submission(
             print(f"Skipped {skipped} jobs with fail_count >= {max_fail_count}")
 
     # Apply atom-count cap if specified. Jobs above the cap are left untouched
-    # for a later (longer wall-time) batch. NULL natoms is excluded rather than
-    # raising, so a malformed row cannot break submission.
+    # for a later (longer wall-time) batch. A NULL natoms is excluded rather
+    # than raising, so a malformed row cannot break submission. Over-cap and
+    # missing-natoms skips are reported separately so the counts are accurate.
     if max_atoms is not None:
-        original_count = len(ready_jobs)
-        ready_jobs = [
-            j for j in ready_jobs if j.natoms is not None and j.natoms <= max_atoms
-        ]
-        skipped = original_count - len(ready_jobs)
-        if skipped > 0:
-            print(f"Skipped {skipped} jobs with natoms > {max_atoms}")
+        kept = []
+        over_cap = 0
+        missing = 0
+        for j in ready_jobs:
+            if j.natoms is None:
+                missing += 1
+            elif j.natoms > max_atoms:
+                over_cap += 1
+            else:
+                kept.append(j)
+        ready_jobs = kept
+        if over_cap > 0:
+            print(f"Skipped {over_cap} jobs with natoms > {max_atoms}")
+        if missing > 0:
+            print(f"Skipped {missing} jobs with missing (NULL) natoms")
 
     # Limit to requested count
     if randomize:
@@ -3153,6 +3162,9 @@ def main():
 
     args = parser.parse_args()
 
+    if args.max_atoms is not None and args.max_atoms < 1:
+        parser.error("--max-atoms must be a positive integer (>= 1)")
+
     # Validate multi-node Parsl args
     if args.nodes_per_block < 1:
         parser.error("--nodes-per-block must be >= 1")
@@ -3258,9 +3270,6 @@ def main():
     # traditional mode submits and exits before any job finishes.
     if (args.clean_on_complete or args.purge_on_fail) and not args.use_parsl:
         parser.error("--clean-on-complete / --purge-on-fail require --use-parsl")
-
-    if args.max_atoms is not None and args.max_atoms < 1:
-        parser.error("--max-atoms must be a positive integer (>= 1)")
 
     # Submit based on mode
     if args.use_parsl:
