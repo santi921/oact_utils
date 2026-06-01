@@ -67,6 +67,14 @@ python -m oact_utilities.workflows.submit_jobs \\
     jobs/ \\
     --batch-size 100 \\
     --max-fail-count 3
+
+# Stratify by molecule size: small molecules in a short allocation,
+# large ones deferred to a longer one. Over-cap jobs stay TO_RUN for a later batch.
+python -m oact_utilities.workflows.submit_jobs \\
+    workflow.db \\
+    jobs/ \\
+    --max-atoms 40 \\
+    --n-hours 2
 ```
 
 Creates job directories `jobs/job_0/`, `jobs/job_1/`, etc. with:
@@ -745,6 +753,7 @@ The workflow tracks how many times each job has failed with the `fail_count` col
 - **Automatic increment**: When `reset_failed_jobs()` is called, `fail_count` is incremented
 - **Retry limits**: Use `--max-retries N` to skip jobs that have failed N+ times
 - **Submission filtering**: Use `--max-fail-count N` to avoid resubmitting chronic failures
+- **Size stratification**: Use `--max-atoms N` to submit only molecules with `natoms <= N`; over-cap jobs stay `TO_RUN` for a later, longer-wall-time batch
 - **Chronic failure detection**: Use `--show-chronic-failures N` or `get_jobs_by_fail_count(N)`
 
 This prevents wasting HPC resources on jobs that consistently fail.

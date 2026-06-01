@@ -326,6 +326,7 @@ python -m oact_utilities.workflows.submit_jobs <db> <root_dir> [options]
 --n-cores 4                       --n-hours 2
 --queue pbatch                    --allocation dnn-sim
 --max-fail-count 3                # Skip jobs that failed N+ times
+--max-atoms N                     # Only submit molecules with natoms <= N (stratify by size)
 
 # Common per-site overrides (often required on a new cluster)
 --orca-path /path/to/orca         # Override scheduler-keyed default in DEFAULT_ORCA_PATHS
