@@ -74,6 +74,16 @@ echo "  core pinned -> $CONSTRAINTS"
 echo "## installing niche stack (constrained to core pins)"
 for p in "${NICHE_PKGS[@]}"; do install_pkg "$p" -c "$CONSTRAINTS"; done
 
+# --- 3b. QTAIM generator metrics (analysis.parse_generator_data) ------------
+# oact_utilities uses ONLY qtaim_generator's ORCA-output text parser, which
+# pulls no external tools (no Multiwfn). But importing qtaim_gen triggers
+# qtaim_gen/__init__.py -> _pymatgen_compat -> pymatgen, so pymatgen is a hard
+# import requirement (rdkit/lmdb are only for the generation paths we skip).
+# git+ install needs internet -> login node only.
+echo "## installing QTAIM generator metrics path (qtaim_generator + pymatgen)"
+install_pkg pymatgen -c "$CONSTRAINTS"
+pip install "git+https://github.com/santi921/qtaim_generator.git" -c "$CONSTRAINTS"
+
 # --- 4. the package itself, editable, deps already satisfied ----------------
 echo "## installing oact_utilities (editable)"
 pip install -e "$REPO_ROOT" --no-deps -c "$CONSTRAINTS"
@@ -87,7 +97,10 @@ echo "  requirements snapshot -> $REQ"
 echo
 echo "## import check"
 python -c "import ase, quacc, sella, parsl, pandas, numpy, scipy, periodictable, tqdm; \
-import oact_utilities; print('imports OK')"
+import oact_utilities; print('core imports OK')"
+python -c "from qtaim_gen.source.core.parse_orca import parse_orca_output; \
+from oact_utilities.utils.analysis import GENERATOR_AVAILABLE; \
+print('generator metrics available:', GENERATOR_AVAILABLE)"
 
 echo
 echo "## inode usage (this is the quota that historically failed):"

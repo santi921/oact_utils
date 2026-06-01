@@ -24,6 +24,11 @@ imports, and prints `diskusage_report` so you can confirm you are under the
 inode limit. Activate it in jobs with `source <venv>/bin/activate` AFTER the
 module loads. On Trillium, build in HOME (project/home are read-only in jobs).
 
+It also installs `qtaim_generator` (git) + pymatgen, which powers the QTAIM
+metrics in `analysis.parse_generator_data` (the `generator_data` DB column).
+Only the ORCA-output text parser is used, so no Multiwfn/rdkit/lmdb are needed;
+pymatgen is required only because `qtaim_gen`'s package init imports it.
+
 ## 1. Storage probe -- where can the DB and job dirs live?
 
 ```bash
