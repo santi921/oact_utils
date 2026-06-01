@@ -47,6 +47,11 @@ except ImportError:
     write_orca_json = None  # type: ignore[assignment]
     GENERATOR_AVAILABLE = False
 
+# Warn only once per process when generator metrics are requested but the
+# optional qtaim_generator package is missing. Bulk metrics extraction calls
+# parse_generator_data once per job, so an unguarded warning would spam.
+_WARNED_NO_GENERATOR = False
+
 
 def _sanitize_for_json(obj: object) -> object:
     """Recursively convert numpy types and non-finite floats for JSON serialization.
@@ -87,6 +92,17 @@ def parse_generator_data(
         JSON string of parsed QTAIM data, or None.
     """
     if not GENERATOR_AVAILABLE:
+        global _WARNED_NO_GENERATOR
+        if not _WARNED_NO_GENERATOR:
+            warnings.warn(
+                "qtaim_generator (import name 'qtaim_gen') is not installed; "
+                "QTAIM generator metrics will be skipped and generator_data left "
+                "empty. Install it with "
+                '`pip install "git+https://github.com/santi921/qtaim_generator.git"` '
+                "to enable parse_generator_data.",
+                stacklevel=2,
+            )
+            _WARNED_NO_GENERATOR = True
         return None
 
     job_dir = Path(job_dir)

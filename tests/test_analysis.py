@@ -345,3 +345,44 @@ def test_parse_job_metrics_termination_aborted():
         assert (
             result["termination_status"] == -1
         ), "Termination status should be -1 (aborted)"
+
+
+def test_parse_generator_data_warns_once_when_unavailable(monkeypatch):
+    """When qtaim_generator is missing, warn exactly once (not per job)."""
+    import warnings
+
+    from oact_utilities.utils import analysis
+
+    monkeypatch.setattr(analysis, "GENERATOR_AVAILABLE", False)
+    monkeypatch.setattr(analysis, "_WARNED_NO_GENERATOR", False)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        r1 = analysis.parse_generator_data("/tmp/no_such_job_dir_1")
+        r2 = analysis.parse_generator_data("/tmp/no_such_job_dir_2")
+
+    assert r1 is None and r2 is None, "Should return None when generator missing"
+    generator_warnings = [w for w in caught if "qtaim_generator" in str(w.message)]
+    assert len(generator_warnings) == 1, "Should warn exactly once across calls"
+
+
+def test_parse_generator_data_parses_real_output():
+    """When qtaim_generator is installed, parse a real ORCA output to JSON."""
+    import json
+    import shutil
+
+    from oact_utilities.utils import analysis
+
+    if not analysis.GENERATOR_AVAILABLE:
+        import pytest
+
+        pytest.skip("qtaim_generator (qtaim_gen) not installed")
+
+    src = Path(__file__).parent / "files" / "orca_direct_example" / "orca.out"
+    with tempfile.TemporaryDirectory() as d:
+        shutil.copy(src, Path(d) / "orca.out")
+        result = analysis.parse_generator_data(d)
+        assert result is not None, "Should parse real ORCA output"
+        data = json.loads(result)
+        assert "final_energy_eh" in data, "Parsed metrics should include final energy"
+        assert (Path(d) / "generator_metrics.json").exists(), "Should cache result"
