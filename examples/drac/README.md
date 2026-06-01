@@ -7,6 +7,23 @@ self-cleaning. Transfer this directory to the cluster (git pull or scp).
 Account: use `--account=def-yqw` (Default RAP, lowest-priority opportunistic
 backfill, protects the sponsor's RAC priority).
 
+## 0. Build the Python environment (virtualenv, NOT conda)
+
+DRAC HOME has a ~500K **file-count** quota separate from bytes; a conda install
+alone can eat ~half of it (that is the "out of space" you hit). Use a virtualenv
+in PROJECT instead. Run on a LOGIN node (needs internet for niche PyPI deps):
+
+```bash
+bash setup_venv.sh "$HOME/projects/def-yqw/$USER/oact-env" python/3.11
+```
+
+It loads modules first, builds the venv, installs the scientific core from the
+wheelhouse (`--no-index`) and quacc/sella/parsl/etc from PyPI (pinned so they
+cannot yank the optimized numpy), installs `oact_utilities` editable, verifies
+imports, and prints `diskusage_report` so you can confirm you are under the
+inode limit. Activate it in jobs with `source <venv>/bin/activate` AFTER the
+module loads. On Trillium, build in HOME (project/home are read-only in jobs).
+
 ## 1. Storage probe -- where can the DB and job dirs live?
 
 ```bash
