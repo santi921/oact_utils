@@ -1,7 +1,10 @@
 # Minimal ORCA validation input for Fir.
 # Purpose: confirm the orca/6.1.0 module chain loads and ORCA spawns its own
-# MPI across 4 ranks (NOT srun/mpirun). Water B3LYP/def2-SVP single point
-# finishes in seconds. %pal nprocs MUST equal #SBATCH --ntasks in the job script.
+# MPI across the requested ranks (NOT srun/mpirun). Water B3LYP/def2-SVP single
+# point, finishes in seconds.
+# NOTE: keep the nprocs value below equal to the SBATCH ntasks in the job
+# script. Do not write percent, bang, or star characters in these comments;
+# ORCA scans for block markers even inside hash comments and will error out.
 ! B3LYP def2-SVP TightSCF
 %pal nprocs 4 end
 %maxcore 3000
