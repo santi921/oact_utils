@@ -29,9 +29,24 @@ case "$VENV_DIR" in
                echo "Put it in PROJECT instead."; exit 1 ;;
 esac
 
+# pip stages builds in $TMPDIR. A stale SLURM_TMPDIR (e.g.
+# /localscratch/<user>.<oldjob>.0 left in the environment by a previous
+# allocation, or exported in ~/.bashrc) is node-local and not writable from a
+# login node, breaking pip with "[Errno 13] Permission denied". Pin TMPDIR to a
+# directory we know is writable on THIS node: a valid SLURM_TMPDIR, else /tmp.
+if [ -n "${SLURM_TMPDIR:-}" ] && [ -w "${SLURM_TMPDIR:-/nonexistent}" ]; then
+    _tmp_base="$SLURM_TMPDIR"
+else
+    _tmp_base="/tmp"
+fi
+TMPDIR="$(mktemp -d "$_tmp_base/oact-venv-build.XXXXXX")"
+export TMPDIR
+trap 'rm -rf "$TMPDIR"' EXIT
+
 echo "venv target : $VENV_DIR"
 echo "python module: $PY_MODULE"
 echo "repo root   : $REPO_ROOT"
+echo "build TMPDIR : $TMPDIR"
 echo
 
 # --- 1. modules FIRST, then create + activate the venv ----------------------
