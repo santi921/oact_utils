@@ -11,6 +11,7 @@ from oact_utilities.workflows.architector_workflow import ArchitectorWorkflow, J
 from oact_utilities.workflows.submit_jobs import (
     DEFAULT_ORCA_CONFIG,
     DEFAULT_ORCA_PATHS,
+    DRAC_DEFAULT_MODULE_LOAD,
     SANDIA_DEFAULT_ACCOUNT,
     SANDIA_DEFAULT_OPENMPI_MODULE,
     SANDIA_DEFAULT_PARTITION,
@@ -23,6 +24,7 @@ from oact_utilities.workflows.submit_jobs import (
     _write_prefailure_marker,
     prepare_job_directory,
     write_flux_job_file,
+    write_slurm_drac_job_file,
     write_slurm_job_file,
     write_slurm_sandia_job_file,
 )
@@ -695,6 +697,119 @@ class TestWriteSlurmSandiaJobFile:
         assert f"#SBATCH --partition={SANDIA_DEFAULT_PARTITION}" in content
         assert f"#SBATCH --qos={SANDIA_DEFAULT_QOS}" in content
         assert f"#SBATCH --account={SANDIA_DEFAULT_ACCOUNT}" in content
+
+
+class TestWriteSlurmDracJobFile:
+    """Tests for write_slurm_drac_job_file (Fir/Narval/Nibi/Rorqual/Trillium)."""
+
+    def test_creates_executable_script(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        script = write_slurm_drac_job_file(job_dir, account="def-yqw")
+
+        assert script.exists()
+        assert script.name == "slurm_job.sh"
+        assert script.stat().st_mode & 0o755
+
+    def test_omits_qos_partition_constraint(self, tmp_path):
+        """DRAC auto-assigns the partition; emitting these breaks submission."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        content = write_slurm_drac_job_file(job_dir, account="def-yqw").read_text()
+
+        assert "--qos" not in content
+        assert "--partition" not in content
+        assert "--constraint" not in content
+
+    def test_no_ompi_mca_overrides(self, tmp_path):
+        """DRAC InfiniBand uses OpenMPI defaults; Sandia's TCP/PSM2 env is wrong."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        content = write_slurm_drac_job_file(job_dir, account="def-yqw").read_text()
+
+        assert "OMPI_MCA" not in content
+
+    def test_module_load_and_module_orca_binary(self, tmp_path):
+        """Loads the module chain and runs ORCA via $EBROOTORCA, not conda/srun."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        content = write_slurm_drac_job_file(job_dir, account="def-yqw").read_text()
+
+        assert f"module load {DRAC_DEFAULT_MODULE_LOAD}" in content
+        assert "$EBROOTORCA/orca orca.inp" in content
+        assert "conda activate" not in content
+        assert "srun" not in content
+        assert "mpirun" not in content
+
+    def test_account_and_ntasks_propagate(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        content = write_slurm_drac_job_file(
+            job_dir, account="def-yqw", n_cores=8
+        ).read_text()
+
+        assert "#SBATCH --account=def-yqw" in content
+        assert "#SBATCH --ntasks-per-node=8" in content
+
+    def test_no_venv_activation_by_default(self, tmp_path):
+        """Plain ORCA runs need no Python env, so no venv is sourced."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        content = write_slurm_drac_job_file(job_dir, account="def-yqw").read_text()
+
+        assert "bin/activate" not in content
+
+    def test_venv_activation_when_given(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        content = write_slurm_drac_job_file(
+            job_dir, account="def-yqw", venv_path="/home/u/oact-env"
+        ).read_text()
+
+        assert "source /home/u/oact-env/bin/activate" in content
+
+    def test_sella_requires_venv(self, tmp_path):
+        """The Sella driver needs the venv; omitting venv_path must error."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        with pytest.raises(ValueError, match="venv_path"):
+            write_slurm_drac_job_file(job_dir, account="def-yqw", optimizer="sella")
+
+    def test_sella_runs_driver_with_venv(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        content = write_slurm_drac_job_file(
+            job_dir,
+            account="def-yqw",
+            optimizer="sella",
+            venv_path="/home/u/oact-env",
+        ).read_text()
+
+        assert "python run_sella.py" in content
+        assert "source /home/u/oact-env/bin/activate" in content
+
+    def test_optional_mem_per_cpu(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+
+        with_mem = write_slurm_drac_job_file(
+            job_dir, account="def-yqw", mem_per_cpu="3900M"
+        ).read_text()
+        assert "#SBATCH --mem-per-cpu=3900M" in with_mem
+
+        job_dir2 = tmp_path / "job_2"
+        job_dir2.mkdir()
+        without_mem = write_slurm_drac_job_file(job_dir2, account="def-yqw").read_text()
+        assert "--mem-per-cpu" not in without_mem
 
 
 class TestBuildParslSandiaWorkerInit:
