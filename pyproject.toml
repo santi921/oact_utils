@@ -6,7 +6,9 @@ authors = [
     { name = "Santiago Vargas", email = "santiagovargas921@gmail.com" }
 ]
 requires-python = ">=3.11"
-dependencies = ["sella", "ase", "periodictable", "pandas", "parsl>=2024.1", "tqdm>=4.0"]
+# quacc (core/orca) and spyrmsd (utils/analysis) are imported unguarded at
+# module level, so they are required runtime dependencies, not optional.
+dependencies = ["sella", "ase", "periodictable", "pandas", "parsl>=2024.1", "tqdm>=4.0", "quacc", "spyrmsd"]
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -28,6 +30,16 @@ jupyter = [
     "ipykernel>=6.0",
     "jupyter>=1.0",
     "ipython>=8.0",
+]
+# matplotlib (analysis plotting, lazy-imported) and tabulate (multi_spin script,
+# guarded) are non-blocking extras.
+viz = [
+    "matplotlib",
+    "tabulate",
+]
+# lmdb backs the architector LMDB chunking path (guarded import).
+lmdb = [
+    "lmdb",
 ]
 
 [tool.setuptools.packages.find]
