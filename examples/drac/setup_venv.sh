@@ -94,9 +94,12 @@ echo "## installing core stack"
 for p in "${CORE_PKGS[@]}"; do install_pkg "$p"; done
 
 # Pin the core so PyPI deps of the niche packages cannot yank/upgrade the
-# wheelhouse numpy/scipy out from under you.
+# wheelhouse numpy/scipy out from under you. --exclude-editable: on a re-run the
+# venv already has oact_utilities installed editable, and pip rejects editable
+# entries inside a constraints file ("Editable requirements are not allowed as
+# constraints").
 CONSTRAINTS="$VENV_DIR/core-constraints.txt"
-pip freeze --local > "$CONSTRAINTS"
+pip freeze --local --exclude-editable > "$CONSTRAINTS"
 echo "  core pinned -> $CONSTRAINTS"
 
 # --- 3. niche deps (PyPI on login node), constrained to the core versions ---
@@ -118,8 +121,10 @@ echo "## installing oact_utilities (editable)"
 pip install -e "$REPO_ROOT" --no-deps -c "$CONSTRAINTS"
 
 # --- 5. snapshot for replicating on the other clusters ----------------------
+# --exclude-editable: omit oact_utilities itself (reinstalled with `pip install
+# -e .` per cluster); the snapshot captures only the resolved dependency pins.
 REQ="$VENV_DIR/oact-requirements.txt"
-pip freeze --local > "$REQ"
+pip freeze --local --exclude-editable > "$REQ"
 echo "  requirements snapshot -> $REQ"
 
 # --- 6. verify ---------------------------------------------------------------
