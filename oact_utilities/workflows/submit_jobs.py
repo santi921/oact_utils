@@ -154,6 +154,16 @@ SANDIA_DEFAULT_OMPI_MCA = {
     "OMPI_MCA_btl": "tcp,self,vader",
 }
 
+# DRAC (Digital Research Alliance of Canada: Fir/Narval/Nibi/Rorqual/Trillium)
+# defaults. Single-node SLURM; ORCA comes from the module system and is invoked
+# via $EBROOTORCA/orca (never srun/mpirun -- ORCA spawns its own MPI from
+# %pal nprocs). No --qos/--partition (auto-assigned by time+memory) and no OMPI
+# MCA overrides (InfiniBand uses OpenMPI defaults; the Sandia TCP/PSM2 settings
+# would cripple it). The venv is only needed for the Sella optimizer path;
+# plain ORCA runs need no Python environment.
+DRAC_DEFAULT_MODULE_LOAD = "StdEnv/2023 gcc/12.3 openmpi/4.1.5 orca/6.1.0"
+DRAC_DEFAULT_ORCA_BIN = "$EBROOTORCA/orca"
+
 
 def _write_job_update(
     workflow: ArchitectorWorkflow,
@@ -653,6 +663,107 @@ def write_slurm_sandia_job_file(
         "export OMPI_MCA_btl=tcp,self,vader\n",
         "\n",
         f"cd {job_dir_abs}\n",
+        run_cmd,
+    ]
+
+    with open(slurm_script, "w") as f:
+        f.writelines(lines)
+
+    slurm_script.chmod(0o755)
+
+    return slurm_script
+
+
+def write_slurm_drac_job_file(
+    job_dir: Path,
+    n_cores: int = 4,
+    n_hours: int = 2,
+    account: str = "def-someuser",
+    module_load: str = DRAC_DEFAULT_MODULE_LOAD,
+    orca_bin: str = DRAC_DEFAULT_ORCA_BIN,
+    venv_path: str | None = None,
+    mem_per_cpu: str | None = None,
+    input_file: str = "orca.inp",
+    optimizer: str | None = None,
+    job_name: str = "orca",
+) -> Path:
+    """Write a SLURM job script for Digital Research Alliance of Canada clusters.
+
+    Differs from the default and Sandia writers:
+
+    - ORCA comes from the module system: the script ``module load``s the full
+      chain and invokes ``$EBROOTORCA/orca`` (never ``srun``/``mpirun`` -- ORCA
+      spawns its own MPI from ``%pal nprocs``).
+    - No ``--qos``, ``--partition``, or ``--constraint``. DRAC assigns the
+      partition automatically from requested time and memory and exposes no
+      user-selectable QOS, so emitting any of these breaks submission.
+    - No OMPI MCA overrides. DRAC's InfiniBand uses OpenMPI defaults; the Sandia
+      TCP/PSM2 settings would force slow TCP transport here.
+    - Activates a virtualenv only when ``venv_path`` is given. The Sella
+      optimizer path (``python run_sella.py``) requires it; plain ORCA runs need
+      no Python environment.
+
+    Args:
+        job_dir: Directory where the job file will be written.
+        n_cores: Tasks per node; must match ``%pal nprocs`` in the input file.
+        n_hours: Wall-time in hours. Keep tight -- jobs under 3h ride backfill
+            on the largest node pool.
+        account: SLURM account / RAP, e.g. ``def-<pi>`` (a Default RAP keeps the
+            fairshare hit off the sponsor's RAC priority).
+        module_load: ``module load`` argument chain ending in the ORCA module.
+            For the Sella path, include the python module the venv was built
+            against.
+        orca_bin: ORCA executable; defaults to the module-provided
+            ``$EBROOTORCA/orca`` (shell-expanded at runtime after ``module load``).
+        venv_path: virtualenv to activate (built by ``examples/drac/setup_venv.sh``).
+            Required for the Sella optimizer; omit for plain ORCA.
+        mem_per_cpu: Optional ``--mem-per-cpu`` value (e.g. ``"3900M"``). Sized
+            at or below the node's MB-per-core ratio to avoid core-equivalent
+            inflation.
+        input_file: ORCA input file name.
+        optimizer: Optimizer engine ("orca", "sella", or None for single-point).
+        job_name: SLURM job name.
+
+    Returns:
+        Path to the created SLURM job file.
+
+    Raises:
+        ValueError: when ``optimizer == "sella"`` but no ``venv_path`` is given;
+            the Sella driver needs the oact_utilities virtualenv.
+    """
+    if optimizer == "sella" and not venv_path:
+        raise ValueError(
+            "write_slurm_drac_job_file requires venv_path when optimizer='sella': "
+            "the Sella driver runs `python run_sella.py` and needs the "
+            "oact_utilities virtualenv. Pass --venv-path."
+        )
+
+    job_dir_abs = job_dir.resolve()
+    slurm_script = job_dir_abs / "slurm_job.sh"
+
+    if optimizer == "sella":
+        run_cmd = "python run_sella.py > sella_driver.log 2>&1\n"
+    else:
+        run_cmd = f"{orca_bin} {input_file}\n"
+
+    lines = [
+        "#!/bin/bash\n",
+        f"#SBATCH --job-name={job_name}\n",
+        "#SBATCH --nodes=1\n",
+        f"#SBATCH --ntasks-per-node={n_cores}\n",
+        f"#SBATCH --time={n_hours}:00:00\n",
+        f"#SBATCH --account={account}\n",
+        *([f"#SBATCH --mem-per-cpu={mem_per_cpu}\n"] if mem_per_cpu else []),
+        f"#SBATCH --output={job_dir_abs}/orca_%j.out\n",
+        f"#SBATCH --error={job_dir_abs}/orca_%j.err\n",
+        "\n",
+        # Modules first (ORCA + its pinned MPI), then the venv -- never the
+        # reverse (loading modules into an active venv breaks Lmod paths).
+        f"module load {module_load}\n",
+        *([f"source {venv_path}/bin/activate\n"] if venv_path else []),
+        "\n",
+        f"cd {job_dir_abs}\n",
+        # ORCA spawns its own MPI from %pal nprocs; call by full path.
         run_cmd,
     ]
 
@@ -2588,6 +2699,8 @@ def submit_batch(
     site: str = "default",
     partition: str | None = None,
     openmpi_module: str = SANDIA_DEFAULT_OPENMPI_MODULE,
+    module_load: str = DRAC_DEFAULT_MODULE_LOAD,
+    venv_path: str | None = None,
 ) -> list[int]:
     """Submit a batch of ready jobs to the HPC scheduler.
 
@@ -2616,11 +2729,16 @@ def submit_batch(
         site: HPC site flavor selecting the job-script writer. ``"default"``
             uses the standard SLURM/Flux writers (conda + constraint=standard).
             ``"sandia"`` selects ``write_slurm_sandia_job_file`` which uses
-            ``module load`` + OMPI MCA env + ``--partition``. Only valid with
-            ``scheduler="slurm"``.
+            ``module load`` + OMPI MCA env + ``--partition``. ``"drac"`` selects
+            ``write_slurm_drac_job_file`` (module-system ORCA, no qos/partition/
+            MCA). Both SLURM-only.
         partition: SLURM partition (only used when ``site="sandia"``). When
             ``None``, the Sandia default partition is used.
         openmpi_module: ``module load`` argument for the Sandia writer.
+        module_load: ``module load`` chain for the DRAC writer (only used when
+            ``site="drac"``); must end in the ORCA module.
+        venv_path: virtualenv to activate in the DRAC writer (only used when
+            ``site="drac"``); required for the Sella optimizer path.
 
     Returns:
         List of job IDs that were submitted.
@@ -2750,6 +2868,16 @@ def submit_batch(
                         account=allocation,
                         orca_path=orca_path,
                         openmpi_module=openmpi_module,
+                        optimizer=optimizer,
+                    )
+                elif site.lower() == "drac":
+                    job_script = write_slurm_drac_job_file(
+                        job_dir,
+                        n_cores=n_cores,
+                        n_hours=n_hours,
+                        account=allocation,
+                        module_load=module_load,
+                        venv_path=venv_path,
                         optimizer=optimizer,
                     )
                 else:
@@ -2906,13 +3034,14 @@ def main():
     )
     parser.add_argument(
         "--hpc-site",
-        choices=["default", "sandia"],
+        choices=["default", "sandia", "drac"],
         default="default",
         help=(
             "HPC site flavor. 'default' uses the standard SLURM/Flux script "
             "(conda + constraint=standard). 'sandia' (CTS1/TLCC2) uses "
-            "module load + OMPI MCA env + --partition. Only valid with "
-            "--scheduler slurm."
+            "module load + OMPI MCA env + --partition. 'drac' (Digital Research "
+            "Alliance of Canada) uses module-system ORCA via $EBROOTORCA/orca "
+            "with no qos/partition/MCA. 'sandia'/'drac' are SLURM-only."
         ),
     )
     parser.add_argument(
@@ -2929,6 +3058,22 @@ def main():
         help=(
             "module load argument matching ORCA's shared build "
             f"(only used with --hpc-site sandia; default: {SANDIA_DEFAULT_OPENMPI_MODULE})."
+        ),
+    )
+    parser.add_argument(
+        "--module-load",
+        default=DRAC_DEFAULT_MODULE_LOAD,
+        help=(
+            "module load chain for --hpc-site drac; must end in the ORCA module "
+            f"(default: '{DRAC_DEFAULT_MODULE_LOAD}')."
+        ),
+    )
+    parser.add_argument(
+        "--venv-path",
+        default=None,
+        help=(
+            "virtualenv to activate in --hpc-site drac job scripts (built by "
+            "examples/drac/setup_venv.sh). Required only for --optimizer sella."
         ),
     )
     parser.add_argument(
@@ -3185,6 +3330,21 @@ def main():
         )
 
     # Validate HPC site args
+    if args.hpc_site == "drac":
+        if args.scheduler != "slurm":
+            parser.error("--hpc-site drac requires --scheduler slurm")
+        if args.use_parsl:
+            parser.error(
+                "--hpc-site drac does not yet support Parsl mode; use traditional "
+                "mode (omit --use-parsl). DRAC's backfill favors many short "
+                "single-node jobs, which traditional mode already provides."
+            )
+        if args.allocation == "dnn-sim":
+            parser.error(
+                "--hpc-site drac requires --allocation: the default 'dnn-sim' is "
+                "LLNL-only. Pass your DRAC account, e.g. --allocation def-<pi>."
+            )
+
     if args.hpc_site == "sandia":
         if not args.use_parsl and args.scheduler != "slurm":
             parser.error(
@@ -3350,6 +3510,8 @@ def main():
             site=args.hpc_site,
             partition=args.partition,
             openmpi_module=args.openmpi_module,
+            module_load=args.module_load,
+            venv_path=args.venv_path,
         )
 
     print(f"\nTotal jobs submitted: {len(submitted_ids)}")
