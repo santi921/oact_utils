@@ -20,8 +20,13 @@ VENV_DIR="${1:?usage: setup_venv.sh <venv_dir> [python_module]}"
 PY_MODULE="${2:-python/3.11}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-CORE_PKGS=(numpy scipy pandas ase tqdm)        # expected in the wheelhouse
-NICHE_PKGS=(quacc sella parsl periodictable wandb)  # expected from PyPI
+CORE_PKGS=(numpy scipy pandas ase tqdm)        # in the wheelhouse (--no-index)
+# install_pkg tries the wheelhouse first then PyPI, so order/source is handled.
+# quacc and spyrmsd are imported by the package but NOT declared in pyproject.toml,
+# so `pip install -e . --no-deps` does not pull them -- list them explicitly here.
+# matplotlib (analysis plotting), lmdb (architector LMDB path), tabulate
+# (multi_spin script) are real but non-blocking deps; included for completeness.
+NICHE_PKGS=(quacc sella parsl periodictable wandb spyrmsd matplotlib lmdb tabulate)
 
 # --- guards -----------------------------------------------------------------
 case "$VENV_DIR" in
@@ -29,24 +34,33 @@ case "$VENV_DIR" in
                echo "Put it in PROJECT instead."; exit 1 ;;
 esac
 
-# pip stages builds in $TMPDIR. A stale SLURM_TMPDIR (e.g.
-# /localscratch/<user>.<oldjob>.0 left in the environment by a previous
-# allocation, or exported in ~/.bashrc) is node-local and not writable from a
-# login node, breaking pip with "[Errno 13] Permission denied". Pin TMPDIR to a
-# directory we know is writable on THIS node: a valid SLURM_TMPDIR, else /tmp.
+# pip stages builds in $TMPDIR and caches in $PIP_CACHE_DIR / $XDG_CACHE_HOME.
+# A stale SLURM_TMPDIR (e.g. /localscratch/<user>.<oldjob>.0 left in the
+# environment by a previous allocation, or exported in ~/.bashrc) is node-local
+# and not writable from a login node, breaking pip with "[Errno 13] Permission
+# denied". Repoint all three at a per-run dir we know is writable on THIS node:
+# a valid SLURM_TMPDIR if present, else /tmp.
 if [ -n "${SLURM_TMPDIR:-}" ] && [ -w "${SLURM_TMPDIR:-/nonexistent}" ]; then
     _tmp_base="$SLURM_TMPDIR"
 else
     _tmp_base="/tmp"
 fi
-TMPDIR="$(mktemp -d "$_tmp_base/oact-venv-build.XXXXXX")"
-export TMPDIR
-trap 'rm -rf "$TMPDIR"' EXIT
+_build_root="$(mktemp -d "$_tmp_base/oact-venv-build.XXXXXX")"
+export TMPDIR="$_build_root"
+export PIP_CACHE_DIR="$_build_root/pip-cache"
+export XDG_CACHE_HOME="$_build_root/cache"
+trap 'rm -rf "$_build_root"' EXIT
+
+# A leaked interactive/JupyterHub session env exports PIP_PREFIX/PIP_TARGET set
+# to the job's localscratch, which redirects pip installs OUT of the venv into
+# a now-dead directory -> "[Errno 13] Permission denied". Clear them so pip
+# installs into the activated venv.
+unset PIP_PREFIX PIP_TARGET
 
 echo "venv target : $VENV_DIR"
 echo "python module: $PY_MODULE"
 echo "repo root   : $REPO_ROOT"
-echo "build TMPDIR : $TMPDIR"
+echo "build temp   : $_build_root (TMPDIR + pip/xdg cache)"
 echo
 
 # --- 1. modules FIRST, then create + activate the venv ----------------------
