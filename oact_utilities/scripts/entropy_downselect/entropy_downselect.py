@@ -101,6 +101,7 @@ def whiten(
         mean = ref_f64.mean(axis=0)
         centered = ref_f64 - mean
         cov = centered.T @ centered / (ref.shape[0] - 1)
+        cov += reg * np.eye(D, dtype=np.float64)
     else:
         debug_log("Computing population mean...")
         mean = np.zeros(D, dtype=np.float64)
