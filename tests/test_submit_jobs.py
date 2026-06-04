@@ -17,6 +17,7 @@ from oact_utilities.workflows.submit_jobs import (
     SANDIA_DEFAULT_PARTITION,
     SANDIA_DEFAULT_QOS,
     OrcaConfig,
+    _build_parsl_drac_worker_init,
     _build_parsl_sandia_worker_init,
     _build_parsl_sandia_worker_init_multi_block,
     _resolve_scheduler_job_id,
@@ -855,6 +856,72 @@ class TestBuildParslSandiaWorkerInit:
     def test_no_path_export_when_orca_path_relative(self):
         out = _build_parsl_sandia_worker_init(orca_path="orca")
         assert "export PATH=" not in out
+
+
+class TestBuildParslDracWorkerInit:
+    """Tests for the minimal DRAC Parsl worker_init.
+
+    Like Sandia, workers inherit the module-loaded ORCA chain and activated venv
+    from the coordinator's allocation shell, so the worker_init must not re-do
+    module load or conda/venv activation.
+    """
+
+    def test_no_module_load_or_activate(self):
+        out = _build_parsl_drac_worker_init(orca_path=None)
+        assert "module load" not in out
+        assert "conda activate" not in out
+        assert "bin/activate" not in out
+
+    def test_no_ld_or_mca_munging(self):
+        out = _build_parsl_drac_worker_init(orca_path=None)
+        assert "LD_LIBRARY_PATH" not in out
+        assert "OMPI_MCA" not in out
+
+    def test_includes_jax_and_omp_defaults(self):
+        out = _build_parsl_drac_worker_init(orca_path=None)
+        assert "JAX_PLATFORMS=cpu" in out
+        assert "OMP_NUM_THREADS=1" in out
+
+    def test_orca_bin_dir_prepended_to_path(self):
+        out = _build_parsl_drac_worker_init(
+            orca_path="/cvmfs/restricted/easybuild/orca/6.1.0/orca"
+        )
+        assert "export PATH=/cvmfs/restricted/easybuild/orca/6.1.0:$PATH" in out
+
+
+@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
+class TestBuildParslConfigDracLocal:
+    """Tests for build_parsl_config_drac_local (DRAC single-node LocalProvider)."""
+
+    def test_uses_local_provider(self):
+        from parsl.providers import LocalProvider
+
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_drac_local
+
+        config = build_parsl_config_drac_local(orca_path="/cvmfs/x/orca/6.1.0/orca")
+        assert isinstance(config.executors[0].provider, LocalProvider)
+
+    def test_worker_and_core_counts_propagate(self):
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_drac_local
+
+        config = build_parsl_config_drac_local(
+            max_workers=12,
+            cores_per_worker=16,
+            orca_path="/cvmfs/x/orca/6.1.0/orca",
+        )
+        ex = config.executors[0]
+        assert ex.label == "drac_local_htex"
+        assert ex.cores_per_worker == 16
+        assert ex.max_workers_per_node == 12
+
+    def test_worker_init_has_no_module_load_or_mca(self):
+        from oact_utilities.workflows.submit_jobs import build_parsl_config_drac_local
+
+        config = build_parsl_config_drac_local(orca_path="/cvmfs/x/orca/6.1.0/orca")
+        wi = config.executors[0].provider.worker_init
+        assert "module load" not in wi
+        assert "OMPI_MCA" not in wi
+        assert "/cvmfs/x/orca/6.1.0" in wi  # orca bin dir on PATH
 
 
 class TestBuildParslSandiaWorkerInitMultiBlock:
