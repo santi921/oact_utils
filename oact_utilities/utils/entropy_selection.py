@@ -33,6 +33,13 @@ CommitHook = Callable[
     "tuple[np.ndarray, dict | None]",
 ]
 
+# Per-batch optimizer. Receives (items=[(rank, global_index), ...], C_inv, mu, n_current)
+# and returns {rank: feature_to_commit} evaluated against the frozen batch-start state.
+BatchOptimizeFn = Callable[
+    ["list[tuple[int, int]]", np.ndarray, np.ndarray, int],
+    "dict[int, np.ndarray]",
+]
+
 
 def debug_log(message: str) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -327,6 +334,7 @@ def run_selection(
     resume: bool,
     random_seed: int,
     commit_hook: CommitHook | None = None,
+    batch_optimize_fn: BatchOptimizeFn | None = None,
 ) -> dict:
     """Batch greedy selection: full scan -> top-K pool -> exact greedy within pool.
 
@@ -335,14 +343,21 @@ def run_selection(
     of the top candidates (< 1s). This avoids the heap-based lazy greedy
     which degrades badly when marginal gains are similar across candidates.
 
-    If ``commit_hook`` is provided, it is called once per selected candidate as
-    ``commit_hook(best_global, rank, C, C_inv, mu, n_current)`` and must return
-    ``(feature_to_commit, record)``. ``feature_to_commit`` (in the same whitened
-    space as ``X``) is used for the rank-1 covariance update in place of
-    ``X[best_global]``; ``record`` is ignored here (hooks persist their own output).
-    An optional ``commit_hook.on_checkpoint(step)`` is called at each checkpoint so the
-    hook can flush streamed outputs in lockstep. Without a hook the original feature is
-    committed (default behavior).
+    Two optional hooks customize what feature is committed for selected candidates:
+
+    - ``commit_hook(best_global, rank, C, C_inv, mu, n_current) -> (feature, record)``
+      is called once *per pick* (sequential); ``feature`` (whitened, like ``X``) is
+      committed in place of ``X[best_global]``. ``record`` is ignored (hooks persist
+      their own output).
+    - ``batch_optimize_fn(items, C_inv, mu, n_current) -> {rank: feature}`` is called
+      once *per batch*, where ``items`` is the list of ``(rank, global_index)`` selected
+      this batch (chosen by a working-copy greedy on the original features). It returns
+      the optimized feature to commit for each rank, evaluated against the frozen
+      batch-start covariance. This enables batched/parallel optimization.
+
+    At most one of the two hooks should be set. Both may expose ``on_checkpoint(step)``,
+    called at each checkpoint so the hook can flush streamed outputs in lockstep. Without
+    either hook the original feature is committed (default behavior).
     """
     N, D = X.shape
     chunk = 2_000_000
@@ -391,7 +406,27 @@ def run_selection(
     pbar = tqdm(total=n_select, initial=start_step, desc="Selecting")
     step = start_step
 
+    def _do_checkpoint() -> None:
+        hook = commit_hook if commit_hook is not None else batch_optimize_fn
+        if hook is not None and hasattr(hook, "on_checkpoint"):
+            hook.on_checkpoint(step)
+        save_checkpoint(
+            checkpoint_path,
+            selected_indices,
+            C,
+            C_inv,
+            mu,
+            n_current,
+            step,
+            delta_log_dets,
+            log_dets,
+            seed_indices,
+            random_seed,
+        )
+        debug_log(f"Checkpoint at step {step}")
+
     while step < n_select:
+        step_before = step
         batch_n = min(batch_size, n_select - step)
         pool_size = min(batch_n * pool_factor, int((~selected).sum()))
 
@@ -422,73 +457,87 @@ def run_selection(
             f"top-score={scores[top_k[0]]:.6f}"
         )
 
-        for _j in range(batch_n):
-            if not pool_alive.any():
-                debug_log(f"Pool exhausted at step {step}")
-                break
+        if batch_optimize_fn is None:
+            for _j in range(batch_n):
+                if not pool_alive.any():
+                    debug_log(f"Pool exhausted at step {step}")
+                    break
 
-            alive_idx = np.where(pool_alive)[0]
-            deltas = pool_X[alive_idx] - mu
-            quads = (deltas @ C_inv * deltas).sum(axis=1)
+                alive_idx = np.where(pool_alive)[0]
+                deltas = pool_X[alive_idx] - mu
+                quads = (deltas @ C_inv * deltas).sum(axis=1)
 
-            best_local = np.argmax(quads)
-            best_pool = alive_idx[best_local]
-            best_global = int(pool_global[best_pool])
+                best_pool = alive_idx[np.argmax(quads)]
+                best_global = int(pool_global[best_pool])
 
-            pool_alive[best_pool] = False
-            selected[best_global] = True
-            selected_indices.append(best_global)
+                pool_alive[best_pool] = False
+                selected[best_global] = True
+                selected_indices.append(best_global)
 
-            if commit_hook is not None:
-                rank = len(selected_indices) - 1
-                feat, _record = commit_hook(
-                    best_global,
-                    rank,
-                    C,
-                    C_inv,
-                    mu,
-                    n_current,
+                if commit_hook is not None:
+                    rank = len(selected_indices) - 1
+                    feat, _record = commit_hook(
+                        best_global, rank, C, C_inv, mu, n_current
+                    )
+                else:
+                    feat = X[best_global]
+
+                C, C_inv, mu, n_current, dldet = update_state(
+                    feat, C, C_inv, mu, n_current
                 )
-            else:
-                feat = X[best_global]
+                delta_log_dets.append(dldet)
+                log_dets.append(log_dets[-1] + dldet)
+                step += 1
+                pbar.update(1)
 
-            C, C_inv, mu, n_current, dldet = update_state(
-                feat,
-                C,
-                C_inv,
-                mu,
-                n_current,
-            )
-            delta_log_dets.append(dldet)
-            log_dets.append(log_dets[-1] + dldet)
-            step += 1
-            pbar.update(1)
+                if step % 1000 == 0:
+                    pbar.set_postfix(
+                        dlogdet=f"{dldet:.6f}", logdet=f"{log_dets[-1]:.2f}"
+                    )
 
-            if step % 1000 == 0:
-                pbar.set_postfix(
-                    dlogdet=f"{dldet:.6f}",
-                    logdet=f"{log_dets[-1]:.2f}",
+                if checkpoint_every > 0 and step % checkpoint_every == 0:
+                    _do_checkpoint()
+        else:
+            # Batched optimization. Select the batch on a *working* covariance advanced
+            # with the original features (for intra-batch diversity), keeping the real
+            # covariance frozen; optimize the whole batch against that frozen batch-start
+            # state; then commit the optimized features to the real covariance.
+            Cw, Cw_inv, muw, nw = C, C_inv, mu, n_current
+            batch_items: list[tuple[int, int]] = []
+            for _j in range(batch_n):
+                if not pool_alive.any():
+                    debug_log(f"Pool exhausted at step {step}")
+                    break
+                alive_idx = np.where(pool_alive)[0]
+                deltas = pool_X[alive_idx] - muw
+                quads = (deltas @ Cw_inv * deltas).sum(axis=1)
+                best_pool = alive_idx[np.argmax(quads)]
+                best_global = int(pool_global[best_pool])
+                pool_alive[best_pool] = False
+                selected[best_global] = True
+                selected_indices.append(best_global)
+                batch_items.append((len(selected_indices) - 1, best_global))
+                Cw, Cw_inv, muw, nw, _ = update_state(
+                    X[best_global], Cw, Cw_inv, muw, nw
                 )
 
-            if checkpoint_every > 0 and step % checkpoint_every == 0:
-                # Flush any hook-streamed outputs before the covariance checkpoint so
-                # they are durable up to the same step on resume.
-                if commit_hook is not None and hasattr(commit_hook, "on_checkpoint"):
-                    commit_hook.on_checkpoint(step)
-                save_checkpoint(
-                    checkpoint_path,
-                    selected_indices,
-                    C,
-                    C_inv,
-                    mu,
-                    n_current,
-                    step,
-                    delta_log_dets,
-                    log_dets,
-                    seed_indices,
-                    random_seed,
+            opt_feats = batch_optimize_fn(batch_items, C_inv, mu, n_current)
+            dldet = 0.0
+            for rank, _gidx in batch_items:
+                C, C_inv, mu, n_current, dldet = update_state(
+                    opt_feats[rank], C, C_inv, mu, n_current
                 )
-                debug_log(f"Checkpoint at step {step}")
+                delta_log_dets.append(dldet)
+                log_dets.append(log_dets[-1] + dldet)
+                step += 1
+                pbar.update(1)
+
+            if batch_items:
+                pbar.set_postfix(dlogdet=f"{dldet:.6f}", logdet=f"{log_dets[-1]:.2f}")
+            if checkpoint_every > 0 and (
+                step // checkpoint_every != step_before // checkpoint_every
+            ):
+                _do_checkpoint()
 
     pbar.close()
     elapsed = time.time() - t0

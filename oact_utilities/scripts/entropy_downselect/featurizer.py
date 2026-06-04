@@ -139,3 +139,42 @@ class DifferentiableFeaturizer:
         if self._pre_activation is None:
             raise RuntimeError("Forward hook captured no pre-activation.")
         return self._pre_activation[0].float().cpu().numpy()
+
+    def build_batch(self, atoms_list: list):
+        """Collate many ASE Atoms into one device-resident AtomicData batch.
+
+        Returns:
+            data: the collated AtomicData (positions still the originals).
+            offsets: (M,) long -- first-atom index of each structure (metal atom).
+            natoms: (M,) long -- atom count per structure.
+            batch_idx: (A,) long -- structure index for each atom.
+        """
+        data = data_list_collater([self._a2g(a) for a in atoms_list], otf_graph=True)
+        self._ensure_init(data)
+        data = data.to(self.device)
+        for key, val in data:
+            if torch.is_tensor(val) and val.is_floating_point():
+                data[key] = val.to(self.dtype)
+        self.predictor.model.module.on_predict_check(data)
+        natoms = data["natoms"].to(torch.long)
+        offsets = torch.zeros(len(natoms), dtype=torch.long, device=self.device)
+        if len(natoms) > 1:
+            offsets[1:] = torch.cumsum(natoms, 0)[:-1]
+        batch_idx = data["batch"].to(torch.long)
+        return data, offsets, natoms, batch_idx
+
+    def featurize_batch(
+        self, data: AtomicData, pos: torch.Tensor, offsets: torch.Tensor
+    ) -> torch.Tensor:
+        """Run the model on a batch; return per-structure metal features (M, D).
+
+        ``pos`` is the leaf (A, 3) position tensor (requires_grad for backprop). Edges
+        are regenerated on the fly, so the returned features carry gradients to ``pos``.
+        """
+        data.pos = pos
+        self._pre_activation = None
+        with torch.enable_grad():
+            self.predictor.model(data)
+        if self._pre_activation is None:
+            raise RuntimeError("Forward hook captured no pre-activation.")
+        return self._pre_activation[offsets]

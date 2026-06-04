@@ -2,22 +2,23 @@
 #SBATCH -A m5250
 #SBATCH -C gpu
 #SBATCH -q premium
-#SBATCH -G 1
+#SBATCH -G 4
 #SBATCH -N 1
 #SBATCH -t 04:00:00
 #SBATCH -J entropy_opt
 #SBATCH -o /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/v2_seed_downselect_optimized/slurm_%j.out
 #SBATCH -e /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/v2_seed_downselect_optimized/slurm_%j.err
 
-# Entropy downselect with in-loop structure optimization (GPU).
+# Entropy downselect with in-loop structure optimization (multi-GPU).
 #
 # Runs the greedy entropy downselect and, as each structure is selected, perturbs its
 # atomic positions through the fairchem model to increase its marginal delta-log-det,
 # committing the optimized feature/geometry.
 #
-# This is GPU-bound (~n_select * opt_max_steps model fwd+bwd). Start with a small POC
-# (reduce --n-select and add --limit) before launching a large run. Use --opt-top-n to
-# optimize only the most informative selections.
+# --n-gpus 4 shards each batch's optimizations across 4 per-GPU workers, each batching
+# its shard (--max-atoms atom budget per forward+backward). The backward pass retains
+# activations, so --max-atoms is much smaller than an inference batch. Start with a small
+# POC (reduce --n-select, add --limit) before a full run.
 
 set -euo pipefail
 
@@ -46,6 +47,8 @@ python -m oact_utilities.scripts.entropy_downselect.entropy_downselect_optimize 
     --pool-factor 5 \
     --checkpoint-every 10000 \
     --regularization 1e-6 \
+    --n-gpus 4 \
+    --max-atoms 1024 \
     --opt-max-steps 5 \
     --opt-max-disp 0.3 \
     --opt-step-size 0.05 \

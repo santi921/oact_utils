@@ -32,7 +32,6 @@ import json
 import os
 import pickle
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 import lmdb
@@ -41,6 +40,10 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
+from oact_utilities.scripts.entropy_downselect.batched_optimizer import (
+    BatchedStructureOptimizer,
+    OptParams,
+)
 from oact_utilities.scripts.entropy_downselect.featurizer import (
     DifferentiableFeaturizer,
 )
@@ -53,14 +56,6 @@ from oact_utilities.utils.entropy_selection import (
     run_selection,
     whiten,
 )
-
-
-@dataclass
-class OptParams:
-    max_steps: int
-    max_disp: float
-    step_size: float
-    min_dist: float
 
 
 def _min_pair_dist(pos: torch.Tensor) -> float:
@@ -307,38 +302,26 @@ class _DiagnosticsLog:
         return [by_rank[r] for r in sorted(by_rank)]
 
 
-class OptimizingCommitHook:
-    """``run_selection`` commit hook: optimize each selected structure's positions.
+class _StreamingHookBase:
+    """Shared streaming/output machinery for the optimizing hooks.
 
-    Loads the structure for the winning candidate from the source LMDBs, runs
-    ``optimize_structure``, streams the optimized Atoms (by selection rank) to the output
-    LMDB and per-rank diagnostics to a JSONL, and returns the optimized whitened feature
-    for the rank-1 covariance update. Falls back to the original geometry/feature on
-    optimization failure. Streaming + JSONL keep memory bounded and support resume.
+    Owns the source-LMDB readers, the streaming optimized-structure LMDB writer, and the
+    per-rank diagnostics JSONL, plus checkpoint flushing and finalization (write the LMDB
+    ``length``, ``metadata.npz``, and the report). Subclasses implement the actual
+    optimization in ``__call__``.
     """
 
     def __init__(
         self,
         X: np.ndarray,
-        featurizer: DifferentiableFeaturizer,
         file_boundaries: list[tuple[str, int, int]],
         lmdb_dir: str,
-        mu_seed: np.ndarray,
-        W: np.ndarray,
-        opt: OptParams,
         output_dir: Path,
         resume: bool,
-        opt_top_n: int | None = None,
     ) -> None:
         self.X = X
-        self.featurizer = featurizer
         self.resolve = make_index_resolver(file_boundaries)
         self.lmdb_dir = Path(lmdb_dir)
-        dev = featurizer.device
-        self.mu_seed_t = torch.as_tensor(mu_seed, dtype=torch.float64, device=dev)
-        self.W_t = torch.as_tensor(W, dtype=torch.float64, device=dev)
-        self.opt = opt
-        self.opt_top_n = opt_top_n
         self.writer = _StreamingLmdbWriter(
             output_dir / "optimized_structures.lmdb", resume=resume
         )
@@ -366,6 +349,60 @@ class OptimizingCommitHook:
         atoms.info["selection_rank"] = rank
         self.writer.put(rank, atoms)
         self.diaglog.append(diag)
+
+    def on_checkpoint(self, step: int) -> None:
+        """Flush streamed outputs in lockstep with the covariance checkpoint."""
+        self.writer.flush()
+        self.diaglog.flush()
+
+    def finalize(self, output_dir: Path, n_total: int) -> None:
+        """Finalize the optimized LMDB, write metadata.npz and the report."""
+        self.writer.finalize(n_total)
+        self.diaglog.close()
+        records = self.diaglog.load_deduped()
+        if len(records) != n_total:
+            debug_log(
+                f"WARNING: {len(records)} diagnostics records but {n_total} selected"
+            )
+        natoms = np.array([int(r["natoms"]) for r in records], dtype=np.int32)
+        np.savez(str(output_dir / "metadata.npz"), natoms=natoms)
+        _save_report(output_dir, records)
+
+    def close(self) -> None:
+        for env in self._env_cache.values():
+            env.close()
+        self._env_cache.clear()
+        self.writer.close()
+
+
+class OptimizingCommitHook(_StreamingHookBase):
+    """Per-pick commit hook: optimize each selected structure one at a time.
+
+    Returns the optimized whitened feature for the rank-1 covariance update and streams
+    the optimized Atoms/diagnostics. Falls back to the original geometry/feature on
+    optimization failure.
+    """
+
+    def __init__(
+        self,
+        X: np.ndarray,
+        featurizer: DifferentiableFeaturizer,
+        file_boundaries: list[tuple[str, int, int]],
+        lmdb_dir: str,
+        mu_seed: np.ndarray,
+        W: np.ndarray,
+        opt: OptParams,
+        output_dir: Path,
+        resume: bool,
+        opt_top_n: int | None = None,
+    ) -> None:
+        super().__init__(X, file_boundaries, lmdb_dir, output_dir, resume)
+        self.featurizer = featurizer
+        dev = featurizer.device
+        self.mu_seed_t = torch.as_tensor(mu_seed, dtype=torch.float64, device=dev)
+        self.W_t = torch.as_tensor(W, dtype=torch.float64, device=dev)
+        self.opt = opt
+        self.opt_top_n = opt_top_n
 
     def _commit_original(self, atoms, rank, gidx, reason, **extra) -> dict:
         atoms = atoms.copy()
@@ -424,29 +461,145 @@ class OptimizingCommitHook:
         self._emit(rank, atoms_opt, diag)
         return x_opt, diag
 
-    def on_checkpoint(self, step: int) -> None:
-        """Flush streamed outputs in lockstep with the covariance checkpoint."""
-        self.writer.flush()
-        self.diaglog.flush()
 
-    def finalize(self, output_dir: Path, n_total: int) -> None:
-        """Finalize the optimized LMDB, write metadata.npz and the report."""
-        self.writer.finalize(n_total)
-        self.diaglog.close()
-        records = self.diaglog.load_deduped()
-        if len(records) != n_total:
-            debug_log(
-                f"WARNING: {len(records)} diagnostics records but {n_total} selected"
+class BatchedOptimizingHook(_StreamingHookBase):
+    """Per-batch optimizer: optimize a whole batch of selected structures in parallel.
+
+    ``run_selection`` calls this once per batch with the batch's ``(rank, global_index)``
+    items and the frozen batch-start covariance; it loads the structures, runs the
+    ``BatchedStructureOptimizer`` (one forward+backward per step over the batch), streams
+    the optimized Atoms/diagnostics, and returns ``{rank: optimized_feature}``.
+    """
+
+    def __init__(
+        self,
+        X: np.ndarray,
+        optimizer: BatchedStructureOptimizer,
+        file_boundaries: list[tuple[str, int, int]],
+        lmdb_dir: str,
+        output_dir: Path,
+        resume: bool,
+    ) -> None:
+        super().__init__(X, file_boundaries, lmdb_dir, output_dir, resume)
+        self.optimizer = optimizer
+
+    def __call__(self, items, C_inv, mu, n_current):
+        gidxs = [int(g) for _r, g in items]
+        atoms_list = [self._load_atoms(g) for g in gidxs]
+        x_orig = self.X[gidxs]
+        results = self.optimizer.optimize(
+            atoms_list, C_inv, mu, n_current, x_orig=x_orig
+        )
+        out: dict[int, np.ndarray] = {}
+        for (rank, gidx), (feat, atoms_opt, diag) in zip(items, results):
+            diag = {**diag, "rank": rank, "global_index": gidx}
+            self._emit(rank, atoms_opt, diag)
+            out[rank] = feat
+        return out
+
+
+class MultiGPUBatchOptimizingHook(_StreamingHookBase):
+    """Per-batch optimizer that shards each batch across persistent per-GPU workers.
+
+    Spawns one worker per GPU (each loads the model on its device). Per batch, the items
+    are round-robin sharded across workers; each worker loads its structures and runs the
+    batched optimization on its GPU, and the coordinator gathers and streams the results.
+    Optimizations within a batch are independent given the frozen covariance, so this is
+    embarrassingly parallel across GPUs.
+    """
+
+    def __init__(
+        self,
+        X: np.ndarray,
+        file_boundaries: list[tuple[str, int, int]],
+        lmdb_dir: str,
+        output_dir: Path,
+        resume: bool,
+        model_path: str,
+        mu_seed: np.ndarray,
+        W: np.ndarray,
+        opt: OptParams,
+        max_atoms: int,
+        n_gpus: int,
+    ) -> None:
+        super().__init__(X, file_boundaries, lmdb_dir, output_dir, resume)
+        import torch.multiprocessing as mp
+
+        from oact_utilities.scripts.entropy_downselect.multi_gpu_optimizer import (
+            worker_main,
+        )
+
+        self.n_gpus = n_gpus
+        ctx = mp.get_context("spawn")
+        self.out_q = ctx.Queue()
+        self.in_qs = [ctx.Queue() for _ in range(n_gpus)]
+        self.procs = []
+        for g in range(n_gpus):
+            p = ctx.Process(
+                target=worker_main,
+                args=(
+                    g,
+                    model_path,
+                    mu_seed,
+                    W,
+                    opt,
+                    max_atoms,
+                    file_boundaries,
+                    lmdb_dir,
+                    self.in_qs[g],
+                    self.out_q,
+                ),
+                daemon=True,
             )
-        natoms = np.array([int(r["natoms"]) for r in records], dtype=np.int32)
-        np.savez(str(output_dir / "metadata.npz"), natoms=natoms)
-        _save_report(output_dir, records)
+            p.start()
+            self.procs.append(p)
+
+        ready = 0
+        while ready < n_gpus:
+            gid, status, payload = self.out_q.get()
+            if status == "error":
+                raise RuntimeError(f"GPU worker {gid} failed at init:\n{payload}")
+            ready += 1
+        debug_log(f"Multi-GPU: {n_gpus} workers ready")
+        self._batch_id = 0
+
+    def __call__(self, items, C_inv, mu, n_current):
+        if not items:
+            return {}
+        self._batch_id += 1
+        bid = self._batch_id
+        chunks: list[list] = [[] for _ in range(self.n_gpus)]
+        for k, it in enumerate(items):
+            chunks[k % self.n_gpus].append(it)
+        for g in range(self.n_gpus):
+            ch = chunks[g]
+            if ch:
+                xo = self.X[[int(gi) for _r, gi in ch]]
+            else:
+                xo = np.empty((0, self.X.shape[1]), dtype=self.X.dtype)
+            self.in_qs[g].put((bid, ch, xo, C_inv, mu, n_current))
+
+        out: dict[int, np.ndarray] = {}
+        received = 0
+        while received < self.n_gpus:
+            gid, rbid, payload = self.out_q.get()
+            if rbid == "error":
+                raise RuntimeError(f"GPU worker {gid} failed:\n{payload}")
+            for rank, gidx, feat, atoms_opt, diag in payload:
+                diag = {**diag, "rank": rank, "global_index": gidx}
+                self._emit(rank, atoms_opt, diag)
+                out[rank] = feat
+            received += 1
+        return out
 
     def close(self) -> None:
-        for env in self._env_cache.values():
-            env.close()
-        self._env_cache.clear()
-        self.writer.close()
+        for q in self.in_qs:
+            q.put(None)
+        for p in self.procs:
+            p.join(timeout=30)
+            if p.is_alive():
+                p.terminate()
+        super().close()
 
 
 def save_outputs(
@@ -454,7 +607,7 @@ def save_outputs(
     results: dict,
     features_dir: str,
     file_boundaries: list[tuple[str, int, int]],
-    hook: OptimizingCommitHook,
+    hook: _StreamingHookBase,
 ) -> None:
     """Write indices, history, metadata, optimized LMDB, and optimization report."""
     selected = np.array(results["selected_indices"], dtype=np.int64)
@@ -621,7 +774,28 @@ def parse_args() -> argparse.Namespace:
         "--opt-top-n",
         type=int,
         default=None,
-        help="Only optimize the first N selections (by rank).",
+        help="Only optimize the first N selections (by rank). Non-batched mode only.",
+    )
+    parser.add_argument(
+        "--batched",
+        action="store_true",
+        help="Batch each selection batch's optimizations into one forward+backward per "
+        "step against the frozen batch-start covariance (much higher GPU utilization).",
+    )
+    parser.add_argument(
+        "--max-atoms",
+        type=int,
+        default=1024,
+        help="Atom budget per optimization sub-batch in --batched mode (default: 1024). "
+        "The backward pass retains activations, so this is much smaller than an "
+        "inference batch; raise it on large-memory GPUs.",
+    )
+    parser.add_argument(
+        "--n-gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs. >1 shards each batch's optimizations across that many "
+        "per-GPU worker processes (implies batched). Default: 1.",
     )
     parser.add_argument(
         "--resume",
@@ -652,27 +826,62 @@ def main() -> None:
     seed_X = seed_X @ W.astype(np.float32)
     debug_log("Seed features whitened")
 
-    debug_log(f"Loading featurizer model from {args.model_path}...")
-    featurizer = DifferentiableFeaturizer(args.model_path, device=args.device)
-
     opt = OptParams(
         max_steps=args.opt_max_steps,
         max_disp=args.opt_max_disp,
         step_size=args.opt_step_size,
         min_dist=args.opt_min_dist,
     )
-    hook = OptimizingCommitHook(
-        X=X,
-        featurizer=featurizer,
-        file_boundaries=file_boundaries,
-        lmdb_dir=args.lmdb_dir,
-        mu_seed=seed_mean,
-        W=W,
-        opt=opt,
-        output_dir=output_dir,
-        resume=args.resume,
-        opt_top_n=args.opt_top_n,
-    )
+
+    run_kwargs: dict = {}
+    if args.n_gpus and args.n_gpus > 1:
+        # Multi-GPU: no featurizer/CUDA in the parent -- the spawned workers own the GPUs.
+        debug_log(f"Mode: multi-GPU batched optimization ({args.n_gpus} GPUs)")
+        hook = MultiGPUBatchOptimizingHook(
+            X=X,
+            file_boundaries=file_boundaries,
+            lmdb_dir=args.lmdb_dir,
+            output_dir=output_dir,
+            resume=args.resume,
+            model_path=args.model_path,
+            mu_seed=seed_mean,
+            W=W,
+            opt=opt,
+            max_atoms=args.max_atoms,
+            n_gpus=args.n_gpus,
+        )
+        run_kwargs["batch_optimize_fn"] = hook
+    elif args.batched:
+        debug_log(f"Mode: single-GPU batched optimization (model on {args.device})")
+        featurizer = DifferentiableFeaturizer(args.model_path, device=args.device)
+        optimizer = BatchedStructureOptimizer(
+            featurizer, seed_mean, W, opt, max_atoms=args.max_atoms
+        )
+        hook = BatchedOptimizingHook(
+            X=X,
+            optimizer=optimizer,
+            file_boundaries=file_boundaries,
+            lmdb_dir=args.lmdb_dir,
+            output_dir=output_dir,
+            resume=args.resume,
+        )
+        run_kwargs["batch_optimize_fn"] = hook
+    else:
+        debug_log(f"Mode: per-structure optimization (model on {args.device})")
+        featurizer = DifferentiableFeaturizer(args.model_path, device=args.device)
+        hook = OptimizingCommitHook(
+            X=X,
+            featurizer=featurizer,
+            file_boundaries=file_boundaries,
+            lmdb_dir=args.lmdb_dir,
+            mu_seed=seed_mean,
+            W=W,
+            opt=opt,
+            output_dir=output_dir,
+            resume=args.resume,
+            opt_top_n=args.opt_top_n,
+        )
+        run_kwargs["commit_hook"] = hook
 
     debug_log(f"Starting selection+optimization: {args.n_select:,} from {X.shape[0]:,}")
     results = run_selection(
@@ -686,7 +895,7 @@ def main() -> None:
         output_dir=output_dir,
         resume=args.resume,
         random_seed=args.random_seed,
-        commit_hook=hook,
+        **run_kwargs,
     )
 
     debug_log("Saving outputs...")
