@@ -1467,6 +1467,95 @@ def build_parsl_config_sandia_local(
     return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
 
 
+def _build_parsl_drac_worker_init(
+    orca_path: str | None = None,
+) -> str:
+    """Build minimal worker_init for Parsl workers on DRAC single-node runs.
+
+    Like the Sandia LocalProvider path, workers are forked from the coordinator
+    shell, so they inherit whatever the launch script set up before starting
+    python: the ORCA module chain (``module load StdEnv/... orca/6.1.0``) and the
+    activated virtualenv. No ``module load`` here -- Lmod's ``module`` function is
+    not reliably defined in a forked non-login shell, and re-loading risks
+    duplicate ``LD_LIBRARY_PATH`` entries.
+
+    User contract: launch python from inside a SLURM allocation that has already
+    run ``module load <chain>`` and ``source <venv>/bin/activate`` -- see
+    ``launch/run_parsl_single_node_drac.sh``.
+
+    Args:
+        orca_path: Resolved absolute ORCA path (``$EBROOTORCA/orca`` expanded by
+            the launch script). Its parent dir is prepended to ``PATH`` so ORCA's
+            bundled helpers resolve.
+    """
+    orca_bin_dir = (
+        os.path.dirname(orca_path) if orca_path and os.path.isabs(orca_path) else None
+    )
+    path_line = (
+        f"export PATH={orca_bin_dir}:$PATH\n" if orca_bin_dir is not None else ""
+    )
+    return f"{path_line}" "export JAX_PLATFORMS=cpu\n" "export OMP_NUM_THREADS=1\n"
+
+
+def build_parsl_config_drac_local(
+    max_workers: int = 4,
+    cores_per_worker: int = 16,
+    orca_path: str | None = None,
+    enable_monitoring: bool = True,
+):
+    """Build Parsl Config for DRAC single-node execution (LocalProvider).
+
+    One SLURM allocation occupies a whole node (or part of one) and Parsl packs
+    ``max_workers`` ORCA jobs onto it concurrently, each using
+    ``cores_per_worker`` cores. The coordinator must be launched from inside that
+    allocation after ``module load``-ing the ORCA chain and activating the venv;
+    LocalProvider forks workers from that shell so they inherit the env.
+
+    Defaults (4 x 16 = 64 cores) suit a partial Fir node; for a whole 192-core
+    node use e.g. ``max_workers=12, cores_per_worker=16``.
+
+    Args:
+        max_workers: Concurrent ORCA jobs on the node.
+        cores_per_worker: Cores per ORCA job (matches ``%pal nprocs``).
+        orca_path: Resolved absolute ORCA path (``$EBROOTORCA/orca``).
+        enable_monitoring: Attach Parsl MonitoringHub.
+
+    Returns:
+        Parsl Config object.
+    """
+    if not PARSL_AVAILABLE:
+        raise ImportError(
+            "Parsl is not installed. Please install with: pip install 'parsl>=2024.1'"
+        )
+
+    from parsl.config import Config
+    from parsl.executors import HighThroughputExecutor
+    from parsl.providers import LocalProvider
+
+    runtime_address = _get_parsl_runtime_address()
+    worker_init = _build_parsl_drac_worker_init(orca_path=orca_path)
+
+    provider = LocalProvider(worker_init=worker_init)
+
+    executor = HighThroughputExecutor(
+        label="drac_local_htex",
+        address=runtime_address,
+        cores_per_worker=cores_per_worker,
+        max_workers_per_node=max_workers,
+        cpu_affinity="block",
+        provider=provider,
+    )
+
+    run_dir = _build_parsl_run_dir()
+    monitoring = (
+        _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+        if enable_monitoring
+        else None
+    )
+
+    return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
+
+
 def build_parsl_config_sandia(
     max_workers: int = 3,
     cores_per_worker: int = 12,
@@ -2113,6 +2202,13 @@ def submit_batch_parsl(
                 "Sandia has no shared ORCA install. Pass --orca-path on the "
                 "CLI or set orca_path in orca_config."
             )
+        if site.lower() == "drac":
+            raise ValueError(
+                "site='drac' in Parsl mode requires an explicit orca_path: the "
+                "ASE/quacc calculator needs a concrete binary, and $EBROOTORCA "
+                "is only defined inside the module-loaded shell. Resolve it in "
+                'the launch script and pass --orca-path "$EBROOTORCA/orca".'
+            )
         config["orca_path"] = DEFAULT_ORCA_PATHS.get(
             scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
         )
@@ -2268,6 +2364,25 @@ def submit_batch_parsl(
                 orca_path=config.get("orca_path"),
                 enable_monitoring=enable_monitoring,
             )
+    elif site.lower() == "drac":
+        # DRAC Parsl is single-node LocalProvider only: one allocation packs
+        # max_workers ORCA jobs onto the node it was launched in. Multi-block
+        # SlurmProvider for DRAC is not implemented.
+        print(
+            f"\nParsl DRAC (single-node LocalProvider): "
+            f"{max_workers} workers x {cores_per_worker} cores "
+            f"= {max_workers * cores_per_worker} concurrent cores. "
+            f"Coordinator must already be inside a SLURM allocation that "
+            f"module-loaded the ORCA chain and activated the venv "
+            f"(see launch/run_parsl_single_node_drac.sh). "
+            f"Job timeout: {timeout_seconds}s"
+        )
+        parsl_config = build_parsl_config_drac_local(
+            max_workers=max_workers,
+            cores_per_worker=cores_per_worker,
+            orca_path=config.get("orca_path"),
+            enable_monitoring=enable_monitoring,
+        )
     elif scheduler.lower() == "slurm":
         total_nodes = max_blocks * nodes_per_block
         total_workers = total_nodes * max_workers
@@ -3333,11 +3448,12 @@ def main():
     if args.hpc_site == "drac":
         if args.scheduler != "slurm":
             parser.error("--hpc-site drac requires --scheduler slurm")
-        if args.use_parsl:
+        if args.use_parsl and not args.orca_path:
             parser.error(
-                "--hpc-site drac does not yet support Parsl mode; use traditional "
-                "mode (omit --use-parsl). DRAC's backfill favors many short "
-                "single-node jobs, which traditional mode already provides."
+                "--hpc-site drac with --use-parsl requires --orca-path: the "
+                "ASE/quacc calculator needs a concrete binary. Resolve it in the "
+                "launch script after `module load` and pass --orca-path "
+                '"$EBROOTORCA/orca".'
             )
         if args.allocation == "dnn-sim":
             parser.error(
