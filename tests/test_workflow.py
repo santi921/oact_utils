@@ -1196,7 +1196,12 @@ def test_recover_orphaned_jobs_dead_scheduler(tmp_path, monkeypatch):
             mock_check,
         )
 
-        # Set job_dirs so the check function has something to work with
+        # Set job_dirs so the check function has something to work with.
+        # The dirs must exist on disk -- recover_orphaned_jobs only probes a
+        # job's on-disk status when its job_dir is a real directory, otherwise
+        # it resets to TO_RUN without consulting check_job_termination.
+        for name in ("job_0", "job_1", "job_2"):
+            (tmp_path / name).mkdir()
         workflow.update_job_metrics(1, job_dir=str(tmp_path / "job_0"))
         workflow.update_job_metrics(2, job_dir=str(tmp_path / "job_1"))
         workflow.update_job_metrics(3, job_dir=str(tmp_path / "job_2"))

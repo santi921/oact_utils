@@ -7,14 +7,20 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
+from oact_utilities.workflows.architector_workflow import ArchitectorWorkflow
 from oact_utilities.workflows.clean import (
+    ValidationOutcome,
+    _check_row_alignment,
     _extract_failure_info,
     _format_size,
+    _get_dir_size,
     _match_cleanup_patterns,
     _process_job,
     _purge_failed_job,
+    _purge_incomplete_job,
     _write_marker_file,
     clean_job_directories,
+    validate_db_folder_alignment,
 )
 
 # ---------------------------------------------------------------------------
@@ -169,6 +175,25 @@ class TestMatchCleanupPatterns:
 # ---------------------------------------------------------------------------
 # Format size
 # ---------------------------------------------------------------------------
+
+
+class TestGetDirSize:
+    def test_skips_symlinked_dir(self, tmp_path):
+        """A symlink to a dir outside the job must not be traversed/counted."""
+        import pytest
+
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "f.bin").write_bytes(b"x" * 1000)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "big.bin").write_bytes(b"y" * 100000)
+        try:
+            (real / "link").symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks unsupported on this platform")
+        # Only f.bin is counted; the symlinked corpus dir is skipped.
+        assert _get_dir_size(real) == 1000
 
 
 class TestFormatSize:
@@ -631,3 +656,564 @@ class TestWriteMarker:
         assert data["orig_index"] == 5
         assert "generated_by" in data
         assert "date" in data
+
+
+# ---------------------------------------------------------------------------
+# DB <-> folder validation (--validate-db)
+# ---------------------------------------------------------------------------
+
+
+def _write_orca_inp(job_dir: Path, elements: list[str], charge: int = 0, spin: int = 1):
+    """Write a minimal orca.inp with a coordinate block for the given elements."""
+    lines = ["! wB97M-V def2-TZVP", "", f"* xyz {charge} {spin}"]
+    for i, el in enumerate(elements):
+        lines.append(f"{el}  0.0  0.0  {float(i)}")
+    lines.append("*")
+    (job_dir / "orca.inp").write_text("\n".join(lines) + "\n")
+
+
+def _make_record(orig_index, elements, natoms, status="timeout", job_dir=None):
+    from oact_utilities.workflows.architector_workflow import JobRecord, JobStatus
+
+    return JobRecord(
+        id=orig_index,
+        orig_index=orig_index,
+        elements=elements,
+        natoms=natoms,
+        status=JobStatus(status),
+        job_dir=job_dir,
+    )
+
+
+class TestCheckRowAlignment:
+    def test_match(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+        _write_orca_inp(job_dir, ["U", "O", "O"])
+        rec = _make_record(1, "U;O;O", 3, job_dir="job_1")
+        outcome, inp = _check_row_alignment(rec, tmp_path)
+        assert outcome is ValidationOutcome.MATCH
+        assert inp == "U;O;O"
+
+    def test_element_mismatch(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+        _write_orca_inp(job_dir, ["Np", "F", "F", "F"])
+        rec = _make_record(1, "U;O;O", 3, job_dir="job_1")
+        outcome, inp = _check_row_alignment(rec, tmp_path)
+        assert outcome is ValidationOutcome.MISMATCH
+
+    def test_natoms_mismatch(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+        _write_orca_inp(job_dir, ["U", "O"])  # 2 atoms
+        rec = _make_record(1, "U;O", 3, job_dir="job_1")  # DB says 3
+        outcome, _ = _check_row_alignment(rec, tmp_path)
+        assert outcome is ValidationOutcome.MISMATCH
+
+    def test_missing_inp_is_unverifiable(self, tmp_path):
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()  # no orca.inp
+        rec = _make_record(1, "U;O;O", 3, job_dir="job_1")
+        outcome, inp = _check_row_alignment(rec, tmp_path)
+        assert outcome is ValidationOutcome.UNVERIFIABLE
+        assert inp is None
+
+    def test_missing_dir_is_unverifiable(self, tmp_path):
+        rec = _make_record(1, "U;O;O", 3, job_dir="does_not_exist")
+        outcome, _ = _check_row_alignment(rec, tmp_path)
+        assert outcome is ValidationOutcome.UNVERIFIABLE
+
+    def test_null_job_dir_is_unverifiable(self, tmp_path):
+        rec = _make_record(1, "U;O;O", 3, job_dir=None)
+        outcome, _ = _check_row_alignment(rec, tmp_path)
+        assert outcome is ValidationOutcome.UNVERIFIABLE
+
+
+class TestValidateDbFolder:
+    def test_all_match_passes(self, tmp_path):
+        root = tmp_path / "jobs"
+        root.mkdir()
+        jobs = []
+        for i in range(5):
+            jd = _create_job_dir(root, f"job_{i}", [])
+            _write_orca_inp(jd, ["U", "O", "O"])
+            jobs.append(
+                {
+                    "orig_index": i,
+                    "status": "timeout" if i < 3 else "completed",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(jd),
+                }
+            )
+        db_path = _create_test_db(tmp_path / "test.db", jobs)
+        with ArchitectorWorkflow(db_path) as wf:
+            result = validate_db_folder_alignment(wf, root)
+        assert result.passed is True
+        assert result.mismatch_count == 0
+        assert result.match_count == 5
+
+    def test_element_mismatch_aborts(self, tmp_path):
+        root = tmp_path / "jobs"
+        root.mkdir()
+        jd0 = _create_job_dir(root, "job_0", [])
+        _write_orca_inp(jd0, ["U", "O", "O"])
+        jd1 = _create_job_dir(root, "job_1", [])
+        _write_orca_inp(jd1, ["Np", "F", "F", "F"])  # different molecule
+        jobs = [
+            {
+                "orig_index": 0,
+                "status": "timeout",
+                "elements": "U;O;O",
+                "natoms": 3,
+                "job_dir": str(jd0),
+            },
+            {
+                "orig_index": 1,
+                "status": "timeout",
+                "elements": "U;O;O",
+                "natoms": 3,
+                "job_dir": str(jd1),
+            },
+        ]
+        db_path = _create_test_db(tmp_path / "test.db", jobs)
+        with ArchitectorWorkflow(db_path) as wf:
+            result = validate_db_folder_alignment(wf, root)
+        assert result.passed is False
+        assert result.mismatch_count == 1
+        assert any(m[0] == 1 for m in result.mismatches)
+
+    def test_fail_closed_on_zero_verifiable(self, tmp_path):
+        root = tmp_path / "jobs"
+        root.mkdir()
+        # Dirs exist but no orca.inp -> all UNVERIFIABLE
+        jobs = []
+        for i in range(4):
+            jd = _create_job_dir(root, f"job_{i}", [])
+            (jd / "orca.inp").unlink(missing_ok=True)
+            jobs.append(
+                {
+                    "orig_index": i,
+                    "status": "timeout",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(jd),
+                }
+            )
+        db_path = _create_test_db(tmp_path / "test.db", jobs)
+        with ArchitectorWorkflow(db_path) as wf:
+            result = validate_db_folder_alignment(wf, root)
+        assert result.verifiable == 0
+        assert result.passed is False
+
+    def test_coverage_guard_below_half(self, tmp_path):
+        root = tmp_path / "jobs"
+        root.mkdir()
+        jobs = []
+        # 2 verifiable matches
+        for i in range(2):
+            jd = _create_job_dir(root, f"job_{i}", [])
+            _write_orca_inp(jd, ["U", "O", "O"])
+            jobs.append(
+                {
+                    "orig_index": i,
+                    "status": "completed",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(jd),
+                }
+            )
+        # 3 unverifiable (dir missing)
+        for i in range(2, 5):
+            jobs.append(
+                {
+                    "orig_index": i,
+                    "status": "completed",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(root / f"missing_{i}"),
+                }
+            )
+        db_path = _create_test_db(tmp_path / "test.db", jobs)
+        with ArchitectorWorkflow(db_path) as wf:
+            result = validate_db_folder_alignment(wf, root)
+        # 2 verifiable / 5 sampled = 0.4 < 0.5 -> fail closed
+        assert result.match_count == 2
+        assert result.unverifiable_count == 3
+        assert result.passed is False
+
+    def test_sample_includes_incomplete(self, tmp_path):
+        """A mismatch among the (minority) incomplete jobs is caught even when
+        the sample budget is saturated by completed jobs (stratification)."""
+        root = tmp_path / "jobs"
+        root.mkdir()
+        jobs = []
+        # 105 matching completed jobs -> forces the 100-row sample cap
+        for i in range(105):
+            jd = _create_job_dir(root, f"done_{i}", [])
+            _write_orca_inp(jd, ["U", "O", "O"])
+            jobs.append(
+                {
+                    "orig_index": i,
+                    "status": "completed",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(jd),
+                }
+            )
+        # 3 timeout jobs; one mismatches
+        for j in range(3):
+            idx = 1000 + j
+            jd = _create_job_dir(root, f"to_{j}", [])
+            if j == 0:
+                _write_orca_inp(jd, ["Np", "F", "F", "F"])  # mismatch
+            else:
+                _write_orca_inp(jd, ["U", "O", "O"])
+            jobs.append(
+                {
+                    "orig_index": idx,
+                    "status": "timeout",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(jd),
+                }
+            )
+        db_path = _create_test_db(tmp_path / "test.db", jobs)
+        with ArchitectorWorkflow(db_path) as wf:
+            result = validate_db_folder_alignment(wf, root)
+        assert result.passed is False
+        assert any(m[0] == 1000 for m in result.mismatches)
+
+
+# ---------------------------------------------------------------------------
+# Purge incomplete
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeIncompleteJob:
+    def _setup(self, tmp_path, status="timeout"):
+        db_path = _create_test_db(
+            tmp_path / "test.db",
+            [
+                {
+                    "orig_index": 7,
+                    "status": status,
+                    "job_dir": "job_7",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                }
+            ],
+        )
+        job_dir = tmp_path / "job_7"
+        job_dir.mkdir()
+        (job_dir / "orca.out").write_text("partial output, no terminator\n")
+        (job_dir / "orca.inp").write_text("input")
+        (job_dir / "orca.tmp").write_text("scratch")
+        return db_path, job_dir
+
+    def test_completed_on_disk_is_protected(self, tmp_path):
+        db_path, job_dir = self._setup(tmp_path, status="running")
+        with patch(
+            "oact_utilities.workflows.clean.check_job_termination", return_value=1
+        ):
+            cls, matched, freed, errors = _purge_incomplete_job(
+                job_dir,
+                tmp_path,
+                db_path,
+                1,
+                execute=True,
+                hours_cutoff=24,
+                optimizer=None,
+                job_metadata={"orig_index": 7},
+            )
+        assert cls == "protected"
+        assert not (job_dir / ".do_not_rerun.json").exists()
+        assert (job_dir / "orca.out").exists()
+        assert (job_dir / "orca.tmp").exists()
+
+    def test_failed_on_disk_is_skipped(self, tmp_path):
+        db_path, job_dir = self._setup(tmp_path, status="timeout")
+        with patch(
+            "oact_utilities.workflows.clean.check_job_termination", return_value=-1
+        ):
+            cls, matched, freed, errors = _purge_incomplete_job(
+                job_dir,
+                tmp_path,
+                db_path,
+                1,
+                execute=True,
+                hours_cutoff=24,
+                optimizer=None,
+                job_metadata={"orig_index": 7},
+            )
+        assert cls == "looks_failed"
+        assert not (job_dir / ".do_not_rerun.json").exists()
+        assert (job_dir / "orca.out").exists()
+
+    def test_incomplete_is_purged_with_marker(self, tmp_path):
+        db_path, job_dir = self._setup(tmp_path, status="timeout")
+        with patch(
+            "oact_utilities.workflows.clean.check_job_termination", return_value=0
+        ):
+            cls, matched, freed, errors = _purge_incomplete_job(
+                job_dir,
+                tmp_path,
+                db_path,
+                1,
+                execute=True,
+                hours_cutoff=24,
+                optimizer=None,
+                job_metadata={"orig_index": 7, "elements": "U;O;O"},
+            )
+        assert cls == "purged"
+        marker = job_dir / ".do_not_rerun.json"
+        assert marker.exists()
+        data = json.loads(marker.read_text())
+        assert data["purge_type"] == "incomplete_archive"
+        assert data["db_status_at_purge"] == "timeout"
+        assert data["disk_status_code"] == 0
+        assert data["orig_index"] == 7
+        remaining = list(job_dir.iterdir())
+        assert len(remaining) == 1
+        assert remaining[0].name == ".do_not_rerun.json"
+
+    def test_timeout_by_age_is_purged(self, tmp_path):
+        db_path, job_dir = self._setup(tmp_path, status="timeout")
+        with patch(
+            "oact_utilities.workflows.clean.check_job_termination", return_value=-2
+        ):
+            cls, matched, freed, errors = _purge_incomplete_job(
+                job_dir,
+                tmp_path,
+                db_path,
+                1,
+                execute=True,
+                hours_cutoff=24,
+                optimizer=None,
+                job_metadata={"orig_index": 7},
+            )
+        assert cls == "purged"
+        data = json.loads((job_dir / ".do_not_rerun.json").read_text())
+        assert data["disk_status_code"] == -2
+
+    def test_content_check_runs_before_marker_write(self, tmp_path):
+        """A job that reads as completed must not get a marker, even in execute."""
+        db_path, job_dir = self._setup(tmp_path, status="running")
+        with patch(
+            "oact_utilities.workflows.clean.check_job_termination", return_value=1
+        ):
+            cls, *_ = _purge_incomplete_job(
+                job_dir,
+                tmp_path,
+                db_path,
+                1,
+                execute=True,
+                hours_cutoff=24,
+                optimizer=None,
+                job_metadata={"orig_index": 7},
+            )
+        assert cls == "protected"
+        assert not (job_dir / ".do_not_rerun.json").exists()
+        assert (job_dir / "orca.out").exists()
+
+    def test_toctou_abort_when_status_changed(self, tmp_path):
+        # DB row is 'completed' (no longer in incomplete set)
+        db_path, job_dir = self._setup(tmp_path, status="completed")
+        with patch(
+            "oact_utilities.workflows.clean.check_job_termination", return_value=0
+        ):
+            cls, matched, freed, errors = _purge_incomplete_job(
+                job_dir,
+                tmp_path,
+                db_path,
+                1,
+                execute=True,
+                hours_cutoff=24,
+                optimizer=None,
+                job_metadata={"orig_index": 7},
+            )
+        assert cls == "skipped"
+        assert any("status changed" in e for e in errors)
+        assert (job_dir / "orca.out").exists()
+
+    def test_marker_write_failure_preserves_contents(self, tmp_path):
+        db_path, job_dir = self._setup(tmp_path, status="timeout")
+        with (
+            patch(
+                "oact_utilities.workflows.clean.check_job_termination", return_value=0
+            ),
+            patch(
+                "oact_utilities.workflows.clean._write_marker_file",
+                side_effect=OSError("read-only fs"),
+            ),
+        ):
+            cls, matched, freed, errors = _purge_incomplete_job(
+                job_dir,
+                tmp_path,
+                db_path,
+                1,
+                execute=True,
+                hours_cutoff=24,
+                optimizer=None,
+                job_metadata={"orig_index": 7},
+            )
+        assert cls == "skipped"
+        assert any("marker write failed" in e for e in errors)
+        # Nothing deleted
+        assert (job_dir / "orca.out").exists()
+        assert (job_dir / "orca.tmp").exists()
+
+    def test_dry_run_frees_nothing(self, tmp_path):
+        db_path, job_dir = self._setup(tmp_path, status="timeout")
+        with patch(
+            "oact_utilities.workflows.clean.check_job_termination", return_value=0
+        ):
+            cls, matched, freed, errors = _purge_incomplete_job(
+                job_dir,
+                tmp_path,
+                db_path,
+                1,
+                execute=False,
+                hours_cutoff=24,
+                optimizer=None,
+                job_metadata={"orig_index": 7},
+            )
+        assert cls == "purged"
+        assert len(matched) >= 1
+        assert freed == 0
+        assert not (job_dir / ".do_not_rerun.json").exists()
+        assert (job_dir / "orca.out").exists()
+
+    def test_idempotent_rerun(self, tmp_path):
+        db_path, job_dir = self._setup(tmp_path, status="timeout")
+        with patch(
+            "oact_utilities.workflows.clean.check_job_termination", return_value=0
+        ):
+            _purge_incomplete_job(
+                job_dir,
+                tmp_path,
+                db_path,
+                1,
+                execute=True,
+                hours_cutoff=24,
+                optimizer=None,
+                job_metadata={"orig_index": 7},
+            )
+            # Second run: only the marker remains
+            cls, matched, freed, errors = _purge_incomplete_job(
+                job_dir,
+                tmp_path,
+                db_path,
+                1,
+                execute=True,
+                hours_cutoff=24,
+                optimizer=None,
+                job_metadata={"orig_index": 7},
+            )
+        assert cls == "purged"
+        assert matched == []  # nothing left to remove except marker
+        remaining = list(job_dir.iterdir())
+        assert len(remaining) == 1
+        assert remaining[0].name == ".do_not_rerun.json"
+
+
+class TestPurgeIncompleteIntegration:
+    def test_gate_blocks_purge_on_mismatch(self, tmp_path):
+        """--purge-incomplete runs validation by default and refuses on mismatch."""
+        root = tmp_path / "jobs"
+        root.mkdir()
+        jd = _create_job_dir(root, "job_0", ["orca.tmp"])
+        _write_orca_inp(jd, ["Np", "F", "F", "F"])  # mismatch vs DB U;O;O
+        db_path = _create_test_db(
+            tmp_path / "test.db",
+            [
+                {
+                    "orig_index": 0,
+                    "status": "timeout",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(jd),
+                }
+            ],
+        )
+        with patch(
+            "oact_utilities.workflows.clean.check_job_termination", return_value=0
+        ):
+            ok = clean_job_directories(
+                db_path=db_path,
+                root_dir=root,
+                categories=set(),
+                purge_incomplete=True,
+                execute=True,
+            )
+        assert ok is False
+        assert (jd / "orca.tmp").exists()  # nothing purged
+        assert not (jd / ".do_not_rerun.json").exists()
+
+    def test_skip_validation_allows_purge(self, tmp_path):
+        root = tmp_path / "jobs"
+        root.mkdir()
+        jd = _create_job_dir(root, "job_0", ["orca.tmp"])
+        _write_orca_inp(jd, ["Np", "F", "F", "F"])  # would fail validation
+        db_path = _create_test_db(
+            tmp_path / "test.db",
+            [
+                {
+                    "orig_index": 0,
+                    "status": "timeout",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(jd),
+                }
+            ],
+        )
+        with patch(
+            "oact_utilities.workflows.clean.check_job_termination", return_value=0
+        ):
+            ok = clean_job_directories(
+                db_path=db_path,
+                root_dir=root,
+                categories=set(),
+                purge_incomplete=True,
+                execute=True,
+                skip_validation=True,
+            )
+        assert ok is True
+        assert (jd / ".do_not_rerun.json").exists()
+        assert not (jd / "orca.tmp").exists()
+
+    def test_validate_db_standalone_exit_code(self, tmp_path):
+        """Standalone --validate-db exits non-zero on mismatch."""
+        import subprocess
+
+        root = tmp_path / "jobs"
+        root.mkdir()
+        jd = _create_job_dir(root, "job_0", [])
+        _write_orca_inp(jd, ["Np", "F", "F", "F"])
+        db_path = _create_test_db(
+            tmp_path / "test.db",
+            [
+                {
+                    "orig_index": 0,
+                    "status": "timeout",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(jd),
+                }
+            ],
+        )
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "oact_utilities.workflows.clean",
+                str(db_path),
+                str(root),
+                "--validate-db",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 1
+        assert "FAIL" in result.stdout

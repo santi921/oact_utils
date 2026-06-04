@@ -293,6 +293,13 @@ python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --execute
 
 # Purge failed jobs (writes .do_not_rerun.json marker, deletes contents)
 python -m oact_utilities.workflows.clean workflow.db jobs/ --purge-failed --execute
+
+# Final-home reclamation (FINAL cleanup only -- NOT during an active campaign):
+# also purge never-finished jobs (running/to_run/timeout) whose on-disk content
+# confirms they are incomplete. Only safe once the campaign is done and nothing
+# is running. Validates DB<->folder first; completed jobs are protected.
+python -m oact_utilities.workflows.clean workflow.db jobs/ --validate-db   # read-only sanity check
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --purge-failed --purge-incomplete --execute
 ```
 
 The utility defaults to dry-run mode -- add `--execute` to actually delete files. See README.md for full CLI reference.
