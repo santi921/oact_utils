@@ -903,6 +903,12 @@ rows could be verified. `--skip-validation` (alias `--force`) bypasses the gate
 with a loud warning. It is not the primary safety mechanism -- the per-job content
 check is -- but it is a cheap early abort.
 
+Some workflow DBs store `elements`/`natoms` **without the central actinide** (the
+geometry column used at DB-build time held only the ligand core), while the
+on-disk `orca.inp` includes it. Validation tolerates this: a row whose `orca.inp`
+equals the DB elements **plus exactly one extra actinide** still counts as a
+MATCH, so these actinide DBs validate without needing `--skip-validation`.
+
 ### Safety Features
 
 - **Dry-run by default**: No `--execute` flag means preview only

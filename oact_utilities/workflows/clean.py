@@ -30,6 +30,7 @@ import re
 import shutil
 import sqlite3
 import sys
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,7 +38,7 @@ from enum import Enum
 from pathlib import Path
 
 from ..utils.analysis import parse_scf_steps
-from ..utils.create import read_geom_from_inp_file
+from ..utils.create import fetch_actinides, read_geom_from_inp_file
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import ArchitectorWorkflow, JobRecord, JobStatus
 
@@ -71,6 +72,12 @@ _INCOMPLETE_STATUSES = frozenset(
 # rows could be verified.
 _VALIDATE_SAMPLE_SIZE = 100
 _VALIDATE_MIN_VERIFIED_FRACTION = 0.5
+
+# Actinide symbols. Some workflow DBs store elements/natoms WITHOUT the central
+# actinide (the geometry column used at DB-build time held only the ligand core),
+# while the on-disk orca.inp includes it. Validation treats "inp == DB elements +
+# exactly one actinide" as a MATCH so these DBs validate correctly.
+_ACTINIDES = frozenset(fetch_actinides())
 
 
 def is_marker_blocked(job_dir: Path) -> bool:
@@ -275,7 +282,8 @@ def _check_row_alignment(
     Compares the element multiset and atom count only -- charge/spin/coordinates
     are not checked (the inp is round-tripped from the DB geometry, so they prove
     linkage at best; elements + natoms already catch the gross-error case the gate
-    exists for).
+    exists for). A DB whose elements/natoms omit the central actinide (orca.inp
+    has it, the DB column does not) still MATCHes -- see _ACTINIDES.
 
     Returns:
         (outcome, inp_elements_str). inp_elements_str is the semicolon-joined
@@ -304,11 +312,26 @@ def _check_row_alignment(
     inp_elements_str = ";".join(inp_elements)
     db_elements = [e for e in (job_record.elements or "").split(";") if e]
 
+    inp_counter = Counter(inp_elements)
+    db_counter = Counter(db_elements)
+
+    # Exact match: element multiset equal AND atom count matches the DB.
+    if inp_counter == db_counter and len(inp_elements) == job_record.natoms:
+        return ValidationOutcome.MATCH, inp_elements_str
+
+    # Actinide-omitted DB: orca.inp == DB elements + exactly one extra actinide
+    # (and the inp atom count is one more than the DB natoms). The ligand
+    # fingerprint matches exactly; only the central metal was missing from the DB.
+    extra = inp_counter - db_counter  # in inp, not in db
+    missing = db_counter - inp_counter  # in db, not in inp
     if (
-        sorted(inp_elements) == sorted(db_elements)
-        and len(inp_elements) == job_record.natoms
+        not missing
+        and sum(extra.values()) == 1
+        and next(iter(extra)) in _ACTINIDES
+        and len(inp_elements) == job_record.natoms + 1
     ):
         return ValidationOutcome.MATCH, inp_elements_str
+
     return ValidationOutcome.MISMATCH, inp_elements_str
 
 
