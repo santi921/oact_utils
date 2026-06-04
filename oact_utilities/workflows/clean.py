@@ -69,9 +69,12 @@ _INCOMPLETE_STATUSES = frozenset(
 # --validate-db internals. Constants, not CLI knobs: a tunable abort threshold on
 # a destructive op is a footgun. Sample is stratified to include the purge
 # population; the gate aborts on any real mismatch and fails closed when too few
-# rows could be verified.
+# rows could be verified. The floor is absolute (not a fraction of the sample):
+# a fraction penalizes the gate for sampling never-run to_run jobs, which have no
+# orca.inp to verify. A wrong root/db still fails -- it yields ~zero verified rows
+# (missing dirs) or mismatches (different molecules), never a clean 20+ matches.
 _VALIDATE_SAMPLE_SIZE = 100
-_VALIDATE_MIN_VERIFIED_FRACTION = 0.5
+_VALIDATE_MIN_VERIFIED = 20
 
 # Actinide symbols. Some workflow DBs store elements/natoms WITHOUT the central
 # actinide (the geometry column used at DB-build time held only the ligand core),
@@ -263,6 +266,8 @@ class ValidationResult:
     unverifiable_count: int
     mismatches: list[tuple[int, str, str]]  # (orig_index, db_elements, inp_elements)
     passed: bool
+    unverifiable_reasons: dict[str, int]  # reason code -> count
+    unverifiable_to_run: int  # unverifiable rows whose DB status is to_run
 
     @property
     def sampled(self) -> int:
@@ -286,28 +291,34 @@ def _check_row_alignment(
     has it, the DB column does not) still MATCHes -- see _ACTINIDES.
 
     Returns:
-        (outcome, inp_elements_str). inp_elements_str is the semicolon-joined
-        parsed elements for MATCH/MISMATCH reporting, or None when UNVERIFIABLE.
+        (outcome, detail). For MATCH/MISMATCH, detail is the semicolon-joined
+        parsed inp elements (for reporting). For UNVERIFIABLE, detail is a short
+        reason code: "null_job_dir", "dir_missing", "no_orca_inp", "unparseable",
+        or "no_atoms".
     """
     if job_record.job_dir is None:
-        return ValidationOutcome.UNVERIFIABLE, None
+        return ValidationOutcome.UNVERIFIABLE, "null_job_dir"
     resolved = _resolve_job_dir(job_record.job_dir, root_dir)
     if resolved is None or not resolved.is_dir():
-        return ValidationOutcome.UNVERIFIABLE, None
+        # Stored path escaped root, or the directory does not exist (never
+        # created, never transferred, or transferred to a different location).
+        return ValidationOutcome.UNVERIFIABLE, "dir_missing"
 
     inp_file = resolved / "orca.inp"
     if not inp_file.is_file():
-        return ValidationOutcome.UNVERIFIABLE, None
+        # Dir exists but no orca.inp: never prepared (to_run), cleaned, or the
+        # input was written under a different name by an older pipeline.
+        return ValidationOutcome.UNVERIFIABLE, "no_orca_inp"
 
     try:
         atoms = read_geom_from_inp_file(str(inp_file), ase_format_tf=False)
         inp_elements = [str(a["element"]) for a in atoms]  # type: ignore[union-attr]
     except (OSError, ValueError, IndexError, KeyError, TypeError):
-        return ValidationOutcome.UNVERIFIABLE, None
+        return ValidationOutcome.UNVERIFIABLE, "unparseable"
 
     if not inp_elements:
         # e.g. "* xyzfile" external coordinates -- nothing to compare.
-        return ValidationOutcome.UNVERIFIABLE, None
+        return ValidationOutcome.UNVERIFIABLE, "no_atoms"
 
     inp_elements_str = ";".join(inp_elements)
     db_elements = [e for e in (job_record.elements or "").split(";") if e]
@@ -346,12 +357,14 @@ def validate_db_folder_alignment(
     check in the purge worker is. The sample is stratified to include the purge
     population (running/to_run/timeout) so the data actually at risk is checked.
 
-    Gate (hardcoded, fail-closed): abort if nothing verifiable, or if the
-    verifiable fraction is below _VALIDATE_MIN_VERIFIED_FRACTION, or on any
-    MISMATCH.
+    Gate (hardcoded, fail-closed): abort on any MISMATCH, or if fewer than
+    _VALIDATE_MIN_VERIFIED rows could be verified (capped at the sample size, so
+    small corpora still pass). Unverifiable rows -- typically never-run to_run
+    jobs with no orca.inp -- do not by themselves fail the gate.
 
     Returns:
-        ValidationResult with bucket counts, the mismatching rows, and passed.
+        ValidationResult with bucket counts, the mismatching rows, the
+        unverifiable-reason breakdown, and passed.
     """
     incomplete = wf.get_jobs_by_status(
         [JobStatus.RUNNING, JobStatus.TO_RUN, JobStatus.TIMEOUT],
@@ -374,6 +387,8 @@ def validate_db_folder_alignment(
     mismatch_count = 0
     unverifiable_count = 0
     mismatches: list[tuple[int, str, str]] = []
+    unverifiable_reasons: dict[str, int] = {}
+    unverifiable_to_run = 0
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
@@ -381,25 +396,27 @@ def validate_db_folder_alignment(
         }
         for fut in as_completed(futures):
             job = futures[fut]
-            outcome, inp_elements = fut.result()
+            outcome, detail = fut.result()
             if outcome is ValidationOutcome.MATCH:
                 match_count += 1
             elif outcome is ValidationOutcome.MISMATCH:
                 mismatch_count += 1
-                mismatches.append(
-                    (job.orig_index, job.elements or "", inp_elements or "")
-                )
+                mismatches.append((job.orig_index, job.elements or "", detail or ""))
             else:
                 unverifiable_count += 1
+                reason = detail or "unknown"
+                unverifiable_reasons[reason] = unverifiable_reasons.get(reason, 0) + 1
+                if job.status is JobStatus.TO_RUN:
+                    unverifiable_to_run += 1
 
     sampled = match_count + mismatch_count + unverifiable_count
     verifiable = match_count + mismatch_count
-    if sampled == 0 or verifiable == 0:
-        passed = False
-    elif verifiable / sampled < _VALIDATE_MIN_VERIFIED_FRACTION:
-        passed = False
-    else:
-        passed = mismatch_count == 0
+    # Fail-closed: any mismatch is a real mapping error; too few verified rows
+    # means we could not confirm the mapping (e.g. wrong root -> missing dirs).
+    # The floor is capped at the sample size so a small corpus that fully
+    # verifies still passes.
+    min_required = min(_VALIDATE_MIN_VERIFIED, sampled)
+    passed = mismatch_count == 0 and verifiable >= min_required and verifiable > 0
 
     return ValidationResult(
         match_count=match_count,
@@ -407,6 +424,8 @@ def validate_db_folder_alignment(
         unverifiable_count=unverifiable_count,
         mismatches=mismatches,
         passed=passed,
+        unverifiable_reasons=unverifiable_reasons,
+        unverifiable_to_run=unverifiable_to_run,
     )
 
 
@@ -417,12 +436,28 @@ def _print_validation_report(result: ValidationResult) -> None:
     print(f"  Match:        {result.match_count}")
     print(f"  Mismatch:     {result.mismatch_count}")
     print(f"  Unverifiable: {result.unverifiable_count}")
+    if result.unverifiable_count:
+        # Reason breakdown so the operator can tell benign (never-run to_run
+        # jobs: dir_missing / no_orca_inp) from concerning (jobs that ran but
+        # whose dir/input can't be found).
+        for reason, count in sorted(
+            result.unverifiable_reasons.items(), key=lambda kv: -kv[1]
+        ):
+            print(f"      {reason}: {count}")
+        print(
+            f"      ({result.unverifiable_to_run} of these are to_run jobs "
+            "-- never written to disk, expected)"
+        )
     if result.mismatches:
         print("  Mismatching rows (orig_index: db_elements != inp_elements):")
         for orig_index, db_el, inp_el in result.mismatches[:20]:
             print(f"    - {orig_index}: {db_el} != {inp_el}")
         if len(result.mismatches) > 20:
             print(f"    ... and {len(result.mismatches) - 20} more")
+    print(
+        f"  Verified:     {result.verifiable} "
+        f"({result.match_count} match, {result.mismatch_count} mismatch)"
+    )
     print(f"  Verdict:      {'PASS' if result.passed else 'FAIL'}")
 
 

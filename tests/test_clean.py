@@ -715,9 +715,9 @@ class TestCheckRowAlignment:
         job_dir = tmp_path / "job_1"
         job_dir.mkdir()  # no orca.inp
         rec = _make_record(1, "U;O;O", 3, job_dir="job_1")
-        outcome, inp = _check_row_alignment(rec, tmp_path)
+        outcome, reason = _check_row_alignment(rec, tmp_path)
         assert outcome is ValidationOutcome.UNVERIFIABLE
-        assert inp is None
+        assert reason == "no_orca_inp"
 
     def test_missing_dir_is_unverifiable(self, tmp_path):
         rec = _make_record(1, "U;O;O", 3, job_dir="does_not_exist")
@@ -912,6 +912,45 @@ class TestValidateDbFolder:
             result = validate_db_folder_alignment(wf, root)
         assert result.passed is False
         assert any(m[0] == 1000 for m in result.mismatches)
+
+    def test_passes_with_many_unverified_to_run(self, tmp_path):
+        """Never-run to_run jobs (no dir) don't fail the gate when enough rows
+        verify with zero mismatches -- mirrors the real partial-campaign case."""
+        root = tmp_path / "jobs"
+        root.mkdir()
+        jobs = []
+        # 25 completed jobs that verify (matching orca.inp)
+        for i in range(25):
+            jd = _create_job_dir(root, f"done_{i}", [])
+            _write_orca_inp(jd, ["U", "O", "O"])
+            jobs.append(
+                {
+                    "orig_index": i,
+                    "status": "completed",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(jd),
+                }
+            )
+        # 60 to_run jobs that were never written to disk (dir missing)
+        for j in range(60):
+            jobs.append(
+                {
+                    "orig_index": 1000 + j,
+                    "status": "to_run",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": str(root / f"never_{j}"),
+                }
+            )
+        db_path = _create_test_db(tmp_path / "test.db", jobs)
+        with ArchitectorWorkflow(db_path) as wf:
+            result = validate_db_folder_alignment(wf, root)
+        assert result.mismatch_count == 0
+        assert result.match_count == 25
+        assert result.passed is True  # 25 verified >= floor, 0 mismatch
+        assert result.unverifiable_to_run > 0
+        assert "dir_missing" in result.unverifiable_reasons
 
 
 # ---------------------------------------------------------------------------

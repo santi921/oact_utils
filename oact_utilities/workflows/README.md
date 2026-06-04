@@ -898,10 +898,15 @@ destructive action. It samples up to 100 rows (stratified to include the
 running/to_run/timeout purge population), parses each `orca.inp` with
 `read_geom_from_inp_file`, and compares the element multiset + atom count against
 the DB. Outcomes bucket into MATCH / MISMATCH / UNVERIFIABLE. The gate **hard-aborts**
-(exit non-zero) on any MISMATCH, or fails closed when fewer than half the sampled
-rows could be verified. `--skip-validation` (alias `--force`) bypasses the gate
-with a loud warning. It is not the primary safety mechanism -- the per-job content
-check is -- but it is a cheap early abort.
+(exit non-zero) on any MISMATCH, or when too few rows could be verified (an
+absolute floor, capped at the sample size, so small corpora still pass).
+**UNVERIFIABLE rows do not by themselves fail the gate** -- they are usually
+never-run `to_run` jobs with no `orca.inp`. The report prints a reason breakdown
+(`dir_missing`, `no_orca_inp`, `unparseable`, ...) and how many are `to_run`, so
+you can tell benign never-run jobs from jobs that ran but whose dir/input can't be
+found. `--skip-validation` (alias `--force`) bypasses the gate with a loud
+warning. It is not the primary safety mechanism -- the per-job content check is --
+but it is a cheap early abort.
 
 Some workflow DBs store `elements`/`natoms` **without the central actinide** (the
 geometry column used at DB-build time held only the ligand core), while the
