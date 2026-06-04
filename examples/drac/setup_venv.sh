@@ -7,17 +7,24 @@
 # recommended approach.
 #
 # Usage:
-#   bash setup_venv.sh <venv_dir> [python_module]
-# Example (put the venv in PROJECT, persistent + backed up, NOT scratch):
+#   bash setup_venv.sh <venv_dir> [python_module] [proxy_module]
+# Fir (direct egress):
 #   bash setup_venv.sh "$HOME/projects/def-yqw/$USER/oact-env" python/3.11
+# Rorqual/Narval/Tamia (restricted egress -- need the proxy for pip/git):
+#   bash setup_venv.sh "$HOME/links/projects/def-yqw/$USER/oact-env" python/3.11 httpproxy
 #
-# Run on a LOGIN node (needs internet for the niche PyPI packages). On Trillium,
-# build in HOME (project/home are read-only inside jobs there).
+# Run on a LOGIN node (needs internet for the niche PyPI packages and the git
+# install). On Calcul Quebec clusters pass the proxy module (httpproxy) as the
+# 3rd arg. On Trillium, build in HOME (project/home are read-only inside jobs).
 
 set -euo pipefail
 
-VENV_DIR="${1:?usage: setup_venv.sh <venv_dir> [python_module]}"
+VENV_DIR="${1:?usage: setup_venv.sh <venv_dir> [python_module] [proxy_module]}"
 PY_MODULE="${2:-python/3.11}"
+# Optional 3rd arg: a module that enables outbound internet (Calcul Quebec
+# clusters - Rorqual/Narval/Tamia - restrict egress; `httpproxy` routes pip/git
+# through a proxy). Omit on clusters with direct egress (e.g. Fir).
+PROXY_MODULE="${3:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 CORE_PKGS=(numpy scipy pandas ase tqdm)        # in the wheelhouse (--no-index)
@@ -69,6 +76,13 @@ echo
 # ipykernel loaded + sticky); plain `module purge` keeps them.
 module --force purge
 module load StdEnv/2023 "$PY_MODULE"
+# Restore outbound egress AFTER the purge (the --force purge above would
+# otherwise drop it): Calcul Quebec clusters need `httpproxy` so pip can reach
+# PyPI and git can reach GitHub. No-op when omitted (direct-egress clusters).
+if [ -n "$PROXY_MODULE" ]; then
+    echo "loading proxy module: $PROXY_MODULE"
+    module load "$PROXY_MODULE"
+fi
 # Clear PYTHONPATH so module site-packages (e.g. a leaked ipykernel) are NOT on
 # the path while building. Otherwise pip sees deps like python-dateutil/six as
 # "already satisfied" in a module path and skips installing them into the venv,
