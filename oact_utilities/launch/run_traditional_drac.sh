@@ -51,6 +51,9 @@ SCF_MAXITER=600
 module load StdEnv/2023 "${PYTHON_MODULE}"
 # shellcheck disable=SC1091
 source "${VENV_PATH}/bin/activate"
+# Clear PYTHONPATH so a stray module (e.g. a sticky ipykernel) can't shadow the
+# venv's numpy/pandas with mismatched module copies.
+unset PYTHONPATH
 
 # No --orca-path (uses module's $EBROOTORCA/orca), no --use-parsl, no --qos/--partition.
 python -m oact_utilities.workflows.submit_jobs \

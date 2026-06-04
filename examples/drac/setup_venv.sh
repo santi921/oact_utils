@@ -65,8 +65,15 @@ echo
 
 # --- 1. modules FIRST, then create + activate the venv ----------------------
 # (DRAC docs: never `module load` while a venv is active; load everything first.)
-module purge
+# --force purge drops STICKY modules too (a JupyterHub/portal session leaves
+# ipykernel loaded + sticky); plain `module purge` keeps them.
+module --force purge
 module load StdEnv/2023 "$PY_MODULE"
+# Clear PYTHONPATH so module site-packages (e.g. a leaked ipykernel) are NOT on
+# the path while building. Otherwise pip sees deps like python-dateutil/six as
+# "already satisfied" in a module path and skips installing them into the venv,
+# producing a venv that imports fine here but breaks in a clean job shell.
+unset PYTHONPATH
 
 echo "## wheelhouse availability (informational):"
 avail_wheels "${CORE_PKGS[@]}" "${NICHE_PKGS[@]}" pyyaml pymatgen monty cclib 2>&1 \
