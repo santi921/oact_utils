@@ -56,6 +56,9 @@ SCF_MAXITER=600
 module load ${MODULE_LOAD}
 # shellcheck disable=SC1091
 source "${VENV_PATH}/bin/activate"
+# Clear PYTHONPATH so a stray module (e.g. a sticky ipykernel) can't shadow the
+# venv's numpy/pandas with mismatched module copies. Workers inherit this.
+unset PYTHONPATH
 
 # Resolve the module's ORCA binary now ($EBROOTORCA expands in this shell).
 # Parsl's ASE/quacc calculator needs a concrete path, not the literal env var.
