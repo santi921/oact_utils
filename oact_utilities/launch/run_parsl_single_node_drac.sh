@@ -21,7 +21,8 @@
 # =============================================================================
 
 #SBATCH --account=def-yqw
-#SBATCH --time=3:00:00            # keep tight; <3h tier backfills on the most nodes
+#SBATCH --time=3:00:00            # BACKFILL role: <3h tier backfills on the most nodes.
+                                  # MAIN-QUEUE role: raise to 24:00:00 and set MAX_ATOMS=0.
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=64      # cores to grab: 64 = partial Fir node (schedules
                                   # faster); 192 = whole node. Must be >= MAX_WORKERS*CORES_PER_WORKER.
@@ -42,6 +43,10 @@ CORES_PER_WORKER=16         # cores per ORCA job (== %pal nprocs); 4*16=64 == --
 BATCH_SIZE=200              # molecules to pull from the DB this run
 JOB_TIMEOUT=10800           # 3h per ORCA job (seconds); <= the SBATCH --time
 MAX_FAIL_COUNT=10
+MAX_ATOMS=40                # BACKFILL knob: only submit molecules with natoms <= this so
+                            # jobs stay short and ride the <3h backfill pool. 30-50 is a
+                            # good range. Set 0 (or empty) for NO cap -- pair that with a
+                            # 24h+ SBATCH --time for the big-molecule "main" queue.
 
 # ORCA settings
 FUNCTIONAL="wB97M-V"
@@ -64,6 +69,10 @@ unset PYTHONPATH
 # Parsl's ASE/quacc calculator needs a concrete path, not the literal env var.
 ORCA_PATH="${EBROOTORCA}/orca"
 
+# MAX_ATOMS=0 (or empty) means no size cap. argparse rejects --max-atoms 0, so
+# normalize 0 -> empty and drop the flag entirely; any positive value caps size.
+[ "${MAX_ATOMS:-0}" = "0" ] && MAX_ATOMS=""
+
 python -m oact_utilities.workflows.submit_jobs \
     "${DB_PATH}" \
     "${ROOT_DIR}" \
@@ -78,6 +87,7 @@ python -m oact_utilities.workflows.submit_jobs \
     --n-cores "${CORES_PER_WORKER}" \
     --job-timeout "${JOB_TIMEOUT}" \
     --max-fail-count "${MAX_FAIL_COUNT}" \
+    ${MAX_ATOMS:+--max-atoms "${MAX_ATOMS}"} \
     --max-blocks 1 \
     --functional "${FUNCTIONAL}" \
     --simple-input "${SIMPLE_INPUT}" \
