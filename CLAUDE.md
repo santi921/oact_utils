@@ -463,9 +463,14 @@ python -m oact_utilities.workflows.clean <db> <root_dir> [options]
 --hours-cutoff H        # Timeout threshold for revalidation (default: 24)
 ```
 
-**Final-home reclamation (post-transfer to ALCF):** to reclaim space from
-leftover non-corpus jobs after a dataset+DB are moved to their final home, first
-reconcile completed status from content, then validate, dry-run, and execute:
+**Final-home reclamation (post-transfer to ALCF):** `--purge-incomplete` and
+`--validate-db` are for FINAL cleanup of a completed/transferred corpus, **not
+for an ongoing campaign**. They act on jobs the DB still calls
+`running`/`to_run`/`timeout` -- during an active campaign those statuses mean "in
+flight", so purging them would destroy live or pending work. Only run them when
+the campaign is finished and nothing is executing. To reclaim space from leftover
+non-corpus jobs after a dataset+DB are moved to their final home, first reconcile
+completed status from content, then validate, dry-run, and execute:
 
 ```bash
 python -m oact_utilities.workflows.dashboard final.db --update jobs/ --recheck-completed --unzip

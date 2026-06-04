@@ -1,13 +1,23 @@
 """Job directory cleanup utility for ORCA workflow campaigns.
 
-Removes superfluous scratch files from completed job directories and
-optionally purges failed job directories, leaving a marker file to
-prevent resubmission.
+Removes superfluous scratch files from completed job directories, optionally
+purges failed job directories, and (for final-home reclamation) purges
+never-finished job directories that the on-disk content check confirms are
+incomplete. Purges leave a .do_not_rerun.json marker to prevent resubmission.
+
+WARNING: --purge-incomplete (and --validate-db) are for FINAL cleanup of a
+completed/transferred corpus, NOT for an ongoing campaign. They delete dirs for
+jobs the DB still calls running/to_run/timeout -- during an active campaign
+those statuses mean "in flight" and purging them destroys live or pending work.
+Only run --purge-incomplete when the campaign is finished and nothing is running
+(e.g. after transferring the dataset and DB to their final home).
 
 Usage:
     python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-tmp
     python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --execute
     python -m oact_utilities.workflows.clean workflow.db jobs/ --purge-failed --execute
+    python -m oact_utilities.workflows.clean workflow.db jobs/ --validate-db
+    python -m oact_utilities.workflows.clean workflow.db jobs/ --purge-incomplete --execute
 """
 
 from __future__ import annotations
@@ -801,6 +811,11 @@ def clean_job_directories(
     if purge_incomplete:
         print("  Purge incomplete (running/to_run/timeout): yes")
         print(
+            "  NOTE: FINAL cleanup only -- not for an active campaign. This "
+            "deletes dirs the DB still calls running/to_run/timeout; only run "
+            "when the campaign is finished and nothing is executing."
+        )
+        print(
             "  Tip: run 'dashboard --update <root> --recheck-completed --unzip' "
             "first so completed jobs are reconciled out of the purge set."
         )
@@ -1178,8 +1193,9 @@ def main() -> None:
     action.add_argument(
         "--purge-incomplete",
         action="store_true",
-        help="Full-purge running/to_run/timeout dirs confirmed incomplete by "
-        "content; writes .do_not_rerun.json marker (runs --validate-db first)",
+        help="FINAL cleanup only (not for an active campaign): full-purge "
+        "running/to_run/timeout dirs confirmed incomplete by content; writes "
+        ".do_not_rerun.json marker (runs --validate-db first)",
     )
     action.add_argument(
         "--validate-db",

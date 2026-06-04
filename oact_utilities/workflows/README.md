@@ -853,6 +853,14 @@ Removes all contents from failed job directories except a `.do_not_rerun.json` m
 
 ### Purging Incomplete Jobs (`--purge-incomplete`)
 
+> **FINAL cleanup only -- not for an ongoing campaign.** `--purge-incomplete`
+> deletes directories for jobs the DB still calls `running` / `to_run` /
+> `timeout`. During an active campaign those statuses mean "in flight", so
+> running this would destroy live or pending work. Only use it once the campaign
+> is finished and nothing is executing (e.g. after transferring the dataset and
+> DB to their final home). For trimming scratch during a live run, use
+> `--clean-all` (completed jobs) or the Parsl inline `--clean-on-complete` hook.
+
 For reclaiming space on a "final home" (e.g. ALCF) after a dataset and its DB are
 transferred, `--purge-incomplete` full-purges the leftover non-corpus jobs whose
 DB status is `running` / `to_run` / `timeout`. The DB status only selects
