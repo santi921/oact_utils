@@ -14,8 +14,15 @@ alone can eat ~half of it (that is the "out of space" you hit). Use a virtualenv
 in PROJECT instead. Run on a LOGIN node (needs internet for niche PyPI deps):
 
 ```bash
+# Fir (direct egress):
 bash setup_venv.sh "$HOME/projects/def-yqw/$USER/oact-env" python/3.11
+# Rorqual/Narval/Tamia (restricted egress -- pass the proxy module 3rd):
+bash setup_venv.sh "$HOME/links/projects/def-yqw/$USER/oact-env" python/3.11 httpproxy
 ```
+
+Calcul Quebec clusters block outbound internet; the 3rd arg loads `httpproxy`
+(after the script's `module --force purge`) so pip can reach PyPI and git can
+reach GitHub. Omit it where egress is direct.
 
 It loads modules first, builds the venv, installs the scientific core from the
 wheelhouse (`--no-index`) and quacc/sella/parsl/etc from PyPI (pinned so they
