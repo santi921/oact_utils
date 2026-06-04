@@ -729,6 +729,34 @@ class TestCheckRowAlignment:
         outcome, _ = _check_row_alignment(rec, tmp_path)
         assert outcome is ValidationOutcome.UNVERIFIABLE
 
+    def test_db_omits_actinide_is_match(self, tmp_path):
+        """DB elements/natoms omit the central actinide; orca.inp includes it."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+        _write_orca_inp(job_dir, ["Am", "O", "C", "O"])  # inp has the metal
+        rec = _make_record(1, "O;C;O", 3, job_dir="job_1")  # DB omits Am, natoms=3
+        outcome, inp = _check_row_alignment(rec, tmp_path)
+        assert outcome is ValidationOutcome.MATCH
+        assert inp == "Am;O;C;O"
+
+    def test_two_extra_atoms_is_mismatch(self, tmp_path):
+        """One actinide is tolerated; a second extra atom is not."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+        _write_orca_inp(job_dir, ["Am", "Cl", "O", "C", "O"])  # 2 extra vs DB
+        rec = _make_record(1, "O;C;O", 3, job_dir="job_1")
+        outcome, _ = _check_row_alignment(rec, tmp_path)
+        assert outcome is ValidationOutcome.MISMATCH
+
+    def test_single_extra_nonactinide_is_mismatch(self, tmp_path):
+        """A single extra atom that is not an actinide is a real mismatch."""
+        job_dir = tmp_path / "job_1"
+        job_dir.mkdir()
+        _write_orca_inp(job_dir, ["Fe", "O", "C", "O"])  # Fe is not an actinide
+        rec = _make_record(1, "O;C;O", 3, job_dir="job_1")
+        outcome, _ = _check_row_alignment(rec, tmp_path)
+        assert outcome is ValidationOutcome.MISMATCH
+
 
 class TestValidateDbFolder:
     def test_all_match_passes(self, tmp_path):
