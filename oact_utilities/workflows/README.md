@@ -851,13 +851,64 @@ Removes all contents from failed job directories except a `.do_not_rerun.json` m
 - Preserves diagnostic information for post-hoc analysis
 - Reclaims disk space from jobs that will not be retried
 
+### Purging Incomplete Jobs (`--purge-incomplete`)
+
+For reclaiming space on a "final home" (e.g. ALCF) after a dataset and its DB are
+transferred, `--purge-incomplete` full-purges the leftover non-corpus jobs whose
+DB status is `running` / `to_run` / `timeout`. The DB status only selects
+candidates; the **on-disk content check decides the action** (content beats DB
+status):
+
+- content says completed (`1`) -> **protected**, never deleted (it belongs in the
+  corpus, even if the DB row is linked to the wrong directory)
+- content says failed (`-1`) -> **skipped**; run `--purge-failed` to preserve the
+  failure reason in the marker
+- content confirms incomplete (`0` / `-2`) -> **purged** (full delete +
+  `.do_not_rerun.json` marker carrying `purge_type: "incomplete_archive"`,
+  `db_status_at_purge`, and `disk_status_code`)
+
+The content check runs *before* the marker write, so a job that finishes between
+the candidate query and the worker is protected rather than marked.
+
+`--purge-incomplete` runs `--validate-db` first (hard gate). Recommended sequence:
+
+```bash
+# 0. Reconcile completed status from content first (so completed jobs are excluded)
+python -m oact_utilities.workflows.dashboard workflow.db --update jobs/ --recheck-completed --unzip
+# 1. Sanity-check that the DB maps to these folders (read-only)
+python -m oact_utilities.workflows.clean workflow.db jobs/ --validate-db
+# 2. Dry-run, then execute
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --purge-failed --purge-incomplete
+python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --purge-failed --purge-incomplete --execute
+```
+
+### DB <-> Folder Validation (`--validate-db`)
+
+A light sanity check that the DB handed to the tool maps to the directories on
+disk, catching gross operator error (wrong `--root`, wrong `.db`) before any
+destructive action. It samples up to 100 rows (stratified to include the
+running/to_run/timeout purge population), parses each `orca.inp` with
+`read_geom_from_inp_file`, and compares the element multiset + atom count against
+the DB. Outcomes bucket into MATCH / MISMATCH / UNVERIFIABLE. The gate **hard-aborts**
+(exit non-zero) on any MISMATCH, or fails closed when fewer than half the sampled
+rows could be verified. `--skip-validation` (alias `--force`) bypasses the gate
+with a loud warning. It is not the primary safety mechanism -- the per-job content
+check is -- but it is a cheap early abort.
+
 ### Safety Features
 
 - **Dry-run by default**: No `--execute` flag means preview only
 - **Revalidation**: Each completed job is re-checked on disk before cleanup
+- **Content check is the purge safety net**: `--purge-incomplete` deletes only
+  when on-disk content confirms no successful termination; completed jobs are
+  protected regardless of DB status
+- **Validation gate**: `--purge-incomplete` runs `--validate-db` first and refuses
+  to delete on a DB<->folder mismatch (override with `--skip-validation`)
 - **Exclusion list**: Critical files (orca.out, orca.inp, orca.engrad, orca.gbw, etc.) are never deleted
 - **Path safety**: Job directories must resolve within root_dir (prevents traversal attacks)
-- **TOCTOU protection**: `--purge-failed` re-checks DB status before deletion
+- **TOCTOU protection**: `--purge-failed` and `--purge-incomplete` re-check DB status before deletion
+- **Marker-first delete**: nothing is deleted unless the `.do_not_rerun.json` marker is written successfully
+- **Symlink-safe**: directory sizing does not traverse symlinks into the corpus
 - **Read-only DB**: The cleanup utility never modifies the workflow database
 
 ### CLI Reference
@@ -870,9 +921,14 @@ Action flags (at least one required):
   --clean-bas             Remove basis set files from completed jobs
   --clean-all             Remove all scratch categories (--clean-tmp + --clean-bas)
   --purge-failed          Purge failed job directories
+  --purge-incomplete      Full-purge running/to_run/timeout dirs confirmed
+                          incomplete by content (runs --validate-db first)
+  --validate-db           DB<->folder sanity check (elements + atom count);
+                          exits non-zero on mismatch
 
 Execution control:
   --execute               Actually delete files (default: dry-run)
+  --skip-validation       Bypass the --purge-incomplete validation gate (alias --force)
 
 Performance:
   --workers N             Parallel workers (default: 4)

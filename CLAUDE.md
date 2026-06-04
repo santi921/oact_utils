@@ -445,9 +445,16 @@ python -m oact_utilities.workflows.clean <db> <root_dir> [options]
 --clean-bas             # Remove .bas, .bas[N] from completed jobs
 --clean-all             # Both --clean-tmp and --clean-bas
 --purge-failed          # Purge failed jobs (write .do_not_rerun.json marker, delete contents)
+--purge-incomplete      # Full-purge running/to_run/timeout dirs confirmed incomplete by
+                        # on-disk content (1=completed protected, -1=failed skipped,
+                        # 0/-2 purged). Writes .do_not_rerun.json marker. Runs --validate-db first.
+--validate-db           # DB<->folder sanity check (elements + atom count) on a stratified
+                        # sample; hard-aborts on mismatch or too few verifiable rows. Exits
+                        # non-zero on failure. Implied by --purge-incomplete.
 
 # Execution
 --execute               # Actually delete (default: dry-run preview)
+--skip-validation       # (alias --force) Bypass the --purge-incomplete validation gate (loud warning)
 
 # Performance / output
 --workers N             # Parallel workers (default: 4)
@@ -455,6 +462,21 @@ python -m oact_utilities.workflows.clean <db> <root_dir> [options]
 --verbose / -v          # Per-file listings
 --hours-cutoff H        # Timeout threshold for revalidation (default: 24)
 ```
+
+**Final-home reclamation (post-transfer to ALCF):** to reclaim space from
+leftover non-corpus jobs after a dataset+DB are moved to their final home, first
+reconcile completed status from content, then validate, dry-run, and execute:
+
+```bash
+python -m oact_utilities.workflows.dashboard final.db --update jobs/ --recheck-completed --unzip
+python -m oact_utilities.workflows.clean final.db jobs/ --validate-db
+python -m oact_utilities.workflows.clean final.db jobs/ --clean-all --purge-failed --purge-incomplete
+python -m oact_utilities.workflows.clean final.db jobs/ --clean-all --purge-failed --purge-incomplete --execute
+```
+
+The per-job content check is the real safety net: a `running`/`timeout` row whose
+output actually terminated normally is **protected** (kept in the corpus) even if
+the DB<->folder mapping is imperfect. clean.py never writes the DB.
 
 ### 4. Analysis & Parsing
 
