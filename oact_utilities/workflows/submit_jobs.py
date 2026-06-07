@@ -2816,6 +2816,7 @@ def submit_batch(
     openmpi_module: str = SANDIA_DEFAULT_OPENMPI_MODULE,
     module_load: str = DRAC_DEFAULT_MODULE_LOAD,
     venv_path: str | None = None,
+    mem_per_cpu: str | None = None,
 ) -> list[int]:
     """Submit a batch of ready jobs to the HPC scheduler.
 
@@ -2854,6 +2855,9 @@ def submit_batch(
             ``site="drac"``); must end in the ORCA module.
         venv_path: virtualenv to activate in the DRAC writer (only used when
             ``site="drac"``); required for the Sella optimizer path.
+        mem_per_cpu: SLURM ``--mem-per-cpu`` emitted in DRAC job scripts (only
+            used when ``site="drac"``), e.g. ``"3900M"``. Without it DRAC grants
+            a tiny default and ORCA is OOM-killed.
 
     Returns:
         List of job IDs that were submitted.
@@ -2993,6 +2997,7 @@ def submit_batch(
                         account=allocation,
                         module_load=module_load,
                         venv_path=venv_path,
+                        mem_per_cpu=mem_per_cpu,
                         optimizer=optimizer,
                     )
                 else:
@@ -3119,6 +3124,16 @@ def main():
             "is sized so total memory stays under 85%% of this value. "
             "Recommended on memory-constrained nodes (Sandia CTS-1: ~60000, "
             "TLCC2: ~30000). Default: no clamp (per-process floor only)."
+        ),
+    )
+    parser.add_argument(
+        "--mem-per-cpu",
+        default=None,
+        metavar="MEM",
+        help=(
+            "SLURM --mem-per-cpu for generated job scripts (only used with "
+            "--hpc-site drac, e.g. '3900M' = the ~4GB/core node ratio). Without "
+            "it DRAC grants a tiny default and ORCA gets OOM-killed."
         ),
     )
     parser.add_argument(
@@ -3628,6 +3643,7 @@ def main():
             openmpi_module=args.openmpi_module,
             module_load=args.module_load,
             venv_path=args.venv_path,
+            mem_per_cpu=args.mem_per_cpu,
         )
 
     print(f"\nTotal jobs submitted: {len(submitted_ids)}")

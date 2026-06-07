@@ -26,6 +26,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=64      # cores to grab: 64 = partial Fir node (schedules
                                   # faster); 192 = whole node. Must be >= MAX_WORKERS*CORES_PER_WORKER.
+#SBATCH --mem-per-cpu=3900M       # node ratio (~4GB/core on Fir/Narval/Nibi/Rorqual);
+                                  # WITHOUT this DRAC gives a tiny default -> ORCA OOM-killed.
 #SBATCH --job-name=parsl-drac
 # No --qos, no --partition: DRAC auto-assigns the partition by time/cores.
 
@@ -69,6 +71,42 @@ unset PYTHONPATH
 # Parsl's ASE/quacc calculator needs a concrete path, not the literal env var.
 ORCA_PATH="${EBROOTORCA}/orca"
 
+# --- memory + core sizing (auto-derived from the SLURM allocation) -----------
+# ORCA's %maxcore is per MPI rank; with MAX_WORKERS jobs running at once the
+# memory sum must fit the allocation or the kernel OOM-kills ranks -- which
+# surfaces (confusingly) as ORCA "aborting the run". Derive --mem-per-job from
+# the allocation so it can't be hand-mis-set.
+_cores_needed=$(( MAX_WORKERS * CORES_PER_WORKER ))
+_alloc_cpus="${SLURM_CPUS_ON_NODE:-}"
+
+# Core-oversubscription guard: more worker cores than the allocation has means
+# ORCA's ranks fight over too few cores (intermittent MPI-startup aborts).
+if [ -n "${_alloc_cpus}" ] && [ "${_cores_needed}" -gt "${_alloc_cpus}" ]; then
+    echo "ERROR: MAX_WORKERS*CORES_PER_WORKER=${_cores_needed} > allocated cores ${_alloc_cpus}." >&2
+    echo "       Lower MAX_WORKERS/CORES_PER_WORKER or raise #SBATCH --ntasks-per-node." >&2
+    exit 1
+fi
+
+# Per-job memory budget = node memory / workers. SLURM exposes the allocation as
+# SLURM_MEM_PER_NODE (from --mem) or SLURM_MEM_PER_CPU (from --mem-per-cpu).
+if [ -n "${SLURM_MEM_PER_NODE:-}" ]; then
+    _alloc_mem_mb="${SLURM_MEM_PER_NODE}"
+elif [ -n "${SLURM_MEM_PER_CPU:-}" ] && [ -n "${_alloc_cpus}" ]; then
+    _alloc_mem_mb=$(( SLURM_MEM_PER_CPU * _alloc_cpus ))
+else
+    _alloc_mem_mb=""
+fi
+
+if [ -n "${_alloc_mem_mb}" ]; then
+    MEM_PER_JOB=$(( _alloc_mem_mb / MAX_WORKERS ))
+    echo "auto --mem-per-job=${MEM_PER_JOB} MB  (alloc ${_alloc_mem_mb} MB / ${MAX_WORKERS} workers)"
+else
+    # Not inside an allocation (e.g. dry test on a login node). Fall back to the
+    # node-ratio share so %maxcore is still clamped.
+    MEM_PER_JOB=$(( CORES_PER_WORKER * 3900 ))
+    echo "WARNING: no SLURM memory in env; using fallback --mem-per-job=${MEM_PER_JOB} MB." >&2
+fi
+
 # MAX_ATOMS=0 (or empty) means no size cap. argparse rejects --max-atoms 0, so
 # normalize 0 -> empty and drop the flag entirely; any positive value caps size.
 [ "${MAX_ATOMS:-0}" = "0" ] && MAX_ATOMS=""
@@ -87,6 +125,7 @@ python -m oact_utilities.workflows.submit_jobs \
     --n-cores "${CORES_PER_WORKER}" \
     --job-timeout "${JOB_TIMEOUT}" \
     --max-fail-count "${MAX_FAIL_COUNT}" \
+    --mem-per-job "${MEM_PER_JOB}" \
     ${MAX_ATOMS:+--max-atoms "${MAX_ATOMS}"} \
     --max-blocks 1 \
     --functional "${FUNCTIONAL}" \
