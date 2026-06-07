@@ -36,6 +36,9 @@ N_CORES=16                  # cores per job == %pal nprocs in the .inp
 N_HOURS=3                   # keep <=3h to ride backfill on the largest node pool
 MAX_FAIL_COUNT=10
 MAX_ATOMS=                  # optional: only submit molecules with natoms <= this
+MEM_PER_CPU_MB=3900         # SLURM --mem-per-cpu (node ratio ~4GB/core on Fir/
+                            # Narval/Nibi/Rorqual). WITHOUT it DRAC's tiny default
+                            # OOM-kills ORCA. The per-job %maxcore clamp derives from it.
 
 # ORCA settings
 FUNCTIONAL="wB97M-V"
@@ -55,6 +58,10 @@ source "${VENV_PATH}/bin/activate"
 # venv's numpy/pandas with mismatched module copies.
 unset PYTHONPATH
 
+# Each per-molecule job reserves N_CORES x MEM_PER_CPU_MB; clamp ORCA's %maxcore
+# to that same budget so a big molecule can't blow past the allocation -> OOM.
+MEM_PER_JOB=$(( N_CORES * MEM_PER_CPU_MB ))
+
 # No --orca-path (uses module's $EBROOTORCA/orca), no --use-parsl, no --qos/--partition.
 python -m oact_utilities.workflows.submit_jobs \
     "${DB_PATH}" \
@@ -64,6 +71,8 @@ python -m oact_utilities.workflows.submit_jobs \
     --allocation "${ACCOUNT}" \
     --module-load "${MODULE_LOAD}" \
     --venv-path "${VENV_PATH}" \
+    --mem-per-cpu "${MEM_PER_CPU_MB}M" \
+    --mem-per-job "${MEM_PER_JOB}" \
     --batch-size "${BATCH_SIZE}" \
     --n-cores "${N_CORES}" \
     --n-hours "${N_HOURS}" \
