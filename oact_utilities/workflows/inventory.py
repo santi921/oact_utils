@@ -3,10 +3,9 @@
 Walks every job directory under a root and reports, per directory and in
 aggregate, how many files/subdirectories it holds, the cumulative byte size,
 the breakdown by file type, and whether it carries nested scratch directories
-(``orca_tmp_*``). This is a pure-filesystem audit -- it never opens the workflow
-DB and never deletes anything. Use it to find the directories whose size is
-"quite frankly ridiculous" and to see exactly what is sitting in them before
-deciding how to clean.
+(``orca_tmp_*``). By default this is a pure-filesystem audit -- it never opens
+the workflow DB and deletes nothing. Use it to find the directories whose size
+is "quite frankly ridiculous" and to see exactly what is sitting in them.
 
 The scratch-vs-essential classification mirrors clean.py exactly (the patterns
 are imported from it), so the "reclaimable" totals here match what
@@ -14,10 +13,24 @@ are imported from it), so the "reclaimable" totals here match what
 inventory with the DB (job status, orig_index) is intentionally out of scope --
 do that later with clean.
 
+Optional DB-blind scratch deletion (``--clean-tmp`` / ``--clean-bas`` /
+``--clean-all``, gated behind ``--execute``) removes the same direct-child
+scratch that clean removes -- ``.tmp``, ``core``/``core.N``/``.core``,
+``orca_tmp_*/`` (tmp) and ``.bas``/``.basN`` (bas) -- but from EVERY directory on
+disk regardless of DB status. That is the point: it reclaims scratch from
+running/to_run/delinked dirs that the DB-attached clean will not touch. It is
+also the danger: being DB-blind, it cannot tell a running job from a finished
+one and will happily delete the scratch a live ORCA process is using. Only run
+``--execute`` when the campaign is finished and nothing is executing. Essential
+corpus files (orca.out/inp/engrad/gbw, sella state, markers, ...) are never
+matched.
+
 Usage:
     python -m oact_utilities.workflows.inventory jobs/
     python -m oact_utilities.workflows.inventory jobs/ --top 40
     python -m oact_utilities.workflows.inventory jobs/ --csv inventory.csv
+    python -m oact_utilities.workflows.inventory jobs/ --clean-tmp           # dry run
+    python -m oact_utilities.workflows.inventory jobs/ --clean-tmp --execute
 """
 
 from __future__ import annotations
@@ -27,6 +40,7 @@ import csv
 import heapq
 import os
 import re
+import shutil
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,13 +48,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # Single source of truth for what counts as scratch vs. an essential corpus
-# file. Imported from clean.py so this audit and the actual cleanup never drift.
+# file, and for how scratch is matched/sized. Imported from clean.py so this
+# audit (and its optional delete) and the actual cleanup never drift.
 from .clean import (
     _BAS_FILE_PATTERNS,
     _ORCA_TMP_DIR_RE,
     _TMP_FILE_PATTERNS,
     _format_size,
+    _get_dir_size,
     _is_excluded,
+    _match_cleanup_patterns,
 )
 
 try:
@@ -133,6 +150,10 @@ class JobInventory:
     # (job-relative path, size) for the largest files in this job.
     largest_files: list[tuple[str, int]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Optional scratch-delete accounting (populated only when cleaning).
+    clean_matched: int = 0  # direct-child scratch entries matched
+    clean_bytes: int = 0  # bytes of matched scratch (would-free in dry run)
+    clean_freed: int = 0  # bytes actually deleted (0 in dry run)
 
     @property
     def reclaimable_bytes(self) -> int:
@@ -140,12 +161,60 @@ class JobInventory:
         return self.total_bytes - self.class_bytes.get(_CLASS_ESSENTIAL, 0)
 
 
-def scan_job_dir(job_dir: Path) -> JobInventory:
+def _delete_scratch(
+    job_dir: Path, categories: frozenset[str], execute: bool, inv: JobInventory
+) -> None:
+    """Delete direct-child scratch from one job dir, mirroring clean.py.
+
+    DB-blind: no status check, no revalidation. Matches exactly the entries
+    clean's ``_process_job`` would (via ``_match_cleanup_patterns``) -- so
+    essential files are never touched -- but acts on whatever directory it is
+    given. Updates ``inv`` clean counters in place.
+    """
+    try:
+        entries = list(job_dir.iterdir())
+    except OSError as e:
+        inv.errors.append(f"{job_dir}: cannot list for clean: {e}")
+        return
+
+    for entry in entries:
+        is_dir = entry.is_dir()
+        if not _match_cleanup_patterns(entry.name, is_dir, set(categories)):
+            continue
+        try:
+            size = _get_dir_size(entry) if is_dir else entry.stat().st_size
+        except OSError:
+            size = 0
+        inv.clean_matched += 1
+        inv.clean_bytes += size
+        if execute:
+            try:
+                if is_dir:
+                    if entry.is_symlink():
+                        entry.unlink()  # remove the link, do not follow it
+                    else:
+                        shutil.rmtree(str(entry), ignore_errors=True)
+                else:
+                    entry.unlink()
+                inv.clean_freed += size
+            except (OSError, PermissionError) as e:
+                inv.errors.append(f"{entry}: deletion failed: {e}")
+
+
+def scan_job_dir(
+    job_dir: Path,
+    clean_categories: frozenset[str] = frozenset(),
+    execute: bool = False,
+) -> JobInventory:
     """Recursively inventory one job directory without following symlinks.
 
     Symlinked files contribute 0 bytes and symlinked directories are not
     descended into (mirrors clean.py's size accounting so a link into the final
     corpus is never counted as local weight).
+
+    When ``clean_categories`` is non-empty the directory is inventoried first
+    (so the report reflects what was there), then its direct-child scratch in
+    those categories is deleted -- preview only unless ``execute`` is True.
     """
     inv = JobInventory(path=job_dir)
     files_seen: list[tuple[str, int]] = []
@@ -188,6 +257,10 @@ def scan_job_dir(job_dir: Path) -> JobInventory:
     inv.largest_files = heapq.nlargest(
         _PER_JOB_TOP_FILES, files_seen, key=lambda t: t[1]
     )
+
+    if clean_categories:
+        _delete_scratch(job_dir, clean_categories, execute, inv)
+
     return inv
 
 
@@ -215,16 +288,33 @@ class Corpus:
     total_nested_tmp_dirs: int = 0
     nested_tmp_bytes: int = 0
     errors: list[str] = field(default_factory=list)
+    # Scratch-delete accounting (zero unless cleaning was requested).
+    clean_categories: frozenset[str] = frozenset()
+    clean_execute: bool = False
+    clean_matched: int = 0
+    clean_bytes: int = 0
+    clean_freed: int = 0
 
 
-def inventory_root(root: Path, workers: int = 8, limit: int | None = None) -> Corpus:
+def inventory_root(
+    root: Path,
+    workers: int = 8,
+    limit: int | None = None,
+    clean_categories: frozenset[str] = frozenset(),
+    execute: bool = False,
+) -> Corpus:
     """Scan every immediate subdirectory of ``root`` as a job directory.
 
     Files sitting directly under ``root`` (not inside a job subdirectory) are
     tallied separately as "loose" and not classified.
+
+    When ``clean_categories`` is non-empty, each job's direct-child scratch in
+    those categories is deleted after it is inventoried (preview only unless
+    ``execute`` is True). DB-blind -- see the module docstring for the safety
+    contract.
     """
     root = root.resolve()
-    corpus = Corpus(root=root)
+    corpus = Corpus(root=root, clean_categories=clean_categories, clean_execute=execute)
 
     job_dirs: list[Path] = []
     for entry in sorted(root.iterdir()):
@@ -246,12 +336,16 @@ def inventory_root(root: Path, workers: int = 8, limit: int | None = None) -> Co
 
     print(f"Scanning {len(job_dirs)} job directories under {root} ...")
 
+    desc = "Cleaning" if clean_categories else "Scanning"
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(scan_job_dir, jd): jd for jd in job_dirs}
+        futures = {
+            pool.submit(scan_job_dir, jd, clean_categories, execute): jd
+            for jd in job_dirs
+        }
         completed_iter = as_completed(futures)
         if tqdm is not None:
             completed_iter = tqdm(
-                completed_iter, total=len(futures), desc="Scanning", unit="job"
+                completed_iter, total=len(futures), desc=desc, unit="job"
             )
         for fut in completed_iter:
             inv = fut.result()
@@ -267,6 +361,9 @@ def inventory_root(root: Path, workers: int = 8, limit: int | None = None) -> Co
                 corpus.jobs_with_nested_tmp += 1
                 corpus.total_nested_tmp_dirs += inv.n_nested_tmp_dirs
                 corpus.nested_tmp_bytes += inv.nested_tmp_bytes
+            corpus.clean_matched += inv.clean_matched
+            corpus.clean_bytes += inv.clean_bytes
+            corpus.clean_freed += inv.clean_freed
             corpus.errors.extend(inv.errors)
 
     corpus.jobs.sort(key=lambda j: j.total_bytes, reverse=True)
@@ -336,6 +433,18 @@ def _print_report(corpus: Corpus, top: int) -> None:
     print(f"  Total nested tmp dirs:         {corpus.total_nested_tmp_dirs}")
     print(f"  Bytes inside nested tmp dirs:  {_format_size(corpus.nested_tmp_bytes)}")
 
+    # --- Scratch deletion (only when --clean-* requested) ---
+    if corpus.clean_categories:
+        verb = "Deleted" if corpus.clean_execute else "Would delete"
+        cats = ", ".join(sorted(corpus.clean_categories))
+        print(f"\n--- Scratch deletion ({cats}) ---")
+        print(f"  Entries matched (direct-child): {corpus.clean_matched}")
+        print(f"  {verb}: {_format_size(corpus.clean_bytes)}")
+        if corpus.clean_execute:
+            print(f"  Actually freed: {_format_size(corpus.clean_freed)}")
+        else:
+            print("  DRY RUN -- re-run with --execute to delete.")
+
     # --- Largest job directories ---
     print(f"\n--- Largest {top} job directories ---")
     print("  size | files | subdirs | nested_tmp | job_dir")
@@ -399,6 +508,8 @@ def _write_csv(corpus: Corpus, csv_path: Path) -> None:
         "scratch_bas_bytes",
         "other_bytes",
         "reclaimable_bytes",
+        "clean_matched",
+        "clean_bytes",
         "largest_file",
         "largest_file_bytes",
         "top_exts",
@@ -428,6 +539,8 @@ def _write_csv(corpus: Corpus, csv_path: Path) -> None:
                     inv.class_bytes.get(_CLASS_SCRATCH_BAS, 0),
                     inv.class_bytes.get(_CLASS_OTHER, 0),
                     inv.reclaimable_bytes,
+                    inv.clean_matched,
+                    inv.clean_bytes,
                     largest_name,
                     largest_bytes,
                     top_exts,
@@ -483,13 +596,69 @@ def main() -> None:
         metavar="N",
         help="Limit to first N job directories for testing",
     )
+
+    clean = parser.add_argument_group(
+        "optional scratch deletion (DB-blind -- only run when nothing is executing)"
+    )
+    clean.add_argument(
+        "--clean-tmp",
+        action="store_true",
+        help="Delete direct-child .tmp, core/core.N/.core, and orca_tmp_*/ dirs",
+    )
+    clean.add_argument(
+        "--clean-bas",
+        action="store_true",
+        help="Delete direct-child .bas and .basN files",
+    )
+    clean.add_argument(
+        "--clean-all",
+        action="store_true",
+        help="Delete both tmp and bas scratch (equivalent to --clean-tmp --clean-bas)",
+    )
+    clean.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually delete matched scratch (default: dry-run preview only)",
+    )
     args = parser.parse_args()
 
     if not args.root_dir.is_dir():
         print(f"Error: root directory not found: {args.root_dir}", file=sys.stderr)
         sys.exit(1)
 
-    corpus = inventory_root(args.root_dir, workers=args.workers, limit=args.debug)
+    categories: set[str] = set()
+    if args.clean_tmp or args.clean_all:
+        categories.add("tmp")
+    if args.clean_bas or args.clean_all:
+        categories.add("bas")
+
+    if args.execute and not categories:
+        parser.error(
+            "--execute requires a clean flag (--clean-tmp/--clean-bas/--clean-all)"
+        )
+
+    if categories:
+        mode = "EXECUTE (deleting)" if args.execute else "DRY RUN (preview only)"
+        print("!" * 70)
+        print(
+            f"  SCRATCH DELETION REQUESTED [{mode}] -- categories: "
+            f"{', '.join(sorted(categories))}"
+        )
+        print("  This is DB-BLIND: it deletes matched scratch from EVERY directory")
+        print("  on disk, including running/to_run/delinked jobs. It cannot tell a")
+        print("  live ORCA run from a finished one. Only --execute when the campaign")
+        print(
+            "  is finished and nothing is executing. Essential files are never matched."
+        )
+        print("!" * 70)
+
+    corpus = inventory_root(
+        args.root_dir,
+        workers=args.workers,
+        limit=args.debug,
+        clean_categories=frozenset(categories),
+        execute=args.execute,
+    )
     _print_report(corpus, top=args.top)
     if args.csv is not None:
         _write_csv(corpus, args.csv)

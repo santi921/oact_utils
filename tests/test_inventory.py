@@ -118,3 +118,49 @@ def test_loose_files_at_root_counted_separately(tmp_path: Path) -> None:
     assert corpus.loose_files == 1
     assert corpus.loose_bytes == 123
     assert len(corpus.jobs) == 2  # the loose file is not treated as a job dir
+
+
+def test_clean_tmp_dry_run_matches_but_keeps_files(tmp_path: Path) -> None:
+    _build_corpus(tmp_path)
+    j0 = tmp_path / "job_0"
+    corpus = inventory_root(
+        tmp_path, workers=2, clean_categories=frozenset({"tmp"}), execute=False
+    )
+    # job_0 has a stray orca.tmp (500) + the orca_tmp_abc123/ dir (5000).
+    assert corpus.clean_matched == 2
+    assert corpus.clean_bytes == 5500
+    assert corpus.clean_freed == 0  # dry run deletes nothing
+    assert (j0 / "orca.tmp").exists()
+    assert (j0 / "orca_tmp_abc123").is_dir()
+    assert (j0 / "orca.out").exists()
+
+
+def test_clean_tmp_execute_deletes_scratch_only(tmp_path: Path) -> None:
+    _build_corpus(tmp_path)
+    j0 = tmp_path / "job_0"
+    j1 = tmp_path / "job_1"
+    corpus = inventory_root(
+        tmp_path, workers=2, clean_categories=frozenset({"tmp"}), execute=True
+    )
+    assert corpus.clean_freed == 5500
+    # tmp scratch gone
+    assert not (j0 / "orca.tmp").exists()
+    assert not (j0 / "orca_tmp_abc123").exists()
+    # essential + non-tmp scratch preserved
+    assert (j0 / "orca.out").exists()
+    assert (j0 / "orca.inp").exists()
+    assert (j1 / "orca.bas1").exists()  # bas not requested
+    assert (j1 / "data.weird").exists()  # unknown file never matched
+
+
+def test_clean_all_execute_removes_tmp_and_bas(tmp_path: Path) -> None:
+    _build_corpus(tmp_path)
+    j1 = tmp_path / "job_1"
+    corpus = inventory_root(
+        tmp_path, workers=2, clean_categories=frozenset({"tmp", "bas"}), execute=True
+    )
+    # tmp (5500) + bas (300) freed; the unknown .weird file is left behind.
+    assert corpus.clean_freed == 5800
+    assert not (j1 / "orca.bas1").exists()
+    assert (j1 / "data.weird").exists()
+    assert (j1 / "orca.out").exists()
