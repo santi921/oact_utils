@@ -18,6 +18,12 @@ Usage:
     python -m oact_utilities.workflows.clean workflow.db jobs/ --purge-failed --execute
     python -m oact_utilities.workflows.clean workflow.db jobs/ --validate-db
     python -m oact_utilities.workflows.clean workflow.db jobs/ --purge-incomplete --execute
+    python -m oact_utilities.workflows.clean workflow.db moved_jobs/ --clean-all --reroot
+
+When a corpus is moved to a new root after submission, the DB's stored job_dir
+paths go stale and clean would silently skip those jobs. Pass --reroot to
+resolve each job to <root_dir>/<basename> instead; the skip breakdown printed by
+each phase tells you how many rows had no usable directory.
 """
 
 from __future__ import annotations
@@ -227,14 +233,30 @@ def _get_dir_size(path: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_job_dir(job_dir_value: str, root_dir: Path) -> Path | None:
+def _resolve_job_dir(
+    job_dir_value: str, root_dir: Path, reroot: bool = False
+) -> Path | None:
     """Resolve a job_dir DB value to a safe absolute path.
 
     Returns None if the resolved path escapes root_dir.
+
+    When ``reroot`` is True, the stored directory component is discarded and the
+    path is rebuilt as ``root_dir / <basename>``. This recovers a corpus that was
+    moved to a new root after submission: the DB still holds the original
+    submission path, but the leaf directory name (e.g. ``job_1039``) is
+    preserved. It is basename-based, so -- unlike reconstructing from a
+    job_dir_pattern -- it is independent of the pattern/prefix used at submit
+    time. Returns None if the basename is empty (e.g. a stored value of ``..``).
     """
-    raw = Path(job_dir_value)
-    if not raw.is_absolute():
-        raw = root_dir / raw
+    if reroot:
+        name = Path(job_dir_value).name
+        if not name:
+            return None
+        raw = root_dir / name
+    else:
+        raw = Path(job_dir_value)
+        if not raw.is_absolute():
+            raw = root_dir / raw
     resolved = raw.resolve()
     root_resolved = root_dir.resolve()
     try:
@@ -242,6 +264,58 @@ def _resolve_job_dir(job_dir_value: str, root_dir: Path) -> Path | None:
     except ValueError:
         return None
     return resolved
+
+
+# Skip reasons reported when a DB row cannot be mapped to a usable directory.
+_SKIP_NULL = "null_job_dir"
+_SKIP_ESCAPES = "escapes_root"
+_SKIP_DIR_MISSING = "dir_missing"
+
+
+def _resolve_for_cleanup(
+    job: JobRecord, root_dir: Path, reroot: bool
+) -> tuple[Path | None, str | None]:
+    """Resolve a job's directory for a cleanup phase.
+
+    Shared by all three phases so resolution and skip-accounting stay identical.
+
+    Returns:
+        ``(resolved_dir, skip_reason)``. ``skip_reason`` is ``_SKIP_NULL`` /
+        ``_SKIP_ESCAPES`` / ``_SKIP_DIR_MISSING`` when the job cannot be
+        processed (and ``resolved_dir`` is None); otherwise ``(dir, None)``.
+    """
+    if job.job_dir is None:
+        return None, _SKIP_NULL
+    resolved = _resolve_job_dir(job.job_dir, root_dir, reroot=reroot)
+    if resolved is None:
+        return None, _SKIP_ESCAPES
+    if not resolved.is_dir():
+        return None, _SKIP_DIR_MISSING
+    return resolved, None
+
+
+def _print_skip_breakdown(skipped: Counter, total: int, reroot: bool) -> None:
+    """Print why rows were skipped, so the gap is never silent.
+
+    Args:
+        skipped: Counter of skip reasons (keys: _SKIP_* constants).
+        total: Total rows considered in this phase.
+        reroot: Whether --reroot is already active (suppresses the hint).
+    """
+    n = sum(skipped.values())
+    if not n:
+        return
+    print(f"  Skipped {n} of {total} rows (no usable directory on disk):")
+    for reason in (_SKIP_DIR_MISSING, _SKIP_ESCAPES, _SKIP_NULL):
+        if skipped.get(reason):
+            print(f"      {reason}: {skipped[reason]}")
+    if not reroot and (skipped.get(_SKIP_DIR_MISSING) or skipped.get(_SKIP_ESCAPES)):
+        print(
+            "      tip: if the corpus was moved to a new root after submission, "
+            "the stored job_dir paths are stale -- re-run with --reroot to match "
+            "dirs by basename under the root (or run the coverage diagnostic "
+            "first: python -m oact_utilities.workflows.diagnose_coverage)."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +353,7 @@ class ValidationResult:
 
 
 def _check_row_alignment(
-    job_record: JobRecord, root_dir: Path
+    job_record: JobRecord, root_dir: Path, reroot: bool = False
 ) -> tuple[ValidationOutcome, str | None]:
     """Compare one DB row's structure against its on-disk orca.inp.
 
@@ -298,7 +372,7 @@ def _check_row_alignment(
     """
     if job_record.job_dir is None:
         return ValidationOutcome.UNVERIFIABLE, "null_job_dir"
-    resolved = _resolve_job_dir(job_record.job_dir, root_dir)
+    resolved = _resolve_job_dir(job_record.job_dir, root_dir, reroot=reroot)
     if resolved is None or not resolved.is_dir():
         # Stored path escaped root, or the directory does not exist (never
         # created, never transferred, or transferred to a different location).
@@ -347,7 +421,7 @@ def _check_row_alignment(
 
 
 def validate_db_folder_alignment(
-    wf: ArchitectorWorkflow, root_dir: Path, workers: int = 4
+    wf: ArchitectorWorkflow, root_dir: Path, workers: int = 4, reroot: bool = False
 ) -> ValidationResult:
     """Sample DB rows and verify they map to the on-disk job directories.
 
@@ -356,6 +430,10 @@ def validate_db_folder_alignment(
     destructive action. NOT the primary safety mechanism -- the per-job content
     check in the purge worker is. The sample is stratified to include the purge
     population (running/to_run/timeout) so the data actually at risk is checked.
+    When ``reroot`` is set, rows are validated against ``root_dir/<basename>`` --
+    the same paths the rerooted cleanup will act on -- so the gate stays
+    meaningful for a moved corpus (stale stored paths would otherwise all read as
+    dir_missing and the gate would fail closed).
 
     Gate (hardcoded, fail-closed): abort on any MISMATCH, or if fewer than
     _VALIDATE_MIN_VERIFIED rows could be verified (capped at the sample size, so
@@ -392,7 +470,8 @@ def validate_db_folder_alignment(
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_check_row_alignment, job, root_dir): job for job in sample
+            pool.submit(_check_row_alignment, job, root_dir, reroot): job
+            for job in sample
         }
         for fut in as_completed(futures):
             job = futures[fut]
@@ -829,6 +908,7 @@ def clean_job_directories(
     purge_incomplete: bool = False,
     validate_db: bool = False,
     skip_validation: bool = False,
+    reroot: bool = False,
 ) -> bool:
     """Orchestrate cleanup of job directories.
 
@@ -849,6 +929,10 @@ def clean_job_directories(
         validate_db: If True, run the DB<->folder alignment sanity check.
         skip_validation: If True, bypass the validation gate for
             --purge-incomplete (a loud warning is printed).
+        reroot: If True, resolve every job to ``root_dir/<basename>`` instead of
+            its stored job_dir. Recovers a corpus moved to a new root after
+            submission (stored paths stale, leaf dir names preserved). Applies to
+            all phases and the validation gate. Writes nothing to the DB.
 
     Returns:
         True on success, False if the validation gate failed (so the caller
@@ -866,6 +950,8 @@ def clean_job_directories(
         print("  Include failed/timeout/to_run: yes")
     if purge_failed:
         print("  Purge failed: yes")
+    if reroot:
+        print("  Reroot: yes (resolve dirs by basename under root, ignore stored path)")
     if purge_incomplete:
         print("  Purge incomplete (running/to_run/timeout): yes")
         print(
@@ -886,7 +972,9 @@ def clean_job_directories(
         # --- Phase 0: DB <-> folder validation gate ---
         run_validation = validate_db or (purge_incomplete and not skip_validation)
         if run_validation:
-            validation = validate_db_folder_alignment(wf, root_dir, workers=workers)
+            validation = validate_db_folder_alignment(
+                wf, root_dir, workers=workers, reroot=reroot
+            )
             _print_validation_report(validation)
             if not validation.passed:
                 if purge_incomplete:
@@ -941,24 +1029,20 @@ def clean_job_directories(
 
             # Build work items: (path, optimizer, skip_revalidation)
             work_items: list[tuple[Path, str | None, bool]] = []
+            clean_skipped: Counter = Counter()
             for job in clean_jobs:
-                if job.job_dir is None:
-                    total_errors.append(f"job id={job.id}: NULL job_dir, skipping")
+                resolved, reason = _resolve_for_cleanup(job, root_dir, reroot)
+                if reason is not None:
+                    clean_skipped[reason] += 1
                     continue
-                resolved = _resolve_job_dir(job.job_dir, root_dir)
-                if resolved is None:
-                    total_errors.append(
-                        f"job id={job.id}: path escapes root_dir ({job.job_dir}), skipping"
-                    )
-                    continue
-                if not resolved.is_dir():
-                    continue
+                assert resolved is not None  # reason is None => resolved is set
                 # Skip revalidation for non-completed jobs -- we already
                 # know they are failed/timeout/to_run from the DB query.
                 skip_reval = job.status != JobStatus.COMPLETED
                 work_items.append((resolved, job.optimizer, skip_reval))
 
             print(f"Processing {len(work_items)} job directories...")
+            _print_skip_breakdown(clean_skipped, len(clean_jobs), reroot)
 
             # Parallel scan/delete
             futures = {}
@@ -1021,21 +1105,13 @@ def clean_job_directories(
             print(f"\nFound {len(failed_jobs)} failed jobs")
 
             purge_items: list[tuple[Path, int, dict[str, str | int | None]]] = []
+            purge_skipped: Counter = Counter()
             for job in failed_jobs:
-                if job.job_dir is None:
-                    total_errors.append(
-                        f"job id={job.id}: NULL job_dir, skipping purge"
-                    )
+                resolved, reason = _resolve_for_cleanup(job, root_dir, reroot)
+                if reason is not None:
+                    purge_skipped[reason] += 1
                     continue
-                resolved = _resolve_job_dir(job.job_dir, root_dir)
-                if resolved is None:
-                    total_errors.append(
-                        f"job id={job.id}: path escapes root_dir ({job.job_dir}), "
-                        f"skipping purge"
-                    )
-                    continue
-                if not resolved.is_dir():
-                    continue
+                assert resolved is not None
                 metadata: dict[str, str | int | None] = {
                     "orig_index": job.orig_index,
                     "elements": job.elements,
@@ -1047,6 +1123,7 @@ def clean_job_directories(
                 purge_items.append((resolved, job.id, metadata))
 
             print(f"Processing {len(purge_items)} failed job directories...")
+            _print_skip_breakdown(purge_skipped, len(failed_jobs), reroot)
 
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 purge_futures = {}
@@ -1104,21 +1181,13 @@ def clean_job_directories(
             inc_items: list[
                 tuple[Path, int, str | None, dict[str, str | int | None]]
             ] = []
+            inc_skipped: Counter = Counter()
             for job in incomplete_jobs:
-                if job.job_dir is None:
-                    total_errors.append(
-                        f"job id={job.id}: NULL job_dir, skipping purge"
-                    )
+                resolved, reason = _resolve_for_cleanup(job, root_dir, reroot)
+                if reason is not None:
+                    inc_skipped[reason] += 1
                     continue
-                resolved = _resolve_job_dir(job.job_dir, root_dir)
-                if resolved is None:
-                    total_errors.append(
-                        f"job id={job.id}: path escapes root_dir ({job.job_dir}), "
-                        f"skipping purge"
-                    )
-                    continue
-                if not resolved.is_dir():
-                    continue
+                assert resolved is not None
                 inc_meta: dict[str, str | int | None] = {
                     "orig_index": job.orig_index,
                     "elements": job.elements,
@@ -1128,6 +1197,7 @@ def clean_job_directories(
                 inc_items.append((resolved, job.id, job.optimizer, inc_meta))
 
             print(f"Processing {len(inc_items)} incomplete job directories...")
+            _print_skip_breakdown(inc_skipped, len(incomplete_jobs), reroot)
 
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 inc_futures = {}
@@ -1274,6 +1344,15 @@ def main() -> None:
         action="store_true",
         help="Bypass the --purge-incomplete validation gate (prints a loud warning)",
     )
+    parser.add_argument(
+        "--reroot",
+        action="store_true",
+        help="Resolve each job to <root_dir>/<basename> instead of its stored "
+        "job_dir. Use when the corpus was moved to a new root after submission "
+        "(stored paths stale, leaf dir names preserved). Basename-based, so it "
+        "is independent of the job_dir_pattern. Applies to all phases and the "
+        "validation gate; writes nothing to the DB.",
+    )
 
     # Performance
     parser.add_argument(
@@ -1348,6 +1427,7 @@ def main() -> None:
         purge_incomplete=args.purge_incomplete,
         validate_db=args.validate_db,
         skip_validation=args.skip_validation,
+        reroot=args.reroot,
     )
     if not ok:
         sys.exit(1)
