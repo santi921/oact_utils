@@ -455,6 +455,11 @@ python -m oact_utilities.workflows.clean <db> <root_dir> [options]
 # Execution
 --execute               # Actually delete (default: dry-run preview)
 --skip-validation       # (alias --force) Bypass the --purge-incomplete validation gate (loud warning)
+--reroot                # Resolve each job to <root_dir>/<basename> instead of its stored
+                        # job_dir. Use when the corpus was moved to a new root after
+                        # submission (stored paths stale, leaf dir names preserved).
+                        # Basename-based (pattern-independent); applies to all phases AND
+                        # the --validate-db gate; writes nothing to the DB.
 
 # Performance / output
 --workers N             # Parallel workers (default: 4)
@@ -462,6 +467,12 @@ python -m oact_utilities.workflows.clean <db> <root_dir> [options]
 --verbose / -v          # Per-file listings
 --hours-cutoff H        # Timeout threshold for revalidation (default: 24)
 ```
+
+Each phase prints a skip breakdown (`dir_missing` / `escapes_root` / `null_job_dir`)
+when rows cannot be mapped to a directory, so a coverage gap is never silent. A large
+`dir_missing`/`escapes_root` count means the stored `job_dir` paths no longer match
+the directories on disk -- run `python -m oact_utilities.workflows.diagnose_coverage <db>
+<root>` to confirm, then re-run clean with `--reroot`.
 
 **Final-home reclamation (post-transfer to ALCF):** `--purge-incomplete` and
 `--validate-db` are for FINAL cleanup of a completed/transferred corpus, **not
@@ -482,6 +493,14 @@ python -m oact_utilities.workflows.clean final.db jobs/ --clean-all --purge-fail
 The per-job content check is the real safety net: a `running`/`timeout` row whose
 output actually terminated normally is **protected** (kept in the corpus) even if
 the DB<->folder mapping is imperfect. clean.py never writes the DB.
+
+**Moved corpus (stored `job_dir` no longer matches disk):** if the corpus was
+transferred to a new root after submission, the DB's stored `job_dir` paths are
+stale and clean would skip those jobs (visible in the per-phase skip breakdown).
+Add `--reroot` to every clean invocation above so each job resolves to
+`<root>/<basename>` instead; it is basename-based (pattern-independent) and also
+reroots the `--validate-db` gate. Writes nothing to the DB, so the stored column
+stays as-is -- rerooting is per-run only.
 
 ### 4. Analysis & Parsing
 

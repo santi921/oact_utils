@@ -9,6 +9,9 @@ from unittest.mock import patch
 
 from oact_utilities.workflows.architector_workflow import ArchitectorWorkflow
 from oact_utilities.workflows.clean import (
+    _SKIP_DIR_MISSING,
+    _SKIP_ESCAPES,
+    _SKIP_NULL,
     ValidationOutcome,
     _check_row_alignment,
     _extract_failure_info,
@@ -18,6 +21,8 @@ from oact_utilities.workflows.clean import (
     _process_job,
     _purge_failed_job,
     _purge_incomplete_job,
+    _resolve_for_cleanup,
+    _resolve_job_dir,
     _write_marker_file,
     clean_job_directories,
     validate_db_folder_alignment,
@@ -1284,3 +1289,123 @@ class TestPurgeIncompleteIntegration:
         )
         assert result.returncode == 1
         assert "FAIL" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Reroot (moved corpus) tests
+# ---------------------------------------------------------------------------
+
+
+class TestRerootResolution:
+    def test_resolve_reroot_uses_basename_under_root(self, tmp_path):
+        """reroot=True ignores the stored dir and rebuilds root/<basename>."""
+        (tmp_path / "job_1039").mkdir()
+        # Stored path points at a now-gone original root; basename is preserved.
+        stored = "/old/submission/root/jobs/job_1039"
+        # Without reroot the absolute stored path escapes root_dir.
+        assert _resolve_job_dir(stored, tmp_path) is None
+        # With reroot it resolves to the real dir under the new root.
+        resolved = _resolve_job_dir(stored, tmp_path, reroot=True)
+        assert resolved == (tmp_path / "job_1039").resolve()
+
+    def test_resolve_reroot_empty_basename_returns_none(self, tmp_path):
+        """A stored value with no basename (e.g. '..') cannot be rerooted."""
+        assert _resolve_job_dir("..", tmp_path, reroot=True) is None
+
+    def test_resolve_reroot_independent_of_pattern(self, tmp_path):
+        """Custom-prefixed dir names are recovered (basename, not pattern)."""
+        (tmp_path / "campaignA_job_7").mkdir()
+        stored = "/elsewhere/campaignA_job_7"
+        resolved = _resolve_job_dir(stored, tmp_path, reroot=True)
+        assert resolved == (tmp_path / "campaignA_job_7").resolve()
+
+
+class TestResolveForCleanup:
+    def test_bins_without_reroot(self, tmp_path):
+        (tmp_path / "job_0").mkdir()
+        ok = _make_record(0, "U;O", 2, job_dir=str(tmp_path / "job_0"))
+        missing = _make_record(1, "U;O", 2, job_dir=str(tmp_path / "job_1"))
+        escapes = _make_record(2, "U;O", 2, job_dir="/outside/job_2")
+        null = _make_record(3, "U;O", 2, job_dir=None)
+
+        assert _resolve_for_cleanup(ok, tmp_path, False)[1] is None
+        assert _resolve_for_cleanup(missing, tmp_path, False)[1] == _SKIP_DIR_MISSING
+        assert _resolve_for_cleanup(escapes, tmp_path, False)[1] == _SKIP_ESCAPES
+        assert _resolve_for_cleanup(null, tmp_path, False)[1] == _SKIP_NULL
+
+    def test_reroot_recovers_stale_path(self, tmp_path):
+        """A stale absolute path that escapes root is recovered under reroot."""
+        (tmp_path / "job_5").mkdir()
+        stale = _make_record(5, "U;O", 2, job_dir="/old/root/job_5")
+        # Without reroot it escapes; with reroot it resolves to the real dir.
+        assert _resolve_for_cleanup(stale, tmp_path, False)[1] == _SKIP_ESCAPES
+        resolved, reason = _resolve_for_cleanup(stale, tmp_path, True)
+        assert reason is None
+        assert resolved == (tmp_path / "job_5").resolve()
+
+
+class TestRerootEndToEnd:
+    def test_clean_recovers_moved_corpus(self, tmp_path):
+        """--reroot lets clean find scratch under a new root for stale paths."""
+        root = tmp_path / "moved_jobs"
+        root.mkdir()
+        # Real dir on disk under the new root, with a scratch file to clean.
+        _create_job_dir(root, "job_0", ["orca.tmp"])
+        # DB row's stored job_dir points at the original (now-gone) root.
+        db_path = _create_test_db(
+            tmp_path / "test.db",
+            [
+                {
+                    "orig_index": 0,
+                    "status": "completed",
+                    "job_dir": "/original/root/jobs/job_0",
+                }
+            ],
+        )
+
+        # Without --reroot: stored path escapes/doesn't exist -> nothing cleaned.
+        clean_job_directories(
+            db_path=db_path,
+            root_dir=root,
+            categories={"tmp"},
+            execute=True,
+        )
+        assert (root / "job_0" / "orca.tmp").exists()
+
+        # With --reroot: resolves to moved_jobs/job_0 and removes the scratch.
+        clean_job_directories(
+            db_path=db_path,
+            root_dir=root,
+            categories={"tmp"},
+            execute=True,
+            reroot=True,
+        )
+        assert not (root / "job_0" / "orca.tmp").exists()
+        assert (root / "job_0" / "orca.out").exists()  # protected file kept
+
+    def test_validate_db_passes_under_reroot_for_moved_corpus(self, tmp_path):
+        """The gate validates rerooted paths, so a moved corpus still passes."""
+        from oact_utilities.workflows.architector_workflow import ArchitectorWorkflow
+
+        root = tmp_path / "moved_jobs"
+        root.mkdir()
+        jd = _create_job_dir(root, "job_0", [])
+        _write_orca_inp(jd, ["U", "O", "O"])
+        db_path = _create_test_db(
+            tmp_path / "test.db",
+            [
+                {
+                    "orig_index": 0,
+                    "status": "timeout",
+                    "elements": "U;O;O",
+                    "natoms": 3,
+                    "job_dir": "/original/root/jobs/job_0",
+                }
+            ],
+        )
+        with ArchitectorWorkflow(db_path) as wf:
+            stale = validate_db_folder_alignment(wf, root)
+            healed = validate_db_folder_alignment(wf, root, reroot=True)
+        # Stale stored path is unverifiable (dir_missing); reroot makes it match.
+        assert stale.match_count == 0
+        assert healed.match_count == 1
