@@ -2652,3 +2652,200 @@ class TestMaxAtomsCLI:
         )
         with pytest.raises(SystemExit):
             mod.main()
+
+
+class TestMinAtomsFilter:
+    """Tests for the --min-atoms submission size floor (filter_jobs_for_submission)."""
+
+    def _make_db(self, tmp_path, natoms_values):
+        """Helper: create a workflow DB with one TO_RUN job per atom count."""
+        from oact_utilities.utils.architector import _init_db, _insert_row
+
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        for i, n in enumerate(natoms_values):
+            _insert_row(
+                conn,
+                orig_index=i,
+                elements=";".join(["H"] * n),
+                natoms=n,
+                geometry="H 0 0 0",
+                status="to_run",
+            )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_floor_excludes_smaller_molecules(self, tmp_path):
+        from oact_utilities.workflows.submit_jobs import filter_jobs_for_submission
+
+        db_path = self._make_db(tmp_path, [2, 50, 100])
+        with ArchitectorWorkflow(db_path) as wf:
+            jobs = filter_jobs_for_submission(
+                wf, num_jobs=10, min_atoms=50, randomize=False
+            )
+        assert sorted(j.natoms for j in jobs) == [50, 100]
+
+    def test_band_selects_closed_interval(self, tmp_path):
+        """min_atoms + max_atoms select the closed band [min, max], both inclusive."""
+        from oact_utilities.workflows.submit_jobs import filter_jobs_for_submission
+
+        db_path = self._make_db(tmp_path, [40, 41, 60, 61])
+        with ArchitectorWorkflow(db_path) as wf:
+            jobs = filter_jobs_for_submission(
+                wf, num_jobs=10, min_atoms=41, max_atoms=60, randomize=False
+            )
+        assert sorted(j.natoms for j in jobs) == [41, 60]
+
+    def test_under_floor_jobs_left_to_run(self, tmp_path):
+        """Filtering does not mutate status: under-floor jobs stay TO_RUN for
+        a smaller-molecule lane and are never claimed."""
+        from oact_utilities.workflows.submit_jobs import filter_jobs_for_submission
+
+        db_path = self._make_db(tmp_path, [2, 100])
+        with ArchitectorWorkflow(db_path) as wf:
+            submitted = filter_jobs_for_submission(
+                wf, num_jobs=10, min_atoms=50, randomize=False
+            )
+            still_ready = wf.get_jobs_by_status(
+                JobStatus.TO_RUN, include_geometry=False
+            )
+        assert [j.natoms for j in submitted] == [100]
+        assert sorted(j.natoms for j in still_ready) == [2, 100]
+
+    def test_null_natoms_excluded(self, tmp_path, capsys):
+        """A NULL natoms row is dropped rather than raising, and reported
+        separately from under-floor skips."""
+        import sqlite3
+
+        from oact_utilities.workflows.submit_jobs import filter_jobs_for_submission
+
+        db_path = self._make_db(tmp_path, [2, 100])
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE structures SET natoms = NULL WHERE orig_index = 0")
+        conn.commit()
+        conn.close()
+
+        with ArchitectorWorkflow(db_path) as wf:
+            jobs = filter_jobs_for_submission(
+                wf, num_jobs=10, min_atoms=50, randomize=False
+            )
+        # orig_index 0 (now NULL) excluded; orig_index 1 (natoms 100) kept.
+        assert [j.natoms for j in jobs] == [100]
+        out = capsys.readouterr().out
+        assert "Skipped 1 jobs with missing (NULL) natoms" in out
+
+
+class TestMinAtomsCLI:
+    """Tests that --min-atoms reaches the submission functions and is validated."""
+
+    def _make_db(self, tmp_path):
+        from oact_utilities.utils.architector import _init_db, _insert_row
+
+        db_path = tmp_path / "test.db"
+        conn = _init_db(db_path)
+        _insert_row(
+            conn,
+            orig_index=0,
+            elements="H;H",
+            natoms=2,
+            geometry="H 0 0 0\nH 0 0 0.74",
+            status="to_run",
+        )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_forwarded_parsl(self, tmp_path, monkeypatch):
+        import sys
+
+        from oact_utilities.workflows import submit_jobs as mod
+
+        db_path = self._make_db(tmp_path)
+        captured = {}
+        monkeypatch.setattr(
+            mod, "submit_batch_parsl", lambda **k: captured.update(k) or []
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "submit_jobs",
+                str(db_path),
+                str(tmp_path / "jobs"),
+                "--use-parsl",
+                "--scheduler",
+                "flux",
+                "--min-atoms",
+                "41",
+                "--max-atoms",
+                "60",
+            ],
+        )
+        mod.main()
+        assert captured["min_atoms"] == 41
+        assert captured["max_atoms"] == 60
+
+    def test_default_is_none(self, tmp_path, monkeypatch):
+        import sys
+
+        from oact_utilities.workflows import submit_jobs as mod
+
+        db_path = self._make_db(tmp_path)
+        captured = {}
+        monkeypatch.setattr(mod, "submit_batch", lambda **k: captured.update(k) or [])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "submit_jobs",
+                str(db_path),
+                str(tmp_path / "jobs"),
+                "--scheduler",
+                "flux",
+            ],
+        )
+        mod.main()
+        assert captured["min_atoms"] is None
+
+    def test_rejects_non_positive(self, tmp_path, monkeypatch):
+        import sys
+
+        from oact_utilities.workflows import submit_jobs as mod
+
+        db_path = self._make_db(tmp_path)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "submit_jobs",
+                str(db_path),
+                str(tmp_path / "jobs"),
+                "--min-atoms",
+                "0",
+            ],
+        )
+        with pytest.raises(SystemExit):
+            mod.main()
+
+    def test_rejects_min_greater_than_max(self, tmp_path, monkeypatch):
+        import sys
+
+        from oact_utilities.workflows import submit_jobs as mod
+
+        db_path = self._make_db(tmp_path)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "submit_jobs",
+                str(db_path),
+                str(tmp_path / "jobs"),
+                "--min-atoms",
+                "60",
+                "--max-atoms",
+                "40",
+            ],
+        )
+        with pytest.raises(SystemExit):
+            mod.main()

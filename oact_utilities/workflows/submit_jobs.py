@@ -940,6 +940,7 @@ def filter_jobs_for_submission(
     max_fail_count: int | None = None,
     randomize: bool = True,
     max_atoms: int | None = None,
+    min_atoms: int | None = None,
 ) -> list:
     """Filter jobs that are ready to submit.
 
@@ -950,6 +951,9 @@ def filter_jobs_for_submission(
         max_atoms: If set, skip jobs with natoms > this value. Jobs above the
             cap are left in their current status for a later batch. Rows with a
             NULL natoms are excluded.
+        min_atoms: If set, skip jobs with natoms < this value. Jobs below the
+            floor are left for another lane. With max_atoms this selects the
+            closed band [min_atoms, max_atoms].
 
     Returns:
         List of JobRecords ready for submission
@@ -966,24 +970,30 @@ def filter_jobs_for_submission(
         if skipped > 0:
             print(f"Skipped {skipped} jobs with fail_count >= {max_fail_count}")
 
-    # Apply atom-count cap if specified. Jobs above the cap are left untouched
-    # for a later (longer wall-time) batch. A NULL natoms is excluded rather
-    # than raising, so a malformed row cannot break submission. Over-cap and
-    # missing-natoms skips are reported separately so the counts are accurate.
-    if max_atoms is not None:
+    # Apply atom-count band if specified. Jobs outside [min_atoms, max_atoms]
+    # are left untouched for another lane. A NULL natoms is excluded rather
+    # than raising, so a malformed row cannot break submission. Over-cap,
+    # under-floor and missing-natoms skips are reported separately so the
+    # counts are accurate.
+    if max_atoms is not None or min_atoms is not None:
         kept = []
         over_cap = 0
+        under_floor = 0
         missing = 0
         for j in ready_jobs:
             if j.natoms is None:
                 missing += 1
-            elif j.natoms > max_atoms:
+            elif max_atoms is not None and j.natoms > max_atoms:
                 over_cap += 1
+            elif min_atoms is not None and j.natoms < min_atoms:
+                under_floor += 1
             else:
                 kept.append(j)
         ready_jobs = kept
         if over_cap > 0:
             print(f"Skipped {over_cap} jobs with natoms > {max_atoms}")
+        if under_floor > 0:
+            print(f"Skipped {under_floor} jobs with natoms < {min_atoms}")
         if missing > 0:
             print(f"Skipped {missing} jobs with missing (NULL) natoms")
 
@@ -2096,6 +2106,7 @@ def submit_batch_parsl(
     dry_run: bool = False,
     max_fail_count: int | None = None,
     max_atoms: int | None = None,
+    min_atoms: int | None = None,
     timeout_seconds: int = 72000,
     randomize: bool = True,
     nodes_per_block: int = 1,
@@ -2140,6 +2151,7 @@ def submit_batch_parsl(
         dry_run: Prepare but don't submit
         max_fail_count: Skip jobs with fail_count >= this value
         max_atoms: If set, only submit molecules with natoms <= this value
+        min_atoms: If set, only submit molecules with natoms >= this value
         timeout_seconds: Job timeout in seconds (default: 72000 = 20 hours)
         randomize: Randomize job selection order (default: True)
         nodes_per_block: Nodes per scheduler block for scale-out Parsl.
@@ -2220,6 +2232,7 @@ def submit_batch_parsl(
         max_fail_count=max_fail_count,
         randomize=randomize,
         max_atoms=max_atoms,
+        min_atoms=min_atoms,
     )
 
     if not jobs_to_submit:
@@ -2809,6 +2822,7 @@ def submit_batch(
     dry_run: bool = False,
     max_fail_count: int | None = None,
     max_atoms: int | None = None,
+    min_atoms: int | None = None,
     randomize: bool = True,
     reroot: bool = False,
     site: str = "default",
@@ -2838,6 +2852,7 @@ def submit_batch(
         dry_run: If True, prepare directories but don't submit.
         max_fail_count: If specified, skip jobs with fail_count >= this value.
         max_atoms: If set, only submit molecules with natoms <= this value.
+        min_atoms: If set, only submit molecules with natoms >= this value.
         randomize: Randomize job selection order (default: True).
         reroot: If True, ignore job_dir paths stored in the database and
             always construct paths from root_dir + job_dir_pattern. Useful
@@ -2884,6 +2899,7 @@ def submit_batch(
         max_fail_count=max_fail_count,
         randomize=randomize,
         max_atoms=max_atoms,
+        min_atoms=min_atoms,
     )
 
     if not jobs_to_submit:
@@ -3344,6 +3360,15 @@ def main():
         "left in their current status for a later batch.",
     )
 
+    parser.add_argument(
+        "--min-atoms",
+        type=int,
+        default=None,
+        help="Only submit molecules with natoms >= N. Jobs below the floor are "
+        "left in their current status for another lane. Combine with --max-atoms "
+        "to run a closed size band [min, max] as its own lane (concurrent lanes).",
+    )
+
     # ORCA configuration arguments
     orca_group = parser.add_argument_group("ORCA Configuration")
     orca_group.add_argument(
@@ -3439,6 +3464,19 @@ def main():
 
     if args.max_atoms is not None and args.max_atoms < 1:
         parser.error("--max-atoms must be a positive integer (>= 1)")
+
+    if args.min_atoms is not None and args.min_atoms < 1:
+        parser.error("--min-atoms must be a positive integer (>= 1)")
+
+    if (
+        args.min_atoms is not None
+        and args.max_atoms is not None
+        and args.min_atoms > args.max_atoms
+    ):
+        parser.error(
+            f"--min-atoms ({args.min_atoms}) must be <= "
+            f"--max-atoms ({args.max_atoms})"
+        )
 
     # Validate multi-node Parsl args
     if args.nodes_per_block < 1:
@@ -3599,6 +3637,7 @@ def main():
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             max_atoms=args.max_atoms,
+            min_atoms=args.min_atoms,
             timeout_seconds=args.job_timeout,
             randomize=True,
             cpus_per_node=args.cpus_per_node,
@@ -3636,6 +3675,7 @@ def main():
             dry_run=args.dry_run,
             max_fail_count=args.max_fail_count,
             max_atoms=args.max_atoms,
+            min_atoms=args.min_atoms,
             randomize=True,
             reroot=args.reroot,
             site=args.hpc_site,
