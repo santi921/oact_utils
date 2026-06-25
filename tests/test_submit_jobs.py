@@ -283,8 +283,14 @@ class TestClaimedJobClassification:
         assert result["action"] == "marker_blocked"
         assert result["job_id"] == mock_job_record.id
 
-    def test_slurm_claimed_job_returns_submit_payload(self, mock_job_record, tmp_path):
-        """Deferred-prep schedulers should return a submit-ready payload."""
+    def test_slurm_claimed_job_prepares_on_coordinator(self, mock_job_record, tmp_path):
+        """Coordinator-prep schedulers prepare the dir and carry no payload.
+
+        Since commit 02eff32 ("Go back to coordinator-side prep"),
+        flux/slurm/pbspro prepare the job directory on the coordinator and return
+        submit_ready with job_payload=None; the deferred worker-side payload path
+        was abandoned (_deserialize_job_record no longer exists).
+        """
         result = _classify_claimed_job(
             mock_job_record,
             tmp_path,
@@ -296,7 +302,10 @@ class TestClaimedJobClassification:
 
         assert result["action"] == "submit_ready"
         assert result["job_id"] == mock_job_record.id
-        assert result["job_payload"]["geometry"] == mock_job_record.geometry
+        assert result["job_payload"] is None
+        prepared = Path(result["job_dir"])
+        assert prepared.is_dir()
+        assert (prepared / "orca.inp").exists()
 
 
 class TestPrepareJobDirectory:
@@ -908,6 +917,19 @@ class TestSubmitJobsCli:
 
         monkeypatch.setattr(sj, "ArchitectorWorkflow", DummyWorkflow)
         monkeypatch.setattr(sj, "submit_batch_parsl", fake_submit_batch_parsl)
+        # main() runs launch-time orphan recovery before submitting; stub it so
+        # this CLI-forwarding test does not need a real workflow backend.
+        monkeypatch.setattr(
+            "oact_utilities.workflows.dashboard.recover_orphaned_jobs",
+            lambda *a, **k: {
+                "recovered": 0,
+                "completed": 0,
+                "failed": 0,
+                "reset": 0,
+                "dead_jobs": 0,
+                "skipped": 0,
+            },
+        )
         monkeypatch.setattr(
             sys,
             "argv",
@@ -944,6 +966,19 @@ class TestSubmitJobsCli:
 
         monkeypatch.setattr(sj, "ArchitectorWorkflow", DummyWorkflow)
         monkeypatch.setattr(sj, "submit_batch_parsl", fake_submit_batch_parsl)
+        # main() runs launch-time orphan recovery before submitting; stub it so
+        # this CLI-forwarding test does not need a real workflow backend.
+        monkeypatch.setattr(
+            "oact_utilities.workflows.dashboard.recover_orphaned_jobs",
+            lambda *a, **k: {
+                "recovered": 0,
+                "completed": 0,
+                "failed": 0,
+                "reset": 0,
+                "dead_jobs": 0,
+                "skipped": 0,
+            },
+        )
         monkeypatch.setattr(
             sys,
             "argv",
