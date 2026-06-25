@@ -9,7 +9,7 @@ Lean by design: it does NOT calibrate walltime/batch from completed jobs. The
 durable value is the stratification (how many molecules sit in each atom-band x
 actinide/non-actinide bucket -> which lanes to run, how many allocations). Lane
 geometry (cores/worker, tier, waves) comes from fixed per-band defaults you tune
-in LANE_BANDS.
+in BAND_SCHEMES (a default DRAC scheme + per-cluster overrides, e.g. sandia).
 
 ONE template for every cluster (launch/run_parsl_drac.template.sh). Cluster
 differences are CLI args (--cluster node size, --venv-path, --root-dir, --ntasks);
@@ -44,20 +44,31 @@ NODE_SPECS = {
     "rorqual": {"cores": 192, "note": "12h (3h is the most crowded tier)"},
     "nibi": {"cores": 192, "note": "flowing; 168h empty"},
     "trillium": {"cores": 192, "note": "whole-node only, 24h max"},
+    "sandia": {"cores": 36, "note": "dedicated DoD alloc; longpri 48h; not packed"},
 }
 
-# Fixed per-band defaults: (lo_atoms, hi_atoms inclusive, cores_per_worker, name,
-# tier_h, waves). cores/worker is the memory knob at --mem-per-cpu=3900M
-# (8->31GB, 16->62GB, 32->125GB, 48->187GB/job on a full node). tier_h is the
-# fixed backfill-policy walltime (<=24h; stragglers requeue via --reset-timeout).
+# Per-cluster band schemes: (lo_atoms, hi_atoms inclusive, cores_per_worker, name,
+# tier_h, waves). cores/worker is the memory knob; tier_h is a fixed walltime;
 # waves = sequential jobs per worker per allocation -> BATCH_SIZE = workers*waves.
-# Tune these to taste; the generator does NOT derive them from the DB.
-LANE_BANDS = [
-    (1, 40, 8, "small", 12, 4),
-    (41, 60, 16, "medium", 12, 3),
-    (61, 80, 32, "big", 24, 3),
-    (81, 100, 48, "huge", 24, 2),
-]
+# Tune to taste; the generator does NOT derive these from the DB.
+BAND_SCHEMES = {
+    # DRAC 192c clusters (Narval's 64c node packs fewer workers per band).
+    "default": [
+        (1, 40, 8, "small", 12, 4),
+        (41, 60, 16, "medium", 12, 3),
+        (61, 80, 32, "big", 24, 3),
+        (81, 100, 48, "huge", 24, 2),
+    ],
+    # Sandia: 36c node, conda, longpri 48h wall. Two lanes by core count, both
+    # whole-node: fast 6 workers x 6c (<=50 atoms), slow 3 workers x 12c (>50).
+    # slow waves=2 keeps the 81-100 tail (~19h/job, clips the 48h wall) from
+    # orphaning -- bump to 3 for 51-60-heavy chunks. 81-100 actinides are
+    # SCF-nonconvergence prone: route them to omol_base/KDIIS, not a longer wall.
+    "sandia": [
+        (1, 50, 6, "fast", 48, 6),
+        (51, 100, 12, "slow", 48, 2),
+    ],
+}
 
 JOB_TIMEOUT_MARGIN_S = 1800  # Parsl kills stragglers this far before the SBATCH wall
 
@@ -278,9 +289,10 @@ def main() -> None:
     print(f"  {'TOTAL':<9} | {ta:>9} | {tn:>9} | {ta + tn:>8}\n")
 
     # Build lanes (fixed per-band geometry; no DB calibration).
+    bands = BAND_SCHEMES.get(args.cluster, BAND_SCHEMES["default"])
     lanes = [
         lane
-        for lo, hi, cpw, name, tier_h, waves in LANE_BANDS
+        for lo, hi, cpw, name, tier_h, waves in bands
         if (lane := compute_lane(lo, hi, cpw, name, tier_h, waves, rows, ntasks_target))
     ]
 
@@ -305,7 +317,7 @@ def main() -> None:
             f"{L['batch_size']:>5}"
         )
     print(
-        "\n  Geometry/tier/batch are FIXED defaults from LANE_BANDS (tune in code), not\n"
+        "\n  Geometry/tier/batch are FIXED defaults from BAND_SCHEMES (tune in code), not\n"
         "  derived from the DB. batch = workers * waves; overshoot strands the tail as\n"
         "  RUNNING (clear with dashboard --recover-orphans), undershoot idles cores.\n"
     )
@@ -345,6 +357,7 @@ def main() -> None:
             "{{MAX_WORKERS}}": str(L["workers"]),
             "{{NTASKS}}": str(L["ntasks"]),
             "{{TIME}}": L["time"],
+            "{{N_HOURS}}": str(L["tier_h"]),
             "{{BATCH_SIZE}}": str(L["batch_size"]),
             "{{JOB_TIMEOUT}}": str(L["job_timeout"]),
             "{{DB_PATH}}": db_abs,
