@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import csv
+import json
+import os
+import time
 from pathlib import Path
 
 from oact_utilities.workflows.inventory import (
@@ -10,8 +13,16 @@ from oact_utilities.workflows.inventory import (
     _CLASS_OTHER,
     _CLASS_SCRATCH_BAS,
     _CLASS_SCRATCH_TMP,
+    _STATUS_COMPLETED,
+    _STATUS_FAILED,
+    _STATUS_RUNNING,
+    _STATUS_TIMEOUT,
+    _STATUS_TO_RUN,
+    MARKER_FILENAME,
     _classify_file,
+    _classify_job_status,
     _ext_key,
+    _has_job_output,
     inventory_root,
     scan_job_dir,
 )
@@ -164,3 +175,150 @@ def test_clean_all_execute_removes_tmp_and_bas(tmp_path: Path) -> None:
     assert not (j1 / "orca.bas1").exists()
     assert (j1 / "data.weird").exists()
     assert (j1 / "orca.out").exists()
+
+
+# ---------------------------------------------------------------------------
+# Whole-job purge (--purge-incomplete): DB-blind status classification + delete
+# ---------------------------------------------------------------------------
+
+_OLD = 48 * 3600  # seconds; older than the default 24h timeout cutoff
+
+
+def _build_status_corpus(root: Path) -> None:
+    """Build one job dir per on-disk status so classification can be exercised.
+
+    completed: orca.out terminated normally (kept).
+    failed:    orca.out aborted (purged, marker records the failure reason).
+    running:   orca.out, no termination, recent mtime (purged).
+    timeout:   orca.out, no termination, stale mtime (purged).
+    to_run:    only inputs, no output file at all (purged).
+    """
+    jc = root / "job_completed"
+    jc.mkdir()
+    (jc / "orca.inp").write_text("! wB97M-V\n")
+    (jc / "orca.out").write_text(
+        "SCF CONVERGED AFTER 12 CYCLES\n...\nORCA TERMINATED NORMALLY\n"
+    )
+
+    jf = root / "job_failed"
+    jf.mkdir()
+    (jf / "orca.inp").write_text("! wB97M-V\n")
+    (jf / "orca.out").write_text(
+        "SCF NOT CONVERGED\nORCA finished by aborting the run\n"
+    )
+    (jf / "orca.gbw").write_bytes(b"x" * 4096)
+
+    jr = root / "job_running"
+    jr.mkdir()
+    (jr / "orca.inp").write_text("! wB97M-V\n")
+    (jr / "orca.out").write_text("SCF ITERATION 3\nstill going\n")
+
+    jt = root / "job_timeout"
+    jt.mkdir()
+    (jt / "orca.inp").write_text("! wB97M-V\n")
+    out = jt / "orca.out"
+    out.write_text("SCF ITERATION 3\nstalled\n")
+    old = time.time() - _OLD
+    os.utime(out, (old, old))
+
+    jq = root / "job_to_run"
+    jq.mkdir()
+    (jq / "orca.inp").write_text("! wB97M-V\n")
+    (jq / "flux_job.flux").write_text("#!/bin/bash\n")
+
+
+def test_has_job_output_distinguishes_started_from_to_run(tmp_path: Path) -> None:
+    started = tmp_path / "started"
+    started.mkdir()
+    (started / "orca.out").write_text("anything\n")
+    assert _has_job_output(started) is True
+
+    to_run = tmp_path / "to_run"
+    to_run.mkdir()
+    (to_run / "orca.inp").write_text("! wB97M-V\n")
+    (to_run / "flux_job.flux").write_text("#!/bin/bash\n")
+    assert _has_job_output(to_run) is False
+
+    # orca_atom*.out is an SCF initial guess, not real output.
+    atom_only = tmp_path / "atom_only"
+    atom_only.mkdir()
+    (atom_only / "orca_atom0.out").write_text("guess\n")
+    assert _has_job_output(atom_only) is False
+
+
+def test_classify_job_status_all_states(tmp_path: Path) -> None:
+    _build_status_corpus(tmp_path)
+    assert _classify_job_status(tmp_path / "job_completed", 24)[0] == _STATUS_COMPLETED
+    assert _classify_job_status(tmp_path / "job_failed", 24)[0] == _STATUS_FAILED
+    assert _classify_job_status(tmp_path / "job_running", 24)[0] == _STATUS_RUNNING
+    assert _classify_job_status(tmp_path / "job_timeout", 24)[0] == _STATUS_TIMEOUT
+    assert _classify_job_status(tmp_path / "job_to_run", 24)[0] == _STATUS_TO_RUN
+
+
+def test_purge_incomplete_dry_run_counts_but_keeps_files(tmp_path: Path) -> None:
+    _build_status_corpus(tmp_path)
+    corpus = inventory_root(tmp_path, workers=2, purge_incomplete=True, execute=False)
+
+    assert corpus.status_counts[_STATUS_COMPLETED] == 1
+    # failed + running + timeout + to_run are all purge candidates.
+    assert corpus.purge_job_count == 4
+    assert corpus.purge_freed == 0  # dry run deletes nothing
+    assert corpus.purge_bytes > 0
+    # Nothing actually removed, including the failed job's gbw.
+    assert (tmp_path / "job_failed" / "orca.out").exists()
+    assert (tmp_path / "job_failed" / "orca.gbw").exists()
+    assert not (tmp_path / "job_failed" / MARKER_FILENAME).exists()
+    assert (tmp_path / "job_completed" / "orca.out").exists()
+
+
+def test_purge_incomplete_execute_empties_to_sentinel(tmp_path: Path) -> None:
+    _build_status_corpus(tmp_path)
+    corpus = inventory_root(tmp_path, workers=2, purge_incomplete=True, execute=True)
+
+    assert corpus.purge_job_count == 4
+    assert corpus.purge_freed > 0
+
+    # Completed job is kept fully and never gets a marker.
+    jc = tmp_path / "job_completed"
+    assert (jc / "orca.out").exists()
+    assert not (jc / MARKER_FILENAME).exists()
+
+    # Failed job emptied to the sentinel; marker carries the failure reason.
+    jf = tmp_path / "job_failed"
+    assert not (jf / "orca.out").exists()
+    assert not (jf / "orca.gbw").exists()
+    marker = jf / MARKER_FILENAME
+    assert marker.exists()
+    data = json.loads(marker.read_text())
+    assert data["detected_status"] == _STATUS_FAILED
+    assert data["purge_type"] == "incomplete_archive"
+    assert "aborting the run" in (data["failure_reason"] or "")
+
+    # to_run dir emptied to just the sentinel.
+    jq = tmp_path / "job_to_run"
+    assert sorted(p.name for p in jq.iterdir()) == [MARKER_FILENAME]
+
+
+def test_purge_incomplete_skips_already_markered(tmp_path: Path) -> None:
+    # A dir already carrying the sentinel is left untouched (idempotent).
+    blocked = tmp_path / "job_blocked"
+    blocked.mkdir()
+    (blocked / MARKER_FILENAME).write_text("{}\n")
+    (blocked / "leftover.tmp").write_bytes(b"x" * 10)
+
+    corpus = inventory_root(tmp_path, workers=2, purge_incomplete=True, execute=True)
+    assert corpus.purge_already_marked == 1
+    assert corpus.purge_job_count == 0
+    # Leftover content is NOT deleted -- the sentinel marks it done.
+    assert (blocked / "leftover.tmp").exists()
+
+
+def test_purge_incomplete_via_scan_job_dir(tmp_path: Path) -> None:
+    _build_status_corpus(tmp_path)
+    inv = scan_job_dir(
+        tmp_path / "job_failed", purge_incomplete=True, hours_cutoff=24, execute=True
+    )
+    assert inv.status_label == _STATUS_FAILED
+    assert inv.purged is True
+    assert inv.purge_freed > 0
+    assert (tmp_path / "job_failed" / MARKER_FILENAME).exists()

@@ -25,12 +25,25 @@ one and will happily delete the scratch a live ORCA process is using. Only run
 corpus files (orca.out/inp/engrad/gbw, sella state, markers, ...) are never
 matched.
 
+Optional DB-blind WHOLE-JOB purge (``--purge-incomplete``, gated behind
+``--execute``) goes one step further: it classifies every job directory from its
+on-disk content (via check_job_termination) and, for any dir that is NOT
+``completed`` -- ``failed`` / ``timeout`` / ``running`` / ``to_run`` -- empties
+the directory, leaving only a ``.do_not_rerun.json`` sentinel (same JSON
+template as clean.py, with ``scf_steps`` and ``failure_reason`` parsed from
+``orca.out`` when present). This is the final sweep before transferring a
+finished corpus: it keeps only completed jobs. Being DB-blind it CANNOT tell a
+live ORCA process from a dead one and WILL delete a running job's files, so only
+``--execute`` it when nothing is executing.
+
 Usage:
     python -m oact_utilities.workflows.inventory jobs/
     python -m oact_utilities.workflows.inventory jobs/ --top 40
     python -m oact_utilities.workflows.inventory jobs/ --csv inventory.csv
     python -m oact_utilities.workflows.inventory jobs/ --clean-tmp           # dry run
     python -m oact_utilities.workflows.inventory jobs/ --clean-tmp --execute
+    python -m oact_utilities.workflows.inventory jobs/ --purge-incomplete    # dry run
+    python -m oact_utilities.workflows.inventory jobs/ --purge-incomplete --execute
 """
 
 from __future__ import annotations
@@ -38,6 +51,7 @@ from __future__ import annotations
 import argparse
 import csv
 import heapq
+import json
 import os
 import re
 import shutil
@@ -45,19 +59,28 @@ import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Single source of truth for what counts as scratch vs. an essential corpus
 # file, and for how scratch is matched/sized. Imported from clean.py so this
-# audit (and its optional delete) and the actual cleanup never drift.
+# audit (and its optional delete) and the actual cleanup never drift. The marker
+# helpers (MARKER_*, _extract_failure_info, is_marker_blocked) are reused so the
+# whole-job purge sentinel matches what clean.py writes.
+from ..utils.status import check_job_termination
 from .clean import (
     _BAS_FILE_PATTERNS,
+    _ORCA_ATOM_RE,
     _ORCA_TMP_DIR_RE,
     _TMP_FILE_PATTERNS,
+    MARKER_FILENAME,
+    MARKER_PURGE_TYPE_INCOMPLETE,
+    _extract_failure_info,
     _format_size,
     _get_dir_size,
     _is_excluded,
     _match_cleanup_patterns,
+    is_marker_blocked,
 )
 
 try:
@@ -129,6 +152,94 @@ def _classify_file(name: str, in_tmp_dir: bool) -> str:
 
 
 # ---------------------------------------------------------------------------
+# On-disk job-status classification (DB-blind, for --purge-incomplete)
+# ---------------------------------------------------------------------------
+
+# Disk-content job statuses. "completed" is the only kept state; every other
+# label is incomplete and whole-job-purged by --purge-incomplete.
+_STATUS_COMPLETED = "completed"
+_STATUS_FAILED = "failed"
+_STATUS_TIMEOUT = "timeout"
+_STATUS_RUNNING = "running"
+_STATUS_TO_RUN = "to_run"
+# Report/CSV ordering (kept first, never-ran last).
+_STATUS_ORDER = (
+    _STATUS_COMPLETED,
+    _STATUS_RUNNING,
+    _STATUS_FAILED,
+    _STATUS_TIMEOUT,
+    _STATUS_TO_RUN,
+)
+
+
+def _has_job_output(job_dir: Path) -> bool:
+    """Return True if the job dir holds real ORCA/Sella output (not just inputs).
+
+    Splits the ``check_job_termination`` code 0 (and the stale -2) into a job
+    that actually started writing output ("running"/"timeout") versus a
+    never-run "to_run" dir holding only ``orca.inp`` + a job script. Mirrors the
+    output-file discovery in ``check_job_termination`` / ``check_sella_complete``;
+    ORCA atomic SCF guess files (``orca_atom*.out``) are initial-guess scratch,
+    not real output, so they do not count as "started".
+    """
+    try:
+        names = os.listdir(job_dir)
+    except OSError:
+        return False
+    for name in names:
+        if _ORCA_ATOM_RE.match(name):
+            continue
+        if name.endswith((".out", ".out.gz", ".logs")):
+            return True
+        if name.startswith("flux-") and name.endswith("out"):
+            return True
+    return (job_dir / "sella_status.txt").exists() or (job_dir / "sella.log").exists()
+
+
+def _classify_job_status(job_dir: Path, hours_cutoff: int) -> tuple[str, int]:
+    """Classify a job directory from on-disk content alone (no DB).
+
+    Returns ``(label, code)`` where ``code`` is the raw ``check_job_termination``
+    result (1 completed, -1 failed, -2 timeout, 0 running/incomplete). The
+    optimizer is left None so Sella jobs are auto-detected via ``run_sella.py``.
+    Code 0/-2 is refined to ``running``/``timeout`` (output present) vs
+    ``to_run`` (nothing written yet) via :func:`_has_job_output`.
+    """
+    try:
+        code = check_job_termination(str(job_dir), hours_cutoff=hours_cutoff)
+    except Exception:
+        # Treat an unreadable directory as not-completed (it will be purged,
+        # not kept) -- the dry-run + loud warning are the real safeguards.
+        code = 0
+    if code == 1:
+        return _STATUS_COMPLETED, code
+    if code == -1:
+        return _STATUS_FAILED, code
+    if not _has_job_output(job_dir):
+        return _STATUS_TO_RUN, code
+    if code == -2:
+        return _STATUS_TIMEOUT, code
+    return _STATUS_RUNNING, code
+
+
+def _write_purge_marker(job_dir: Path, metadata: dict[str, str | int | None]) -> None:
+    """Write a ``.do_not_rerun.json`` sentinel for a purged job directory.
+
+    Same JSON template as clean.py's marker (``generated_by``, ``date``,
+    ``purge_type`` + extra metadata) but stamped as inventory-generated. Records
+    the detected on-disk status and, when an ``orca.out`` is present, the parsed
+    ``scf_steps`` and ``failure_reason`` so the purge reason survives a transfer.
+    """
+    marker_path = job_dir / MARKER_FILENAME
+    marker_data = {
+        "generated_by": "python -m oact_utilities.workflows.inventory",
+        "date": datetime.now(tz=timezone.utc).isoformat(),
+        **metadata,
+    }
+    marker_path.write_text(json.dumps(marker_data, indent=2) + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Per-job scan
 # ---------------------------------------------------------------------------
 
@@ -154,6 +265,14 @@ class JobInventory:
     clean_matched: int = 0  # direct-child scratch entries matched
     clean_bytes: int = 0  # bytes of matched scratch (would-free in dry run)
     clean_freed: int = 0  # bytes actually deleted (0 in dry run)
+    # Optional whole-job purge accounting (populated only with --purge-incomplete).
+    status_label: str | None = None  # disk-detected status (completed/failed/...)
+    status_code: int | None = None  # raw check_job_termination code
+    purged: bool = False  # this dir was emptied (or would be in dry run)
+    purge_already_marked: bool = False  # skipped: already carries the sentinel
+    purge_matched: int = 0  # entries removed (excludes the kept marker)
+    purge_bytes: int = 0  # bytes of purged contents (would-free in dry run)
+    purge_freed: int = 0  # bytes actually deleted (0 in dry run)
 
     @property
     def reclaimable_bytes(self) -> int:
@@ -201,10 +320,90 @@ def _delete_scratch(
                 inv.errors.append(f"{entry}: deletion failed: {e}")
 
 
+def _purge_job_dir(
+    job_dir: Path,
+    status_label: str,
+    status_code: int,
+    execute: bool,
+    inv: JobInventory,
+) -> None:
+    """Whole-job purge of one incomplete job dir, leaving only the sentinel.
+
+    DB-blind: the caller has already classified ``job_dir`` as not-completed.
+    Writes the ``.do_not_rerun.json`` marker FIRST (so nothing is deleted without
+    a traceable record), then deletes every other direct child. Preview only
+    unless ``execute`` is True. Idempotent -- a dir already carrying the marker is
+    left untouched (counts as ``purge_already_marked``). Updates ``inv`` purge
+    counters in place.
+    """
+    if is_marker_blocked(job_dir):
+        inv.purge_already_marked = True
+        return
+
+    try:
+        entries = list(job_dir.iterdir())
+    except OSError as e:
+        inv.errors.append(f"{job_dir}: cannot list for purge: {e}")
+        return
+
+    # Parse orca.out provenance (scf_steps, failure_reason) before any deletion.
+    failure_info = _extract_failure_info(job_dir)
+    metadata: dict[str, str | int | None] = {
+        "purge_type": MARKER_PURGE_TYPE_INCOMPLETE,
+        "detected_status": status_label,
+        "disk_status_code": status_code,
+        **failure_info,
+    }
+
+    to_delete: list[tuple[Path, int, bool]] = []
+    for entry in entries:
+        if entry.name == MARKER_FILENAME:
+            continue
+        is_dir = entry.is_dir()
+        try:
+            size = _get_dir_size(entry) if is_dir else entry.stat().st_size
+        except OSError:
+            size = 0
+        to_delete.append((entry, size, is_dir))
+
+    inv.purged = True
+    inv.purge_matched = len(to_delete)
+    inv.purge_bytes = sum(s for _, s, _ in to_delete)
+
+    if not execute:
+        return
+
+    # Write the marker first; if that fails, delete nothing so a purged dir is
+    # never left without a do-not-rerun record.
+    try:
+        _write_purge_marker(job_dir, metadata)
+    except (OSError, PermissionError) as e:
+        inv.errors.append(f"{job_dir}: marker write failed: {e}, skipping purge")
+        inv.purged = False
+        inv.purge_matched = 0
+        inv.purge_bytes = 0
+        return
+
+    for entry, size, is_dir in to_delete:
+        try:
+            if is_dir:
+                if entry.is_symlink():
+                    entry.unlink()  # remove the link, do not follow it
+                else:
+                    shutil.rmtree(str(entry), ignore_errors=True)
+            else:
+                entry.unlink()
+            inv.purge_freed += size
+        except (OSError, PermissionError) as e:
+            inv.errors.append(f"{entry}: deletion failed: {e}")
+
+
 def scan_job_dir(
     job_dir: Path,
     clean_categories: frozenset[str] = frozenset(),
     execute: bool = False,
+    purge_incomplete: bool = False,
+    hours_cutoff: int = 24,
 ) -> JobInventory:
     """Recursively inventory one job directory without following symlinks.
 
@@ -212,9 +411,18 @@ def scan_job_dir(
     descended into (mirrors clean.py's size accounting so a link into the final
     corpus is never counted as local weight).
 
-    When ``clean_categories`` is non-empty the directory is inventoried first
-    (so the report reflects what was there), then its direct-child scratch in
-    those categories is deleted -- preview only unless ``execute`` is True.
+    The directory is always inventoried first (so the report reflects what was
+    there). Then, in order:
+
+    * When ``purge_incomplete`` is True, the dir is classified from disk content.
+      A non-completed dir (failed / timeout / running / to_run) is whole-job
+      purged -- emptied except for a ``.do_not_rerun.json`` sentinel -- and
+      scratch cleaning is skipped for it (the dir is already empty). A completed
+      dir is kept and still eligible for scratch cleaning below.
+    * When ``clean_categories`` is non-empty the dir's direct-child scratch in
+      those categories is deleted.
+
+    All deletion is preview-only unless ``execute`` is True.
     """
     inv = JobInventory(path=job_dir)
     files_seen: list[tuple[str, int]] = []
@@ -258,6 +466,15 @@ def scan_job_dir(
         _PER_JOB_TOP_FILES, files_seen, key=lambda t: t[1]
     )
 
+    if purge_incomplete:
+        status_label, status_code = _classify_job_status(job_dir, hours_cutoff)
+        inv.status_label = status_label
+        inv.status_code = status_code
+        if status_label != _STATUS_COMPLETED:
+            _purge_job_dir(job_dir, status_label, status_code, execute, inv)
+            # Dir was emptied (or would be) -- nothing left to scratch-clean.
+            return inv
+
     if clean_categories:
         _delete_scratch(job_dir, clean_categories, execute, inv)
 
@@ -294,6 +511,14 @@ class Corpus:
     clean_matched: int = 0
     clean_bytes: int = 0
     clean_freed: int = 0
+    # Whole-job purge accounting (populated only with --purge-incomplete).
+    purge_incomplete: bool = False
+    status_counts: Counter = field(default_factory=Counter)
+    purge_job_count: int = 0  # dirs purged (or that would be in dry run)
+    purge_already_marked: int = 0  # dirs skipped because they already had a marker
+    purge_matched: int = 0  # total entries removed
+    purge_bytes: int = 0  # total bytes of purged contents (would-free in dry run)
+    purge_freed: int = 0  # total bytes actually deleted (0 in dry run)
 
 
 def inventory_root(
@@ -302,6 +527,8 @@ def inventory_root(
     limit: int | None = None,
     clean_categories: frozenset[str] = frozenset(),
     execute: bool = False,
+    purge_incomplete: bool = False,
+    hours_cutoff: int = 24,
 ) -> Corpus:
     """Scan every immediate subdirectory of ``root`` as a job directory.
 
@@ -310,11 +537,21 @@ def inventory_root(
 
     When ``clean_categories`` is non-empty, each job's direct-child scratch in
     those categories is deleted after it is inventoried (preview only unless
-    ``execute`` is True). DB-blind -- see the module docstring for the safety
-    contract.
+    ``execute`` is True).
+
+    When ``purge_incomplete`` is True, every job dir is classified from disk
+    content and any dir that is NOT completed (failed / timeout / running /
+    to_run) is whole-job purged -- emptied except for a ``.do_not_rerun.json``
+    sentinel (preview only unless ``execute``). DB-blind -- see the module
+    docstring for the safety contract.
     """
     root = root.resolve()
-    corpus = Corpus(root=root, clean_categories=clean_categories, clean_execute=execute)
+    corpus = Corpus(
+        root=root,
+        clean_categories=clean_categories,
+        clean_execute=execute,
+        purge_incomplete=purge_incomplete,
+    )
 
     job_dirs: list[Path] = []
     for entry in sorted(root.iterdir()):
@@ -336,10 +573,22 @@ def inventory_root(
 
     print(f"Scanning {len(job_dirs)} job directories under {root} ...")
 
-    desc = "Cleaning" if clean_categories else "Scanning"
+    if purge_incomplete:
+        desc = "Purging"
+    elif clean_categories:
+        desc = "Cleaning"
+    else:
+        desc = "Scanning"
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(scan_job_dir, jd, clean_categories, execute): jd
+            pool.submit(
+                scan_job_dir,
+                jd,
+                clean_categories,
+                execute,
+                purge_incomplete,
+                hours_cutoff,
+            ): jd
             for jd in job_dirs
         }
         completed_iter = as_completed(futures)
@@ -364,6 +613,15 @@ def inventory_root(
             corpus.clean_matched += inv.clean_matched
             corpus.clean_bytes += inv.clean_bytes
             corpus.clean_freed += inv.clean_freed
+            if inv.status_label is not None:
+                corpus.status_counts[inv.status_label] += 1
+            if inv.purged:
+                corpus.purge_job_count += 1
+                corpus.purge_matched += inv.purge_matched
+                corpus.purge_bytes += inv.purge_bytes
+                corpus.purge_freed += inv.purge_freed
+            if inv.purge_already_marked:
+                corpus.purge_already_marked += 1
             corpus.errors.extend(inv.errors)
 
     corpus.jobs.sort(key=lambda j: j.total_bytes, reverse=True)
@@ -445,6 +703,24 @@ def _print_report(corpus: Corpus, top: int) -> None:
         else:
             print("  DRY RUN -- re-run with --execute to delete.")
 
+    # --- Whole-job purge (only when --purge-incomplete requested) ---
+    if corpus.purge_incomplete:
+        print("\n--- Job status (on-disk content) ---")
+        print("  status | job dirs")
+        for label in _STATUS_ORDER:
+            print(f"  {label} | {corpus.status_counts.get(label, 0)}")
+        verb = "Purged" if corpus.clean_execute else "Would purge"
+        action = "Freed" if corpus.clean_execute else "Would free"
+        print("\n--- Whole-job purge (everything not completed) ---")
+        print(f"  {verb} (dirs emptied to sentinel): {corpus.purge_job_count}")
+        print(f"  Already markered (skipped):       {corpus.purge_already_marked}")
+        print(f"  Files/dirs removed:               {corpus.purge_matched}")
+        print(f"  {action}:  {_format_size(corpus.purge_bytes)}")
+        if corpus.clean_execute:
+            print(f"  Actually freed: {_format_size(corpus.purge_freed)}")
+        else:
+            print("  DRY RUN -- re-run with --execute to purge.")
+
     # --- Largest job directories ---
     print(f"\n--- Largest {top} job directories ---")
     print("  size | files | subdirs | nested_tmp | job_dir")
@@ -513,6 +789,7 @@ def _write_csv(corpus: Corpus, csv_path: Path) -> None:
         "largest_file",
         "largest_file_bytes",
         "top_exts",
+        "status",
     ]
     with csv_path.open("w", newline="") as fh:
         writer = csv.writer(fh)
@@ -544,6 +821,7 @@ def _write_csv(corpus: Corpus, csv_path: Path) -> None:
                     largest_name,
                     largest_bytes,
                     top_exts,
+                    inv.status_label or "",
                 ]
             )
     print(f"\nPer-job inventory written to {csv_path}")
@@ -615,10 +893,33 @@ def main() -> None:
         action="store_true",
         help="Delete both tmp and bas scratch (equivalent to --clean-tmp --clean-bas)",
     )
-    clean.add_argument(
+
+    purge = parser.add_argument_group(
+        "optional whole-job purge (DB-blind -- FINAL sweep, only when nothing is "
+        "executing)"
+    )
+    purge.add_argument(
+        "--purge-incomplete",
+        action="store_true",
+        help="Classify every job dir from on-disk content and whole-job purge "
+        "anything NOT completed (failed/timeout/running/to_run): empty the dir "
+        "to a .do_not_rerun.json sentinel. INCLUDES running jobs -- final sweep "
+        "only. Completed jobs are kept.",
+    )
+    purge.add_argument(
+        "--hours-cutoff",
+        type=int,
+        default=24,
+        metavar="H",
+        help="Hours of inactivity before a job with no termination signal is "
+        "treated as timed out instead of running (default: 24)",
+    )
+
+    parser.add_argument(
         "--execute",
         action="store_true",
-        help="Actually delete matched scratch (default: dry-run preview only)",
+        help="Actually delete matched scratch / purge incomplete dirs "
+        "(default: dry-run preview only)",
     )
     args = parser.parse_args()
 
@@ -632,13 +933,24 @@ def main() -> None:
     if args.clean_bas or args.clean_all:
         categories.add("bas")
 
-    if args.execute and not categories:
+    if args.execute and not categories and not args.purge_incomplete:
         parser.error(
-            "--execute requires a clean flag (--clean-tmp/--clean-bas/--clean-all)"
+            "--execute requires a clean flag (--clean-tmp/--clean-bas/--clean-all) "
+            "or --purge-incomplete"
         )
 
-    if categories:
-        mode = "EXECUTE (deleting)" if args.execute else "DRY RUN (preview only)"
+    mode = "EXECUTE (deleting)" if args.execute else "DRY RUN (preview only)"
+    if args.purge_incomplete:
+        print("!" * 70)
+        print(f"  WHOLE-JOB PURGE REQUESTED [{mode}] -- DB-BLIND")
+        print("  Every job dir whose on-disk content is NOT 'completed' (failed,")
+        print("  timeout, to_run, AND running) will be emptied to a")
+        print("  .do_not_rerun.json sentinel. This is a final sweep: it CANNOT tell")
+        print("  a live ORCA process from a dead one and will delete a running job's")
+        print("  files. Only --execute when the campaign is finished and nothing is")
+        print("  executing. Completed jobs are always kept.")
+        print("!" * 70)
+    elif categories:
         print("!" * 70)
         print(
             f"  SCRATCH DELETION REQUESTED [{mode}] -- categories: "
@@ -658,6 +970,8 @@ def main() -> None:
         limit=args.debug,
         clean_categories=frozenset(categories),
         execute=args.execute,
+        purge_incomplete=args.purge_incomplete,
+        hours_cutoff=args.hours_cutoff,
     )
     _print_report(corpus, top=args.top)
     if args.csv is not None:
