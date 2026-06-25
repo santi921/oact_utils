@@ -60,13 +60,13 @@ BAND_SCHEMES = {
         (81, 100, 48, "huge", 24, 2),
     ],
     # Sandia: 36c node, conda, longpri 48h wall. Two lanes by core count, both
-    # whole-node: fast 6 workers x 6c, slow 3 workers x 12c. slow waves=2 keeps
-    # the 81-100 tail (~19h/job, clips the 48h wall) from orphaning -- bump to 3
-    # for 41-60-heavy chunks. 81-100 actinides are SCF-nonconvergence prone: route
-    # them to omol_base/KDIIS rather than chasing walltime past 48h.
+    # whole-node: fast 6 workers x 6c (<=50 atoms), slow 3 workers x 12c (>50).
+    # slow waves=2 keeps the 81-100 tail (~19h/job, clips the 48h wall) from
+    # orphaning -- bump to 3 for 51-60-heavy chunks. 81-100 actinides are
+    # SCF-nonconvergence prone: route them to omol_base/KDIIS, not a longer wall.
     "sandia": [
-        (1, 40, 6, "fast", 48, 6),
-        (41, 100, 12, "slow", 48, 2),
+        (1, 50, 6, "fast", 48, 6),
+        (51, 100, 12, "slow", 48, 2),
     ],
 }
 
