@@ -29,12 +29,12 @@
 
 set -euo pipefail
 
-# ---- Configuration (edit these once; shared across lanes) ----
+# ---- Configuration (DB_PATH/ROOT_DIR/VENV_PATH filled by the generator per cluster) ----
 DB_PATH="{{DB_PATH}}"
-ROOT_DIR="${HOME}/scratch/oact_jobs/jobs_parsl/"        # heavy I/O -> scratch (Lustre); one tree across lanes
-VENV_PATH="${HOME}/projects/def-yqw/${USER}/oact-env"   # built by examples/drac/setup_venv.sh
+ROOT_DIR="{{ROOT_DIR}}"     # heavy I/O -> scratch (Lustre); one tree across lanes
+VENV_PATH="{{VENV_PATH}}"   # per-cluster; built by examples/drac/setup_venv.sh
 PYTHON_MODULE="python/3.11"
-MODULE_LOAD="StdEnv/2023 gcc/12.3 openmpi/4.1.5 orca/6.1.0"
+MODULE_LOAD="StdEnv/2023 gcc/12.3 openmpi/4.1.5 orca/6.1.0"   # standard CVMFS chain; edit if a cluster differs
 
 # ---- Lane parameters (filled by the generator) ----
 MAX_WORKERS={{MAX_WORKERS}}             # concurrent ORCA jobs on the node
@@ -42,7 +42,7 @@ CORES_PER_WORKER={{CORES_PER_WORKER}}   # cores per ORCA job (== %pal nprocs)
 MIN_ATOMS={{MIN_ATOMS}}                 # closed atom band [MIN_ATOMS, MAX_ATOMS]
 MAX_ATOMS={{MAX_ATOMS}}
 JOB_TIMEOUT={{JOB_TIMEOUT}}             # per-ORCA-job cap (s); set below --time
-BATCH_SIZE=20                           # molecules pulled from the DB per allocation
+BATCH_SIZE={{BATCH_SIZE}}               # molecules pulled per allocation (sized to keep workers fed)
 MAX_FAIL_COUNT=10
 
 # ORCA settings

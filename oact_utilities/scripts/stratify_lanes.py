@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sqlite3
 import statistics
@@ -100,6 +101,15 @@ DEFAULT_WALL_H = {(1, 40): 6.0, (41, 60): 10.0, (61, 80): 16.0, (81, 100): 20.0}
 STD_TIERS_H = [3, 12, 24, 72, 168]
 
 TIMEOUT_MARGIN_S = 600  # keep per-job timeout this far under the SBATCH walltime
+
+# BATCH_SIZE = molecules pulled per allocation. Sized so workers stay fed for the
+# whole walltime (workers * walltime/per_job_time), times a fluff factor. Per-job
+# time comes from the calibration median when available, else these cold-start
+# references at REF_CORES (your rule of thumb), scaled linearly by the lane cores.
+BATCH_FLUFF = 1.3
+ACT_REF_H = 4.0
+NONACT_REF_H = 2.5
+REF_CORES = 12
 
 
 def is_actinide(metal: str | None) -> bool:
@@ -185,13 +195,21 @@ def compute_lane(
         # completed jobs used, wall grows (scale up). Never assume a speedup.
         factor = max(1.0, med_cores / cpw)
         required_h = p90 * factor * 1.5
+        typ_h = statistics.median(hrs) * factor  # typical per-job time, for batching
         basis = f"p90={p90:.1f}h@{int(med_cores)}c x{factor:.1f} x1.5 (n={len(pairs)})"
     else:
         required_h = DEFAULT_WALL_H[(lo, hi)]
+        ref_h = NONACT_REF_H if class_tag == "non_actinides" else ACT_REF_H
+        typ_h = (
+            ref_h * REF_CORES / cpw
+        )  # rule-of-thumb per-job time at this lane's cores
         basis = "default est (no completed data)"
 
     tier_h = pick_tier(required_h)
     job_timeout_s = min(int(required_h * 3600), tier_h * 3600 - TIMEOUT_MARGIN_S)
+    # Pull enough molecules to keep every worker fed for the whole allocation + fluff.
+    jobs_per_worker = max(1.0, tier_h / typ_h)
+    batch_size = max(workers, math.ceil(workers * jobs_per_worker * BATCH_FLUFF))
     return {
         "name": name,
         "lo": lo,
@@ -202,6 +220,7 @@ def compute_lane(
         "tier_h": tier_h,
         "time": f"{tier_h:02d}:00:00",
         "job_timeout": job_timeout_s,
+        "batch_size": batch_size,
         "to_run": to_run,
         "act": act,
         "non": non,
@@ -252,6 +271,21 @@ def main() -> None:
         help="DB the generated scripts actually submit against (baked into "
         "DB_PATH). Defaults to the calibration <db>; set it when you calibrate "
         "off a finished chunk but run a fresh one.",
+    )
+    ap.add_argument(
+        "--venv-path",
+        default="${HOME}/oact-env",
+        help="per-cluster venv path baked into the scripts (differs on every "
+        "cluster, e.g. Fir's ${HOME}/projects/def-yqw/${USER}/oact-env). Use "
+        "${HOME}/${USER} forms -- a literal ~ does not expand inside the quotes. "
+        "Default: ${HOME}/oact-env",
+    )
+    ap.add_argument(
+        "--root-dir",
+        default="${HOME}/scratch/oact_jobs/jobs_parsl/",
+        help="per-cluster job-tree root baked into the scripts (scratch differs: "
+        "Fir ${HOME}/scratch, Trillium/Rorqual $SCRATCH). Default: "
+        "${HOME}/scratch/oact_jobs/jobs_parsl/",
     )
     ap.add_argument(
         "--template", help="tokenized .sh template; if set, emit one script per lane"
@@ -415,17 +449,17 @@ def main() -> None:
     print(f"  preferred tier: {pref}")
     print(
         f"  {'lane':<7} | {'band':<8} | {'to_run':>7} | {'cores/wkr':>9} | {'workers':>7} | "
-        f"{'ntasks':>6} | {'tier':>5} | {'job_timeout':>11} | basis"
+        f"{'ntasks':>6} | {'tier':>5} | {'batch':>5} | {'job_timeout':>11} | basis"
     )
     print(
-        f"  {'-'*7}-+-{'-'*8}-+-{'-'*7}-+-{'-'*9}-+-{'-'*7}-+-{'-'*6}-+-{'-'*5}-+-{'-'*11}-+-{'-'*30}"
+        f"  {'-'*7}-+-{'-'*8}-+-{'-'*7}-+-{'-'*9}-+-{'-'*7}-+-{'-'*6}-+-{'-'*5}-+-{'-'*5}-+-{'-'*11}-+-{'-'*30}"
     )
     for L in lanes:
         band = f"{L['lo']}-{L['hi']}"
         jt = f"{L['job_timeout']}s"
         print(
             f"  {L['name']:<7} | {band:<8} | {L['to_run']:>7} | {L['cpw']:>9} | "
-            f"{L['workers']:>7} | {L['ntasks']:>6} | {L['time']:>5} | "
+            f"{L['workers']:>7} | {L['ntasks']:>6} | {L['time']:>5} | {L['batch_size']:>5} | "
             f"{jt:>11} | {L['basis']}"
         )
     print("\n  DRAFT: validate each tier against measured p90 before locking. The")
@@ -458,6 +492,8 @@ def main() -> None:
         text = tpl
         subs = {
             "{{CLASS}}": class_tag,
+            "{{VENV_PATH}}": args.venv_path,
+            "{{ROOT_DIR}}": args.root_dir,
             "{{LANE}}": L["name"],
             "{{MIN_ATOMS}}": str(L["lo"]),
             "{{MAX_ATOMS}}": str(L["hi"]),
@@ -465,6 +501,7 @@ def main() -> None:
             "{{MAX_WORKERS}}": str(L["workers"]),
             "{{NTASKS}}": str(L["ntasks"]),
             "{{TIME}}": L["time"],
+            "{{BATCH_SIZE}}": str(L["batch_size"]),
             "{{JOB_TIMEOUT}}": str(L["job_timeout"]),
             "{{DB_PATH}}": db_abs,
         }
