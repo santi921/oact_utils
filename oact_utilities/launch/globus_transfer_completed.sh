@@ -4,6 +4,10 @@
 # Usage:
 #   bash globus_transfer_completed.sh <db_path> <dest_root>
 #
+# Prerequisite Globus auth:
+#   globus login
+#   globus session consent 'urn:globus:auth:scope:transfer.api.globus.org:all[*https://auth.globus.org/scopes/05d2c76a-e867-4f67-aa57-76edeb0beda0/data_access]'
+#
 # The script:
 #   1. Starts Globus Connect Personal in the background if needed
 #   2. Derives a common source root from job directories stored in the DB

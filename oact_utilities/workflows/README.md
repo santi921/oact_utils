@@ -156,6 +156,21 @@ python -m oact_utilities.workflows.submit_jobs \\
 | `--job-timeout` | 72000 | Per-job timeout in seconds (20 hours) |
 | `--conda-base` | /usr/WS1/vargas58/miniconda3 | Conda base path for worker init |
 
+#### C. Globus Transfer Authentication
+
+Before running Globus transfers from the CLI or `globus_transfer_completed.sh`,
+authenticate the Globus CLI and grant data access consent to the destination
+collection:
+
+```bash
+globus login
+globus session consent 'urn:globus:auth:scope:transfer.api.globus.org:all[*https://auth.globus.org/scopes/05d2c76a-e867-4f67-aa57-76edeb0beda0/data_access]'
+```
+
+Run these once per Globus CLI session on the machine submitting the transfer.
+If Globus prints a different `globus session consent ...` command for a
+specific collection, run the command it prints.
+
 **SLURM Multi-Node Parsl Options (`--use-parsl --scheduler slurm`):**
 
 | Option | Default | Description |
