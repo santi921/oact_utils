@@ -983,6 +983,54 @@ python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
 
 Both hooks run from the Parsl completion loop, after the per-job DB update commits. Failures inside the cleanup hooks are logged but never abort the submitter -- the campaign continues regardless. Traditional mode (`sbatch`/`flux batch`) does not support these flags because the submitter exits before any job finishes; continue to use `clean.py` for that path.
 
+## On-Disk Inventory (no DB needed)
+
+`inventory.py` audits a corpus straight from the filesystem -- no workflow DB required. Point it at a root whose immediate subdirectories are job directories and it reports, per directory and in aggregate, file/subdir counts, cumulative size, a breakdown by file type, nested `orca_tmp_*` scratch, and the largest dirs/files. The scratch-vs-essential classification is imported from `clean.py`, so its "reclaimable" totals match what `clean` would remove. Use it to find the directories whose size is out of control before a transfer.
+
+### Basic Usage
+
+```bash
+# Pure audit -- reads file sizes only, deletes nothing
+python -m oact_utilities.workflows.inventory jobs/
+python -m oact_utilities.workflows.inventory jobs/ --top 40 --csv inventory.csv
+```
+
+### Optional deletion (DB-blind -- only when nothing is running)
+
+```bash
+# Scratch only: the same files clean removes, but from EVERY dir on disk
+python -m oact_utilities.workflows.inventory jobs/ --clean-all             # dry run
+python -m oact_utilities.workflows.inventory jobs/ --clean-all --execute
+
+# Whole-job purge: empty every dir that is NOT completed (failed/timeout/
+# running/to_run) down to a .do_not_rerun.json sentinel. Final sweep before a
+# transfer -- only completed jobs survive.
+python -m oact_utilities.workflows.inventory jobs/ --purge-incomplete      # dry run
+python -m oact_utilities.workflows.inventory jobs/ --purge-incomplete --execute
+```
+
+Both deletion modes are **DB-blind**: they act on disk content alone and cannot tell a live ORCA process from a finished one. Dry-run is the default; pass `--execute` only when the campaign is finished and nothing is executing. `--purge-incomplete` classifies each directory with the same on-disk `check_job_termination()` the dashboard uses, and the sentinel it leaves follows clean.py's `.do_not_rerun.json` template (recording the detected status plus `scf_steps`/`failure_reason` parsed from `orca.out` when present). Completed directories are never touched, and a directory that already carries the marker is skipped (idempotent).
+
+### CLI Reference
+
+```
+python -m oact_utilities.workflows.inventory <root_dir> [options]
+
+Reporting:
+  --top N                 Entries shown in each top list (default: 20)
+  --csv PATH              Write a per-job-directory CSV
+  --workers N             Parallel scan workers (default: 8)
+  --debug N               Limit to first N job directories
+
+Optional deletion (DB-blind -- only when nothing is executing):
+  --clean-tmp/-bas/-all   Delete matching scratch from every directory
+  --purge-incomplete      Whole-job purge of every non-completed directory
+                          (emptied to a .do_not_rerun.json sentinel)
+  --hours-cutoff H        Hours before a job with no termination is timed out
+                          (default: 24)
+  --execute               Actually delete (default: dry-run preview)
+```
+
 ## Concurrency & Database Handling
 
 The workflow system uses SQLite with **WAL (Write-Ahead Logging)** mode for better concurrent access:
