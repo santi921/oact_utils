@@ -236,6 +236,52 @@ def test_count_by_status(tmp_path):
         assert counts[JobStatus.FAILED] == 1
 
 
+def test_count_by_size_bins(tmp_path):
+    """Test status counts grouped into atom-count bins."""
+    db_path = tmp_path / "test.db"
+
+    from oact_utilities.utils.architector import _init_db, _insert_row
+
+    conn = _init_db(db_path)
+
+    # natoms, status pairs spanning three 20-atom bins
+    rows = [
+        (5, "to_run"),  # bin 0 [0, 20)
+        (19, "completed"),  # bin 0 boundary
+        (20, "running"),  # bin 1 [20, 40) boundary
+        (25, "to_run"),  # bin 1
+        (39, "to_run"),  # bin 1 boundary
+        (40, "completed"),  # bin 2 [40, 60)
+    ]
+    for i, (natoms, status) in enumerate(rows):
+        _insert_row(
+            conn,
+            orig_index=i,
+            elements="H",
+            natoms=natoms,
+            geometry="H 0 0 0",
+            status=status,
+        )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        bins = workflow.count_by_size_bins(bin_width=20)
+
+        assert bins[0] == {JobStatus.TO_RUN: 1, JobStatus.COMPLETED: 1}
+        assert bins[1] == {JobStatus.RUNNING: 1, JobStatus.TO_RUN: 2}
+        assert bins[2] == {JobStatus.COMPLETED: 1}
+        assert None not in bins
+
+        # Wider bins collapse everything into a single band
+        wide = workflow.count_by_size_bins(bin_width=100)
+        assert set(wide) == {0}
+        assert wide[0][JobStatus.TO_RUN] == 3
+
+        with pytest.raises(ValueError):
+            workflow.count_by_size_bins(bin_width=0)
+
+
 def test_create_workflow_db_directly(sample_csv, tmp_path):
     """Test direct database creation."""
     db_path = tmp_path / "test.db"

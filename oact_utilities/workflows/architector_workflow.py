@@ -662,6 +662,44 @@ class ArchitectorWorkflow:
         rows = cur.fetchall()
         return {JobStatus(status): count for status, count in rows}
 
+    def count_by_size_bins(
+        self, bin_width: int = 20
+    ) -> dict[int | None, dict[JobStatus, int]]:
+        """Count jobs grouped by atom-count bin and status.
+
+        Bins are half-open intervals ``[k * bin_width, (k + 1) * bin_width)``
+        keyed by the integer bin index ``k`` (so key ``0`` covers
+        ``0..bin_width-1`` atoms, key ``1`` covers ``bin_width..2*bin_width-1``,
+        and so on). Rows with NULL ``natoms`` are collected under the ``None``
+        key. Counting is done in a single ``GROUP BY`` query to avoid per-bin
+        round-trips on Lustre/GPFS.
+
+        Args:
+            bin_width: Width of each atom-count bin (default 20).
+
+        Returns:
+            Mapping of bin index (or ``None`` for unknown size) to a
+            ``{JobStatus: count}`` dict. Only nonzero (bin, status) pairs are
+            present.
+
+        Raises:
+            ValueError: If ``bin_width`` is not a positive integer.
+        """
+        if bin_width <= 0:
+            raise ValueError(f"bin_width must be positive, got {bin_width}")
+
+        query = (
+            "SELECT CASE WHEN natoms IS NULL THEN NULL ELSE natoms / ? END "
+            "AS bin_idx, status, COUNT(*) "
+            "FROM structures GROUP BY bin_idx, status"
+        )
+        cur = self._execute_with_retry(query, (bin_width,))
+        result: dict[int | None, dict[JobStatus, int]] = {}
+        for bin_idx, status, count in cur.fetchall():
+            key = int(bin_idx) if bin_idx is not None else None
+            result.setdefault(key, {})[JobStatus(status)] = count
+        return result
+
     def iter_terminal_history(self) -> list[tuple[str, str]]:
         """Return (status, updated_at_string) for terminal-state rows.
 

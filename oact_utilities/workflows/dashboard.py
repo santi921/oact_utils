@@ -101,6 +101,73 @@ def print_summary(workflow: ArchitectorWorkflow):
     print()
 
 
+def print_size_breakdown(workflow: ArchitectorWorkflow, bin_width: int = 20):
+    """Print status counts broken down by molecular size (atom-count bins).
+
+    Each row is an atom-count band ``[lo, lo+bin_width)`` and each column a job
+    status, so the operator can see, e.g., how many large molecules are still
+    ``to_run`` versus how many small ones have ``completed``.
+
+    Args:
+        workflow: Open workflow handle to query.
+        bin_width: Width of each atom-count bin (default 20).
+    """
+    print_header(f"Status by Molecular Size ({bin_width}-atom bins)")
+
+    bins = workflow.count_by_size_bins(bin_width=bin_width)
+    if not bins:
+        print("\nNo jobs in database.\n")
+        return
+
+    # Only show columns for statuses that actually occur (keeps the table
+    # narrow; legacy READY is omitted unless some row still uses it).
+    present: set[JobStatus] = set()
+    for row in bins.values():
+        present.update(row)
+    statuses = [s for s in JobStatus if s in present]
+
+    header = (
+        f"{'Size':<12}" + "".join(f"{s.value:>10}" for s in statuses) + f"{'Total':>10}"
+    )
+    print("\n" + header)
+    print("-" * len(header))
+
+    # Numeric bins ascending; unknown-size rows (NULL natoms) sort last.
+    numeric_keys = sorted(k for k in bins if k is not None)
+    ordered_keys: list[int | None] = list(numeric_keys)
+    if None in bins:
+        ordered_keys.append(None)
+
+    col_totals = {s: 0 for s in statuses}
+    grand_total = 0
+    for key in ordered_keys:
+        row = bins[key]
+        if key is None:
+            label = "unknown"
+        else:
+            lo = key * bin_width
+            label = f"{lo}-{lo + bin_width}"
+        line = f"{label:<12}"
+        row_total = 0
+        for s in statuses:
+            count = row.get(s, 0)
+            col_totals[s] += count
+            row_total += count
+            line += f"{count:>10}"
+        grand_total += row_total
+        line += f"{row_total:>10}"
+        print(line)
+
+    print("-" * len(header))
+    total_line = (
+        f"{'TOTAL':<12}"
+        + "".join(f"{col_totals[s]:>10}" for s in statuses)
+        + f"{grand_total:>10}"
+    )
+    print(total_line)
+    print()
+
+
 def print_metrics_summary(workflow: ArchitectorWorkflow):
     """Print summary of computational metrics (forces, SCF steps, timing)."""
     import pandas as pd
@@ -1836,6 +1903,18 @@ def main():
         help="Show computational metrics (forces, SCF steps)",
     )
     parser.add_argument(
+        "--show-size-breakdown",
+        action="store_true",
+        help="Show status counts broken down by molecular size (atom-count bins)",
+    )
+    parser.add_argument(
+        "--size-bin-width",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Atom-count bin width for --show-size-breakdown (default: 20)",
+    )
+    parser.add_argument(
         "--extract-metrics",
         action="store_true",
         help="Extract metrics (forces, SCF steps, energy, timing) for completed jobs during --update",
@@ -1900,6 +1979,9 @@ def main():
     add_wandb_args(parser)
 
     args = parser.parse_args()
+
+    if args.show_size_breakdown and args.size_bin_width <= 0:
+        parser.error("--size-bin-width must be a positive integer")
 
     try:
         effective_job_dir_pattern = apply_job_dir_prefix(
@@ -2049,6 +2131,10 @@ def main():
     total = sum(counts.values())
     completed = counts.get(JobStatus.COMPLETED, 0)
     print_progress_bar(completed, total, width=60, label="Completion")
+
+    # Show status-by-size breakdown if requested
+    if args.show_size_breakdown:
+        print_size_breakdown(workflow, bin_width=args.size_bin_width)
 
     # Show failed jobs if requested
     if args.show_failed:
