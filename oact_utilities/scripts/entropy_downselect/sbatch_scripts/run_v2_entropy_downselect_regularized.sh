@@ -22,7 +22,7 @@ echo "CPUs: $(nproc)"
 date
 
 python /global/homes/i/ishan_a/oact_utils/oact_utilities/scripts/entropy_downselect/entropy_downselect.py \
-    --features-dir /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/features_output \
+    --features-dir /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/features_output_v1 \
     --seed-features /global/homes/i/ishan_a/oact_utils/data/v2_data/seed_dataset_filtered_lmdb/seed_dataset_filtered_lmdb_features.npy \
     --output-dir "${OUTPUT_DIR}" \
     --n-select 500000 \

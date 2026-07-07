@@ -6,15 +6,15 @@
 #SBATCH -N 1
 #SBATCH -t 04:00:00
 #SBATCH -J lmdb_infer
-#SBATCH -o /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/features_output/logs/infer_%j.out
-#SBATCH -e /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/features_output/logs/infer_%j.err
+#SBATCH -o /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/features_output_v3/logs/infer_%j.out
+#SBATCH -e /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/features_output_v3/logs/infer_%j.err
 
 set -euo pipefail
 
 BATCH_IDX="${1:?Usage: sbatch run_lmdb_inference_job.sh <0|1>}"
 BASE_DIR="/pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/lmdb_inference"
-OUTPUT_DIR="/pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/features_output"
-MODEL_PATH="/pscratch/sd/i/ishan_a/open_actinides/runs/202605-0213-3947-5676/checkpoints/final/inference_ckpt.pt"
+OUTPUT_DIR="/pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/features_output_v3"
+MODEL_PATH="/pscratch/sd/i/ishan_a/open_actinides/runs/202607-0100-1905-0cc9/checkpoints/final/inference_ckpt.pt"
 
 if [ "$BATCH_IDX" -eq 0 ]; then
     LMDB_FILES=(
@@ -55,7 +55,7 @@ for i in "${!LMDB_FILES[@]}"; do
     LOG="${OUTPUT_DIR}/logs/task${task_idx}_${STEM}.log"
 
     echo "Starting task ${task_idx} GPU ${i}: ${STEM}"
-    CUDA_VISIBLE_DEVICES=${i} python -m oact_utilities.scripts.run_lmdb_inference \
+    CUDA_VISIBLE_DEVICES=${i} python -m oact_utilities.scripts.entropy_downselect.run_lmdb_inference \
         "${LMDB_FILE}" \
         -o "${OUTPUT_DIR}" \
         --model-path "${MODEL_PATH}" \

@@ -4,10 +4,10 @@
 #SBATCH -q premium
 #SBATCH -G 4
 #SBATCH -N 1
-#SBATCH -t 04:00:00
+#SBATCH -t 06:00:00
 #SBATCH -J entropy_opt
-#SBATCH -o /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/v2_seed_downselect_optimized/slurm_%j.out
-#SBATCH -e /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/v2_seed_downselect_optimized/slurm_%j.err
+#SBATCH -o /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/v2_seed_downselect_optimized_aggressive/slurm_%j.out
+#SBATCH -e /pscratch/sd/i/ishan_a/open_actinides/entropy_downselect/v2_seed_downselect_optimized_aggressive/slurm_%j.err
 
 # Entropy downselect with in-loop structure optimization (multi-GPU).
 #
@@ -27,7 +27,7 @@ conda activate fairchemV2
 export PYTHONPATH="/global/u2/i/ishan_a/oact_utils:${PYTHONPATH:-}"
 
 PS="/pscratch/sd/i/ishan_a/open_actinides/entropy_downselect"
-OUTPUT_DIR="${PS}/v2_seed_downselect_optimized"
+OUTPUT_DIR="${PS}/v2_seed_downselect_optimized_aggressive"
 SEED="/global/homes/i/ishan_a/oact_utils/data/v2_data/seed_dataset_filtered_lmdb/seed_dataset_filtered_lmdb_features.npy"
 MODEL="/pscratch/sd/i/ishan_a/open_actinides/runs/202605-0213-3947-5676/checkpoints/final/inference_ckpt.pt"
 mkdir -p "${OUTPUT_DIR}"
@@ -42,16 +42,16 @@ python -m oact_utilities.scripts.entropy_downselect.entropy_downselect_optimize 
     --lmdb-dir "${PS}/lmdb_inference" \
     --model-path "${MODEL}" \
     --output-dir "${OUTPUT_DIR}" \
-    --n-select 500000 \
+    --n-select 250000 \
     --batch-size 1000 \
     --pool-factor 5 \
     --checkpoint-every 10000 \
     --regularization 1e-6 \
     --n-gpus 4 \
     --max-atoms 1024 \
-    --opt-max-steps 5 \
-    --opt-max-disp 0.3 \
-    --opt-step-size 0.05 \
+    --opt-max-steps 10 \
+    --opt-max-disp 0.7 \
+    --opt-step-size 0.1 \
     --opt-min-dist 0.7
 
 echo "Done"

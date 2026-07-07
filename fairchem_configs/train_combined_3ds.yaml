@@ -23,7 +23,7 @@ job:
     slurm:
       partition: ~
       qos: premium
-      account: m5250_g
+      account: m5168_g
       mem_gb: 0
       timeout_hr: 24
       cpus_per_task: 5

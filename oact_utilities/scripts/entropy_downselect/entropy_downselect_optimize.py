@@ -32,6 +32,7 @@ import json
 import os
 import pickle
 import time
+from datetime import datetime
 from pathlib import Path
 
 import lmdb
@@ -812,6 +813,17 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     t_start = time.time()
+
+    # Persist the run configuration (provenance) before doing any work.
+    config_path = output_dir / "run_config.json"
+    with open(config_path, "w") as f:
+        json.dump(
+            {"timestamp": datetime.now().isoformat(), **vars(args)},
+            f,
+            indent=2,
+            sort_keys=True,
+        )
+    debug_log(f"Saved run config to {config_path}")
 
     debug_log(f"Loading seed features from {args.seed_features}...")
     seed_X = np.load(args.seed_features).astype(np.float32)
