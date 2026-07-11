@@ -65,6 +65,22 @@ def test_parse_coordinate_block():
     assert atoms[1] == ("F", 0.0, 0.0, 2.061070)
 
 
+def test_parse_coordinate_block_no_space_after_star():
+    # ORCA also accepts the glued form "*xyz q m" (seen in production inputs).
+    text = "! wB97M-V UKS\n%maxcore 4000\n*xyz 2 4\nEs   0.0 0.0 0.0\nI   1.0853 -3.0389 5.3732\n*\n"
+    parsed = parse_coordinate_block(text)
+    assert parsed is not None
+    charge, mult, atoms = parsed
+    assert charge == 2
+    assert mult == 4
+    assert [a[0] for a in atoms] == ["Es", "I"]
+
+
+def test_parse_coordinate_block_xyzfile_not_matched():
+    text = "* xyzfile 0 1 geom.xyz\n"
+    assert parse_coordinate_block(text) is None
+
+
 def test_parse_coordinate_block_unclosed():
     text = "* xyz 0 1\nH 0.0 0.0 0.0\n"  # no closing '*'
     assert parse_coordinate_block(text) is None

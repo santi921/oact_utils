@@ -102,10 +102,15 @@ def parse_coordinate_block(
     """
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        parts = line.split()
-        if len(parts) >= 4 and parts[0] == "*" and parts[1].lower() == "xyz":
+        stripped_line = line.strip()
+        if not stripped_line.startswith("*"):
+            continue
+        # ORCA accepts both "* xyz q m" and "*xyz q m" -- normalize by
+        # dropping the star before tokenizing.
+        parts = stripped_line[1:].split()
+        if len(parts) >= 3 and parts[0].lower() == "xyz":
             try:
-                charge, mult = int(parts[2]), int(parts[3])
+                charge, mult = int(parts[1]), int(parts[2])
             except ValueError:
                 return None
             atoms: list[tuple[str, float, float, float]] = []
