@@ -17,10 +17,14 @@ Optional read-only job-status report (``--status``) classifies every job
 directory from on-disk content alone -- ``completed`` / ``running`` / ``failed``
 / ``timeout`` / ``to_run`` -- using the same content checks the dashboard uses,
 and prints the per-status counts. No database, no deletion; it just tells you
-what the corpus is doing. Being content-based it is more expensive than the pure
-byte-size walk (it reads the tail of each ORCA output), so it rides the same
-per-job ThreadPoolExecutor fan-out. This is the same classification that gates
-``--purge-incomplete``, exposed without any of the destruction.
+what the corpus is doing. It rides the same per-job ThreadPoolExecutor fan-out
+and is the same classification that gates ``--purge-incomplete``, exposed
+without any of the destruction.
+
+``--status`` still runs the full byte-inventory walk (it reports sizes too). For
+a fast status rundown, ``--status-only`` skips that walk entirely -- no per-file
+``stat`` -- and does only the disk-content classification, which is orders of
+magnitude cheaper on large or scratch-heavy corpora.
 
 Optional DB-blind scratch deletion (``--clean-tmp`` / ``--clean-bas`` /
 ``--clean-all``, gated behind ``--execute``) removes the same direct-child
@@ -49,7 +53,8 @@ Usage:
     python -m oact_utilities.workflows.inventory jobs/
     python -m oact_utilities.workflows.inventory jobs/ --top 40
     python -m oact_utilities.workflows.inventory jobs/ --csv inventory.csv
-    python -m oact_utilities.workflows.inventory jobs/ --status              # read-only status report
+    python -m oact_utilities.workflows.inventory jobs/ --status              # inventory + status
+    python -m oact_utilities.workflows.inventory jobs/ --status-only         # fast status, no byte walk
     python -m oact_utilities.workflows.inventory jobs/ --clean-tmp           # dry run
     python -m oact_utilities.workflows.inventory jobs/ --clean-tmp --execute
     python -m oact_utilities.workflows.inventory jobs/ --purge-incomplete    # dry run
@@ -415,6 +420,7 @@ def scan_job_dir(
     purge_incomplete: bool = False,
     hours_cutoff: int = 24,
     classify_status: bool = False,
+    skip_inventory: bool = False,
 ) -> JobInventory:
     """Recursively inventory one job directory without following symlinks.
 
@@ -422,8 +428,10 @@ def scan_job_dir(
     descended into (mirrors clean.py's size accounting so a link into the final
     corpus is never counted as local weight).
 
-    The directory is always inventoried first (so the report reflects what was
-    there). Then, in order:
+    The directory is inventoried first (so the report reflects what was there),
+    unless ``skip_inventory`` is True -- the fast status-only path, which omits
+    the recursive byte walk entirely (no per-file ``stat``) and only classifies
+    from disk content. Then, in order:
 
     * When ``classify_status`` or ``purge_incomplete`` is True, the dir is
       classified from on-disk content (completed / failed / timeout / running /
@@ -441,46 +449,47 @@ def scan_job_dir(
     All deletion is preview-only unless ``execute`` is True.
     """
     inv = JobInventory(path=job_dir)
-    files_seen: list[tuple[str, int]] = []
 
-    for dirpath, dirnames, filenames in os.walk(job_dir, followlinks=False):
-        inv.n_subdirs += len(dirnames)
-        for d in dirnames:
-            if _ORCA_TMP_DIR_RE.match(d):
-                inv.n_nested_tmp_dirs += 1
+    if not skip_inventory:
+        files_seen: list[tuple[str, int]] = []
+        for dirpath, dirnames, filenames in os.walk(job_dir, followlinks=False):
+            inv.n_subdirs += len(dirnames)
+            for d in dirnames:
+                if _ORCA_TMP_DIR_RE.match(d):
+                    inv.n_nested_tmp_dirs += 1
 
-        rel = os.path.relpath(dirpath, job_dir)
-        in_tmp_dir = rel != "." and any(
-            _ORCA_TMP_DIR_RE.match(part) for part in rel.split(os.sep)
+            rel = os.path.relpath(dirpath, job_dir)
+            in_tmp_dir = rel != "." and any(
+                _ORCA_TMP_DIR_RE.match(part) for part in rel.split(os.sep)
+            )
+
+            for name in filenames:
+                fp = os.path.join(dirpath, name)
+                try:
+                    size = 0 if os.path.islink(fp) else os.path.getsize(fp)
+                except OSError as e:
+                    inv.errors.append(f"{fp}: stat failed: {e}")
+                    size = 0
+
+                inv.n_files += 1
+                inv.total_bytes += size
+
+                ext = _ext_key(name)
+                inv.ext_bytes[ext] += size
+                inv.ext_counts[ext] += 1
+
+                cls = _classify_file(name, in_tmp_dir)
+                inv.class_bytes[cls] += size
+                inv.class_counts[cls] += 1
+
+                if in_tmp_dir:
+                    inv.nested_tmp_bytes += size
+
+                files_seen.append((os.path.relpath(fp, job_dir), size))
+
+        inv.largest_files = heapq.nlargest(
+            _PER_JOB_TOP_FILES, files_seen, key=lambda t: t[1]
         )
-
-        for name in filenames:
-            fp = os.path.join(dirpath, name)
-            try:
-                size = 0 if os.path.islink(fp) else os.path.getsize(fp)
-            except OSError as e:
-                inv.errors.append(f"{fp}: stat failed: {e}")
-                size = 0
-
-            inv.n_files += 1
-            inv.total_bytes += size
-
-            ext = _ext_key(name)
-            inv.ext_bytes[ext] += size
-            inv.ext_counts[ext] += 1
-
-            cls = _classify_file(name, in_tmp_dir)
-            inv.class_bytes[cls] += size
-            inv.class_counts[cls] += 1
-
-            if in_tmp_dir:
-                inv.nested_tmp_bytes += size
-
-            files_seen.append((os.path.relpath(fp, job_dir), size))
-
-    inv.largest_files = heapq.nlargest(
-        _PER_JOB_TOP_FILES, files_seen, key=lambda t: t[1]
-    )
 
     if classify_status or purge_incomplete:
         status_label, status_code = _classify_job_status(job_dir, hours_cutoff)
@@ -529,6 +538,8 @@ class Corpus:
     clean_freed: int = 0
     # On-disk status classification (populated with --status or --purge-incomplete).
     classify_status: bool = False
+    # Fast status-only run: byte inventory walk was skipped (sizes are all zero).
+    status_only: bool = False
     # Whole-job purge accounting (populated only with --purge-incomplete).
     purge_incomplete: bool = False
     status_counts: Counter = field(default_factory=Counter)
@@ -548,6 +559,7 @@ def inventory_root(
     purge_incomplete: bool = False,
     hours_cutoff: int = 24,
     classify_status: bool = False,
+    status_only: bool = False,
 ) -> Corpus:
     """Scan every immediate subdirectory of ``root`` as a job directory.
 
@@ -559,6 +571,11 @@ def inventory_root(
     reported. This is read-only -- it deletes nothing -- and is what ``--status``
     exposes.
 
+    When ``status_only`` is True, the recursive byte-inventory walk is skipped
+    entirely (no per-file ``stat``) and only the disk-content classification
+    runs -- the fast ``--status-only`` path. It implies ``classify_status`` and
+    reports just the status table; file/size totals are not collected.
+
     When ``clean_categories`` is non-empty, each job's direct-child scratch in
     those categories is deleted after it is inventoried (preview only unless
     ``execute`` is True).
@@ -569,12 +586,15 @@ def inventory_root(
     sentinel (preview only unless ``execute``). DB-blind -- see the module
     docstring for the safety contract.
     """
+    if status_only:
+        classify_status = True
     root = root.resolve()
     corpus = Corpus(
         root=root,
         clean_categories=clean_categories,
         clean_execute=execute,
         classify_status=classify_status,
+        status_only=status_only,
         purge_incomplete=purge_incomplete,
     )
 
@@ -616,6 +636,7 @@ def inventory_root(
                 purge_incomplete,
                 hours_cutoff,
                 classify_status,
+                status_only,
             ): jd
             for jd in job_dirs
         }
@@ -666,6 +687,26 @@ def _pct(part: int, whole: int) -> str:
     return f"{(100.0 * part / whole):.1f}%" if whole else "0.0%"
 
 
+def _print_status_table(corpus: Corpus) -> None:
+    """Print the on-disk job-status breakdown (shared by full + status-only)."""
+    n_classified = sum(corpus.status_counts.values())
+    print("\n--- Job status (on-disk content) ---")
+    print("  status | job dirs | % of classified")
+    for label in _STATUS_ORDER:
+        cnt = corpus.status_counts.get(label, 0)
+        print(f"  {label} | {cnt} | {_pct(cnt, n_classified)}")
+
+
+def _print_warnings(corpus: Corpus) -> None:
+    """Print up to 20 accumulated scan warnings, if any."""
+    if corpus.errors:
+        print(f"\nWarnings ({len(corpus.errors)}):")
+        for err in corpus.errors[:20]:
+            print(f"  - {err}")
+        if len(corpus.errors) > 20:
+            print(f"  ... and {len(corpus.errors) - 20} more")
+
+
 def _print_report(corpus: Corpus, top: int) -> None:
     """Print the full console report for a scanned corpus."""
     n_jobs = len(corpus.jobs)
@@ -674,6 +715,14 @@ def _print_report(corpus: Corpus, top: int) -> None:
     print(f"{'=' * 70}")
     print(f"  Root:            {corpus.root}")
     print(f"  Job directories: {n_jobs}")
+
+    # Fast status-only path: the byte walk was skipped, so file/size totals were
+    # never collected -- print just the status breakdown and return.
+    if corpus.status_only:
+        _print_status_table(corpus)
+        _print_warnings(corpus)
+        return
+
     print(f"  Total files:     {corpus.total_files}")
     print(f"  Total subdirs:   {corpus.total_subdirs}")
     print(f"  Total size:      {_format_size(corpus.total_bytes)}")
@@ -733,12 +782,7 @@ def _print_report(corpus: Corpus, top: int) -> None:
 
     # --- Job status (on-disk content), for --status or --purge-incomplete ---
     if corpus.classify_status or corpus.purge_incomplete:
-        n_classified = sum(corpus.status_counts.values())
-        print("\n--- Job status (on-disk content) ---")
-        print("  status | job dirs | % of classified")
-        for label in _STATUS_ORDER:
-            cnt = corpus.status_counts.get(label, 0)
-            print(f"  {label} | {cnt} | {_pct(cnt, n_classified)}")
+        _print_status_table(corpus)
 
     # --- Whole-job purge (only when --purge-incomplete requested) ---
     if corpus.purge_incomplete:
@@ -776,12 +820,7 @@ def _print_report(corpus: Corpus, top: int) -> None:
     for size, path in top_files:
         print(f"  {_format_size(size)} | {path}")
 
-    if corpus.errors:
-        print(f"\nWarnings ({len(corpus.errors)}):")
-        for err in corpus.errors[:20]:
-            print(f"  - {err}")
-        if len(corpus.errors) > 20:
-            print(f"  ... and {len(corpus.errors) - 20} more")
+    _print_warnings(corpus)
 
 
 def _rel(path: Path, root: Path) -> str:
@@ -802,8 +841,18 @@ def _write_csv(corpus: Corpus, csv_path: Path) -> None:
 
     The ``top_exts`` column lists the largest file types in that job
     (``.gbw:1.2 GB;.tmp:300.0 MB``) so per-folder composition is visible without
-    a second pass.
+    a second pass. In status-only mode the byte inventory was skipped, so only
+    ``job_dir`` and ``status`` are written.
     """
+    if corpus.status_only:
+        with csv_path.open("w", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["job_dir", "status"])
+            for inv in corpus.jobs:
+                writer.writerow([_rel(inv.path, corpus.root), inv.status_label or ""])
+        print(f"\nPer-job status written to {csv_path}")
+        return
+
     header = [
         "job_dir",
         "n_files",
@@ -911,11 +960,21 @@ def main() -> None:
         "--status",
         action="store_true",
         help="Report per-directory job status from on-disk content "
-        "(completed/running/failed/timeout/to_run) without a database. "
-        "Read-only -- uses the same content checks as the dashboard, "
-        "parallelized across --workers (see --hours-cutoff for the "
+        "(completed/running/failed/timeout/to_run) without a database, alongside "
+        "the full byte inventory. Read-only -- uses the same content checks as "
+        "the dashboard, parallelized across --workers (see --hours-cutoff for the "
         "running-vs-timeout threshold). Composes with --clean-*; implied by "
-        "--purge-incomplete.",
+        "--purge-incomplete. For a fast status rundown that skips the byte "
+        "inventory, use --status-only.",
+    )
+    parser.add_argument(
+        "--status-only",
+        action="store_true",
+        help="Fast status rundown: classify every job dir from disk content and "
+        "print only the status table, SKIPPING the recursive byte-inventory walk "
+        "(no per-file stat, no size/type breakdown). Much faster than --status on "
+        "large or scratch-heavy corpora. Read-only; cannot be combined with "
+        "--clean-*/--purge-*.",
     )
 
     clean = parser.add_argument_group(
@@ -982,6 +1041,13 @@ def main() -> None:
             "or --purge-incomplete"
         )
 
+    if args.status_only and (categories or args.purge_incomplete):
+        parser.error(
+            "--status-only is a read-only fast report and cannot be combined with "
+            "--clean-*/--purge-* (those need the byte inventory). Use --status for "
+            "the combined inventory + status view."
+        )
+
     mode = "EXECUTE (deleting)" if args.execute else "DRY RUN (preview only)"
     if args.purge_incomplete:
         print("!" * 70)
@@ -1016,6 +1082,7 @@ def main() -> None:
         purge_incomplete=args.purge_incomplete,
         hours_cutoff=args.hours_cutoff,
         classify_status=args.status,
+        status_only=args.status_only,
     )
     _print_report(corpus, top=args.top)
     if args.csv is not None:

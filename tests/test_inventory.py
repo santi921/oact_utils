@@ -377,3 +377,58 @@ def test_classify_status_composes_with_clean(tmp_path: Path) -> None:
     assert corpus.clean_freed == 64
     assert not (jr / "leftover.tmp").exists()
     assert (jr / "orca.out").exists()  # essential kept
+
+
+# ---------------------------------------------------------------------------
+# Fast status-only path (--status-only): classify, skip the byte-inventory walk
+# ---------------------------------------------------------------------------
+
+
+def test_status_only_skips_byte_walk_but_classifies(tmp_path: Path) -> None:
+    _build_status_corpus(tmp_path)
+    corpus = inventory_root(tmp_path, workers=2, status_only=True)
+
+    # Classification still runs and is correct.
+    assert corpus.classify_status is True
+    assert corpus.status_only is True
+    assert corpus.status_counts[_STATUS_COMPLETED] == 1
+    assert corpus.status_counts[_STATUS_FAILED] == 1
+    assert corpus.status_counts[_STATUS_RUNNING] == 1
+    assert corpus.status_counts[_STATUS_TIMEOUT] == 1
+    assert corpus.status_counts[_STATUS_TO_RUN] == 1
+
+    # The byte-inventory walk was skipped: no per-file stat, no sizes collected.
+    assert corpus.total_files == 0
+    assert corpus.total_bytes == 0
+    for job in corpus.jobs:
+        assert job.n_files == 0
+        assert job.total_bytes == 0
+        assert job.largest_files == []
+        assert job.status_label is not None
+
+
+def test_status_only_via_scan_job_dir_skips_inventory(tmp_path: Path) -> None:
+    _build_status_corpus(tmp_path)
+    inv = scan_job_dir(
+        tmp_path / "job_completed",
+        classify_status=True,
+        skip_inventory=True,
+    )
+    assert inv.status_label == _STATUS_COMPLETED
+    assert inv.n_files == 0  # walk skipped
+    assert inv.total_bytes == 0
+    assert (tmp_path / "job_completed" / "orca.out").exists()  # nothing deleted
+
+
+def test_status_only_csv_is_two_columns(tmp_path: Path) -> None:
+    _build_status_corpus(tmp_path)
+    corpus = inventory_root(tmp_path, workers=2, status_only=True)
+    csv_path = tmp_path / "status.csv"
+    from oact_utilities.workflows.inventory import _write_csv
+
+    _write_csv(corpus, csv_path)
+    rows = list(csv.DictReader(csv_path.open()))
+    assert set(rows[0].keys()) == {"job_dir", "status"}
+    by_dir = {r["job_dir"]: r["status"] for r in rows}
+    assert by_dir["job_completed"] == _STATUS_COMPLETED
+    assert by_dir["job_failed"] == _STATUS_FAILED
