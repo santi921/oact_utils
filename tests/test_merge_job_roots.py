@@ -26,6 +26,22 @@ _DEFAULT_INP = "* xyz 0 1\nH 0.0 0.0 0.0\n*\n"
 _OTHER_INP = "* xyz 0 1\nH 0.0 0.0 0.0\nH 0.0 0.0 0.74\n*\n"
 
 
+def _echo(inp: str) -> str:
+    """Render input text as the INPUT FILE echo block ORCA prints in .out."""
+    lines = [
+        "=" * 80,
+        " " * 39 + "INPUT FILE",
+        "=" * 80,
+        "NAME = orca.inp",
+    ]
+    for i, line in enumerate(inp.splitlines(), start=1):
+        lines.append(f"|{i:3d}> {line}")
+    lines.append(
+        f"|{len(inp.splitlines()) + 1:3d}> " + " " * 26 + "****END OF INPUT****"
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _set_times(job_dir: Path, mtime: float) -> None:
     for p in job_dir.rglob("*"):
         os.utime(p, (mtime, mtime))
@@ -33,12 +49,17 @@ def _set_times(job_dir: Path, mtime: float) -> None:
 
 
 def _make_completed(
-    root: Path, name: str, mtime: float = _NOW, inp: str = _DEFAULT_INP
+    root: Path,
+    name: str,
+    mtime: float = _NOW,
+    inp: str = _DEFAULT_INP,
+    echo_inp: str | None = None,
 ) -> Path:
     jd = root / name
     jd.mkdir(parents=True)
     (jd / "orca.inp").write_text(inp)
-    (jd / "orca.out").write_text("stuff\n" * 20 + "ORCA TERMINATED NORMALLY\n")
+    echo = _echo(echo_inp if echo_inp is not None else inp)
+    (jd / "orca.out").write_text(echo + "stuff\n" * 20 + "ORCA TERMINATED NORMALLY\n")
     _set_times(jd, mtime)
     return jd
 
@@ -49,7 +70,7 @@ def _make_failed(
     jd = root / name
     jd.mkdir(parents=True)
     (jd / "orca.inp").write_text(inp)
-    (jd / "orca.out").write_text("stuff\n" * 20 + "aborting the run\n")
+    (jd / "orca.out").write_text(_echo(inp) + "stuff\n" * 20 + "aborting the run\n")
     _set_times(jd, mtime)
     return jd
 
@@ -122,6 +143,98 @@ def test_plan_drop_incomplete(tmp_path):
     assert plan["b_queued"].action == "drop_dest"
     assert plan["both_queued"].action == ACT_DROP_BOTH
     assert plan["a_done"].action == ACT_MOVE
+
+
+def test_echo_hash_and_states(tmp_path):
+    root = tmp_path / "r"
+    _make_completed(root, "good")
+    # Empty inp but valid out with echo: hash recovered from the echo.
+    jd = _make_completed(root, "empty_inp")
+    (jd / "orca.inp").write_text("")
+    # inp swapped in from another structure: inp/out hashes disagree.
+    jd2 = _make_completed(root, "swapped", inp=_OTHER_INP, echo_inp=_DEFAULT_INP)
+    # Entirely empty folder.
+    (root / "hollow").mkdir()
+
+    jobs = scan_root(root, hours_cutoff=24, workers=2, label="A")
+    good, empty_inp, swapped, hollow = (
+        jobs["good"],
+        jobs["empty_inp"],
+        jobs["swapped"],
+        jobs["hollow"],
+    )
+    assert good.hash_source == "out"
+    assert good.inp_geom_key == good.out_geom_key
+    assert not good.self_inconsistent
+
+    assert empty_inp.inp_state == "empty"
+    assert empty_inp.empty_inp_otherwise_valid
+    assert empty_inp.hash_source == "out"
+    assert empty_inp.geom_key == good.geom_key  # recovered via echo
+
+    assert swapped.self_inconsistent
+    assert swapped.geom_key == swapped.out_geom_key  # out echo wins
+
+    assert hollow.is_empty
+    assert hollow.geom_key is None
+    assert jd2.name == "swapped"  # silence unused warning
+
+
+def test_empty_inp_collision_resolved_via_echo(tmp_path):
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    # A copy is complete with a good inp; B copy is complete but its inp got
+    # truncated to 0 bytes -- the out echo proves same structure, so the
+    # collision resolves (B newer wins here).
+    _make_completed(root_a, "clash", mtime=_NOW - 5000)
+    jd_b = _make_completed(root_b, "clash", mtime=_NOW)
+    (jd_b / "orca.inp").write_text("")
+    os.utime(jd_b / "orca.inp", (_NOW, _NOW))
+
+    jobs_a, jobs_b = _scan_both(root_a, root_b)
+    plan = build_plan(jobs_a, jobs_b, drop_incomplete=False)
+    assert plan[0].action == ACT_DISCARD_SRC
+    assert "same structure hash" in plan[0].reason
+
+
+def test_self_inconsistent_collision_skipped(tmp_path):
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    # B's inp disagrees with its own out echo (misplaced input): never
+    # auto-resolve, even though the echo matches A.
+    _make_completed(root_a, "clash", mtime=_NOW)
+    _make_completed(
+        root_b, "clash", mtime=_NOW - 5000, inp=_OTHER_INP, echo_inp=_DEFAULT_INP
+    )
+
+    jobs_a, jobs_b = _scan_both(root_a, root_b)
+    plan = build_plan(jobs_a, jobs_b, drop_incomplete=False)
+    assert plan[0].action == ACT_SKIP_MISMATCH
+    assert "DISAGREE in B" in plan[0].reason
+
+
+def test_empty_folder_superseded(tmp_path):
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    # Non-empty side supersedes regardless of hash availability or mtime.
+    _make_completed(root_a, "b_hollow", mtime=_NOW - 5000)
+    (root_b / "b_hollow").mkdir(parents=True)
+    (root_a / "a_hollow").mkdir(parents=True)
+    _make_to_run(root_b, "a_hollow")
+    (root_a / "both_hollow").mkdir()
+    (root_b / "both_hollow").mkdir(parents=True)
+
+    jobs_a, jobs_b = _scan_both(root_a, root_b)
+    plan = {e.name: e for e in build_plan(jobs_a, jobs_b, drop_incomplete=False)}
+    assert plan["b_hollow"].action == ACT_REPLACE_DEST
+    assert plan["a_hollow"].action == ACT_DISCARD_SRC
+    assert plan["both_hollow"].action == ACT_DISCARD_SRC
+
+    counts, _markers, errors = execute_plan(
+        list(plan.values()), root_b, root_a, execute=True
+    )
+    assert not errors
+    assert (root_b / "b_hollow" / "orca.out").exists()  # A's content moved in
+    assert not (root_a / "a_hollow").exists()
+    assert (root_b / "a_hollow" / "orca.inp").exists()
+    assert not (root_a / "both_hollow").exists()
 
 
 def test_hash_mismatch_collision_skipped(tmp_path):
