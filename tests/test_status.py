@@ -1,5 +1,6 @@
 """Tests for status checking utilities."""
 
+import gzip
 import os
 import tempfile
 import time
@@ -9,6 +10,8 @@ import pytest
 
 from oact_utilities.utils.status import (
     _check_sella_termination,
+    _read_last_lines,
+    _tail_text_file,
     check_file_termination,
     check_job_termination,
     pull_log_file,
@@ -214,3 +217,64 @@ def test_check_job_termination_no_optimizer_ignores_sella(tmp_path):
     # No ORCA .out file, so should return 0 or -2 (not 1)
     status = check_job_termination(str(tmp_path), optimizer=None)
     assert status != 1
+
+
+# ---------------------------------------------------------------------------
+# Seek-based tail read (_tail_text_file / _read_last_lines): must return the
+# same last-N lines as a full scan without reading the whole file.
+# ---------------------------------------------------------------------------
+
+
+def test_tail_text_file_matches_full_scan_large_file(tmp_path):
+    """Seek-tail returns the same last N lines as a full read on a large file."""
+    fp = tmp_path / "orca.out"
+    lines = [f"line {i}\n" for i in range(200_000)]  # spans many 64 KB blocks
+    fp.write_text("".join(lines))
+    expected = [ln.rstrip("\n") for ln in lines[-10:]]
+    assert _tail_text_file(str(fp), 10) == expected
+
+
+def test_tail_text_file_fewer_lines_than_maxlen(tmp_path):
+    """A file with fewer than N lines returns all of them."""
+    fp = tmp_path / "short.out"
+    fp.write_text("a\nb\nc\n")
+    assert _tail_text_file(str(fp), 10) == ["a", "b", "c"]
+
+
+def test_tail_text_file_no_trailing_newline(tmp_path):
+    """The final line is returned even without a trailing newline."""
+    fp = tmp_path / "no_nl.out"
+    fp.write_text("first\nsecond\nORCA TERMINATED NORMALLY")
+    assert _tail_text_file(str(fp), 2) == ["second", "ORCA TERMINATED NORMALLY"]
+
+
+def test_tail_text_file_empty(tmp_path):
+    """An empty file yields no lines."""
+    fp = tmp_path / "empty.out"
+    fp.write_text("")
+    assert _tail_text_file(str(fp), 10) == []
+
+
+def test_tail_text_file_line_spanning_block_boundary(tmp_path):
+    """A line longer than the read block is still reassembled correctly."""
+    fp = tmp_path / "long_line.out"
+    long_line = "x" * 200_000  # single line >> the 65536-byte block
+    fp.write_text(f"header\n{long_line}\nORCA TERMINATED NORMALLY\n")
+    tail = _tail_text_file(str(fp), 2, block=4096)
+    assert tail == [long_line, "ORCA TERMINATED NORMALLY"]
+
+
+def test_read_last_lines_success_on_large_file(tmp_path):
+    """check_file_termination detects success in the tail of a large output."""
+    fp = tmp_path / "orca.out"
+    body = "SCF ITERATION 12 -12345.6\n" * 100_000
+    fp.write_text(body + "\n****ORCA TERMINATED NORMALLY****\n")
+    assert check_file_termination(str(fp), hours_cutoff=100000) == 1
+
+
+def test_read_last_lines_gzip_still_supported(tmp_path):
+    """The gzip path still returns newline-stripped last lines."""
+    fp = tmp_path / "orca.out.gz"
+    with gzip.open(fp, "wt") as f:
+        f.write("alpha\nbeta\ngamma\n")
+    assert _read_last_lines(str(fp), maxlen=2) == ["beta", "gamma"]

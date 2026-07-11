@@ -15,8 +15,36 @@ def _is_orca_atom_scf(filename: str) -> bool:
     return _ORCA_ATOM_RE.match(os.path.basename(filename)) is not None
 
 
+def _tail_text_file(file_path: str, maxlen: int, block: int = 65536) -> list[str]:
+    """Return the last ``maxlen`` lines of a plain-text file via end-seeking.
+
+    Seeks to EOF and pulls back ``block``-sized chunks until at least ``maxlen``
+    line breaks are buffered (or the file start is reached), so a multi-MB ORCA
+    output costs one small read instead of a full scan. Decodes with
+    ``errors='replace'`` to match the tolerant read used elsewhere for
+    partially-written/corrupted output. Returned lines are newline-stripped.
+    """
+    with open(file_path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        pos = f.tell()
+        buf = b""
+        while pos > 0 and buf.count(b"\n") <= maxlen:
+            step = min(block, pos)
+            pos -= step
+            f.seek(pos)
+            buf = f.read(step) + buf
+    return buf.decode(errors="replace").splitlines()[-maxlen:]
+
+
 def _read_last_lines(file_path: str, maxlen: int = 10) -> list[str]:
     """Read the last N lines of a file, handling gzip and encoding errors.
+
+    Plain-text files are tailed by seeking from the end (see
+    :func:`_tail_text_file`) so large ORCA outputs are not read in full. Gzip
+    files are decompressed sequentially -- random access into a gzip stream is
+    not cheap, and these are the smaller quacc outputs. Returned lines are
+    newline-stripped; every caller matches by substring / ``strip``, so this is
+    behaviorally identical to the previous per-line read.
 
     Args:
         file_path: Path to the file (.out or .out.gz).
@@ -28,10 +56,8 @@ def _read_last_lines(file_path: str, maxlen: int = 10) -> list[str]:
     try:
         if file_path.endswith(".gz"):
             with gzip.open(file_path, "rt", errors="replace") as f:
-                return list(deque(f, maxlen=maxlen))
-        else:
-            with open(file_path, errors="replace") as f:
-                return list(deque(f, maxlen=maxlen))
+                return [line.rstrip("\n") for line in deque(f, maxlen=maxlen)]
+        return _tail_text_file(file_path, maxlen)
     except (OSError, UnicodeDecodeError, EOFError):
         return []
 
