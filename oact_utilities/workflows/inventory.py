@@ -10,8 +10,17 @@ is "quite frankly ridiculous" and to see exactly what is sitting in them.
 The scratch-vs-essential classification mirrors clean.py exactly (the patterns
 are imported from it), so the "reclaimable" totals here match what
 ``clean --clean-all`` / ``--purge-*`` would actually remove. Aligning the
-inventory with the DB (job status, orig_index) is intentionally out of scope --
-do that later with clean.
+inventory with the DB (orig_index) is intentionally out of scope -- do that
+later with clean.
+
+Optional read-only job-status report (``--status``) classifies every job
+directory from on-disk content alone -- ``completed`` / ``running`` / ``failed``
+/ ``timeout`` / ``to_run`` -- using the same content checks the dashboard uses,
+and prints the per-status counts. No database, no deletion; it just tells you
+what the corpus is doing. Being content-based it is more expensive than the pure
+byte-size walk (it reads the tail of each ORCA output), so it rides the same
+per-job ThreadPoolExecutor fan-out. This is the same classification that gates
+``--purge-incomplete``, exposed without any of the destruction.
 
 Optional DB-blind scratch deletion (``--clean-tmp`` / ``--clean-bas`` /
 ``--clean-all``, gated behind ``--execute``) removes the same direct-child
@@ -40,6 +49,7 @@ Usage:
     python -m oact_utilities.workflows.inventory jobs/
     python -m oact_utilities.workflows.inventory jobs/ --top 40
     python -m oact_utilities.workflows.inventory jobs/ --csv inventory.csv
+    python -m oact_utilities.workflows.inventory jobs/ --status              # read-only status report
     python -m oact_utilities.workflows.inventory jobs/ --clean-tmp           # dry run
     python -m oact_utilities.workflows.inventory jobs/ --clean-tmp --execute
     python -m oact_utilities.workflows.inventory jobs/ --purge-incomplete    # dry run
@@ -404,6 +414,7 @@ def scan_job_dir(
     execute: bool = False,
     purge_incomplete: bool = False,
     hours_cutoff: int = 24,
+    classify_status: bool = False,
 ) -> JobInventory:
     """Recursively inventory one job directory without following symlinks.
 
@@ -414,11 +425,16 @@ def scan_job_dir(
     The directory is always inventoried first (so the report reflects what was
     there). Then, in order:
 
-    * When ``purge_incomplete`` is True, the dir is classified from disk content.
-      A non-completed dir (failed / timeout / running / to_run) is whole-job
-      purged -- emptied except for a ``.do_not_rerun.json`` sentinel -- and
-      scratch cleaning is skipped for it (the dir is already empty). A completed
-      dir is kept and still eligible for scratch cleaning below.
+    * When ``classify_status`` or ``purge_incomplete`` is True, the dir is
+      classified from on-disk content (completed / failed / timeout / running /
+      to_run) and the label/code are recorded on the returned inventory. This is
+      read-only on its own -- ``--status`` -- and only deletes when
+      ``purge_incomplete`` also fires below.
+    * When ``purge_incomplete`` is True, a non-completed dir (failed / timeout /
+      running / to_run) is whole-job purged -- emptied except for a
+      ``.do_not_rerun.json`` sentinel -- and scratch cleaning is skipped for it
+      (the dir is already empty). A completed dir is kept and still eligible for
+      scratch cleaning below.
     * When ``clean_categories`` is non-empty the dir's direct-child scratch in
       those categories is deleted.
 
@@ -466,11 +482,11 @@ def scan_job_dir(
         _PER_JOB_TOP_FILES, files_seen, key=lambda t: t[1]
     )
 
-    if purge_incomplete:
+    if classify_status or purge_incomplete:
         status_label, status_code = _classify_job_status(job_dir, hours_cutoff)
         inv.status_label = status_label
         inv.status_code = status_code
-        if status_label != _STATUS_COMPLETED:
+        if purge_incomplete and status_label != _STATUS_COMPLETED:
             _purge_job_dir(job_dir, status_label, status_code, execute, inv)
             # Dir was emptied (or would be) -- nothing left to scratch-clean.
             return inv
@@ -511,6 +527,8 @@ class Corpus:
     clean_matched: int = 0
     clean_bytes: int = 0
     clean_freed: int = 0
+    # On-disk status classification (populated with --status or --purge-incomplete).
+    classify_status: bool = False
     # Whole-job purge accounting (populated only with --purge-incomplete).
     purge_incomplete: bool = False
     status_counts: Counter = field(default_factory=Counter)
@@ -529,11 +547,17 @@ def inventory_root(
     execute: bool = False,
     purge_incomplete: bool = False,
     hours_cutoff: int = 24,
+    classify_status: bool = False,
 ) -> Corpus:
     """Scan every immediate subdirectory of ``root`` as a job directory.
 
     Files sitting directly under ``root`` (not inside a job subdirectory) are
     tallied separately as "loose" and not classified.
+
+    When ``classify_status`` is True, every job dir is classified from on-disk
+    content (completed / failed / timeout / running / to_run) and the counts are
+    reported. This is read-only -- it deletes nothing -- and is what ``--status``
+    exposes.
 
     When ``clean_categories`` is non-empty, each job's direct-child scratch in
     those categories is deleted after it is inventoried (preview only unless
@@ -550,6 +574,7 @@ def inventory_root(
         root=root,
         clean_categories=clean_categories,
         clean_execute=execute,
+        classify_status=classify_status,
         purge_incomplete=purge_incomplete,
     )
 
@@ -577,6 +602,8 @@ def inventory_root(
         desc = "Purging"
     elif clean_categories:
         desc = "Cleaning"
+    elif classify_status:
+        desc = "Classifying"
     else:
         desc = "Scanning"
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -588,6 +615,7 @@ def inventory_root(
                 execute,
                 purge_incomplete,
                 hours_cutoff,
+                classify_status,
             ): jd
             for jd in job_dirs
         }
@@ -703,12 +731,17 @@ def _print_report(corpus: Corpus, top: int) -> None:
         else:
             print("  DRY RUN -- re-run with --execute to delete.")
 
+    # --- Job status (on-disk content), for --status or --purge-incomplete ---
+    if corpus.classify_status or corpus.purge_incomplete:
+        n_classified = sum(corpus.status_counts.values())
+        print("\n--- Job status (on-disk content) ---")
+        print("  status | job dirs | % of classified")
+        for label in _STATUS_ORDER:
+            cnt = corpus.status_counts.get(label, 0)
+            print(f"  {label} | {cnt} | {_pct(cnt, n_classified)}")
+
     # --- Whole-job purge (only when --purge-incomplete requested) ---
     if corpus.purge_incomplete:
-        print("\n--- Job status (on-disk content) ---")
-        print("  status | job dirs")
-        for label in _STATUS_ORDER:
-            print(f"  {label} | {corpus.status_counts.get(label, 0)}")
         verb = "Purged" if corpus.clean_execute else "Would purge"
         action = "Freed" if corpus.clean_execute else "Would free"
         print("\n--- Whole-job purge (everything not completed) ---")
@@ -874,6 +907,16 @@ def main() -> None:
         metavar="N",
         help="Limit to first N job directories for testing",
     )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Report per-directory job status from on-disk content "
+        "(completed/running/failed/timeout/to_run) without a database. "
+        "Read-only -- uses the same content checks as the dashboard, "
+        "parallelized across --workers (see --hours-cutoff for the "
+        "running-vs-timeout threshold). Composes with --clean-*; implied by "
+        "--purge-incomplete.",
+    )
 
     clean = parser.add_argument_group(
         "optional scratch deletion (DB-blind -- only run when nothing is executing)"
@@ -972,6 +1015,7 @@ def main() -> None:
         execute=args.execute,
         purge_incomplete=args.purge_incomplete,
         hours_cutoff=args.hours_cutoff,
+        classify_status=args.status,
     )
     _print_report(corpus, top=args.top)
     if args.csv is not None:

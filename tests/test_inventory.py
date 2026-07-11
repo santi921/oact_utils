@@ -322,3 +322,58 @@ def test_purge_incomplete_via_scan_job_dir(tmp_path: Path) -> None:
     assert inv.purged is True
     assert inv.purge_freed > 0
     assert (tmp_path / "job_failed" / MARKER_FILENAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# Read-only status report (--status): classify only, delete nothing
+# ---------------------------------------------------------------------------
+
+
+def test_classify_status_counts_all_states_read_only(tmp_path: Path) -> None:
+    _build_status_corpus(tmp_path)
+    corpus = inventory_root(tmp_path, workers=2, classify_status=True)
+
+    assert corpus.classify_status is True
+    assert corpus.status_counts[_STATUS_COMPLETED] == 1
+    assert corpus.status_counts[_STATUS_FAILED] == 1
+    assert corpus.status_counts[_STATUS_RUNNING] == 1
+    assert corpus.status_counts[_STATUS_TIMEOUT] == 1
+    assert corpus.status_counts[_STATUS_TO_RUN] == 1
+
+    # Read-only: nothing purged or cleaned, every file preserved.
+    assert corpus.purge_job_count == 0
+    assert corpus.clean_matched == 0
+    for job in ("job_completed", "job_failed", "job_running", "job_timeout"):
+        assert (tmp_path / job / "orca.out").exists()
+    assert (tmp_path / "job_failed" / "orca.gbw").exists()
+    assert not (tmp_path / "job_failed" / MARKER_FILENAME).exists()
+
+
+def test_classify_status_via_scan_job_dir_does_not_purge(tmp_path: Path) -> None:
+    _build_status_corpus(tmp_path)
+    inv = scan_job_dir(tmp_path / "job_failed", classify_status=True, hours_cutoff=24)
+    assert inv.status_label == _STATUS_FAILED
+    assert inv.status_code == -1
+    assert inv.purged is False
+    assert inv.purge_matched == 0
+    assert (tmp_path / "job_failed" / "orca.out").exists()
+    assert not (tmp_path / "job_failed" / MARKER_FILENAME).exists()
+
+
+def test_classify_status_composes_with_clean(tmp_path: Path) -> None:
+    # --status alongside --clean-tmp: status is recorded AND scratch is cleaned.
+    _build_status_corpus(tmp_path)
+    jr = tmp_path / "job_running"
+    (jr / "leftover.tmp").write_bytes(b"x" * 64)
+
+    corpus = inventory_root(
+        tmp_path,
+        workers=2,
+        classify_status=True,
+        clean_categories=frozenset({"tmp"}),
+        execute=True,
+    )
+    assert corpus.status_counts[_STATUS_RUNNING] == 1
+    assert corpus.clean_freed == 64
+    assert not (jr / "leftover.tmp").exists()
+    assert (jr / "orca.out").exists()  # essential kept
