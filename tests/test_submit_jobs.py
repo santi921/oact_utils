@@ -19,6 +19,7 @@ from oact_utilities.workflows.submit_jobs import (
     DEFAULT_ORCA_CONFIG,
     DEFAULT_ORCA_PATHS,
     OrcaConfig,
+    _build_orca_subprocess_environment,
     _classify_claimed_job,
     _classify_parsl_future_failure,
     _cleanup_completed_job_inline,
@@ -41,6 +42,82 @@ from oact_utilities.workflows.submit_jobs import (
 )
 
 PARSL_INSTALLED = importlib.util.find_spec("parsl") is not None
+
+
+class TestOrcaSubprocessEnvironment:
+    """Tests for scheduler-isolated nested ORCA MPI environments."""
+
+    def test_strips_scheduler_and_mpi_session_state(self, tmp_path):
+        """ORCA must not inherit outer scheduler or MPI session state."""
+        inherited = {
+            "PATH": "/usr/bin",
+            "KEEP_ME": "yes",
+            "SLURM_JOB_ID": "2288341",
+            "SLURM_STEP_ID": "0",
+            "SLURM_NODELIST": "n[0001-0720]",
+            "SLURM_NNODES": "720",
+            "SLURM_TASKS_PER_NODE": "1(x720)",
+            "SLURM_NTASKS": "720",
+            "SLURM_PROCID": "319",
+            "SLURM_LOCALID": "0",
+            "SLURM_NODEID": "319",
+            "SLURM_CPU_BIND": "verbose,mask_cpu:0xff",
+            "PBS_JOBID": "123.server",
+            "PBS_NODEFILE": "/var/spool/pbs/aux/123.server",
+            "PMI_RANK": "319",
+            "PMIX_RANK": "319",
+            "PRTE_MCA_foo": "bar",
+            "OMPI_COMM_WORLD_RANK": "319",
+            "OMPI_MCA_ess": "pmi",
+            "OMPI_MCA_orte_hnp_uri": "old-session",
+            "OMPI_MCA_orte_default_hostfile": "/tmp/hosts",
+            "OMPI_MCA_pmix": "pmix3x",
+            "PMIX_SERVER_URI2": "old-server",
+        }
+
+        env = _build_orca_subprocess_environment(
+            tmp_path,
+            {"orca_path": "/opt/orca/bin/orca"},
+            mpirun_path="/opt/openmpi/bin/mpirun",
+            ld_library_path="/opt/openmpi/lib",
+            base_env=inherited,
+        )
+
+        forbidden_prefixes = (
+            "SLURM_",
+            "PBS_",
+            "PMI_",
+            "PMIX_",
+            "PRTE_",
+            "OMPI_COMM_WORLD_",
+        )
+        assert not any(key.startswith(forbidden_prefixes) for key in env)
+        assert not {
+            "OMPI_MCA_ess",
+            "OMPI_MCA_orte_default_hostfile",
+            "OMPI_MCA_orte_hnp_uri",
+            "OMPI_MCA_pmix",
+            "PMIX_SERVER_URI2",
+        }.intersection(env)
+        assert env["KEEP_ME"] == "yes"
+        assert env["PATH"] == "/opt/openmpi/bin:/opt/orca/bin:/usr/bin"
+        assert env["LD_LIBRARY_PATH"] == "/opt/openmpi/lib"
+        assert env["OMP_NUM_THREADS"] == "1"
+        assert env["OMPI_MCA_btl"] == "self,tcp"
+        assert env["OMPI_MCA_plm"] == "isolated"
+        assert Path(env["TMPDIR"]).parent == tmp_path
+        assert Path(env["TMPDIR"]).is_dir()
+
+    def test_preserves_existing_library_path(self, tmp_path):
+        """The configured MPI library path precedes unrelated libraries."""
+        env = _build_orca_subprocess_environment(
+            tmp_path,
+            {},
+            ld_library_path="/opt/openmpi/lib",
+            base_env={"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/vendor/lib"},
+        )
+
+        assert env["LD_LIBRARY_PATH"] == "/opt/openmpi/lib:/vendor/lib"
 
 
 @pytest.fixture
@@ -1325,8 +1402,8 @@ class TestBuildParslConfigSlurm:
         assert "--ntasks-per-node" not in provider.scheduler_options
         assert provider.exclusive is True
 
-    def test_multi_node_scheduler_options_include_explicit_cpus_per_node(self):
-        """Multi-node Slurm adds ntasks-per-node when an explicit override is requested."""
+    def test_multi_node_cpu_capacity_does_not_add_task_directives(self):
+        """Physical CPU capacity must not become a manager task count."""
         from oact_utilities.workflows.submit_jobs import build_parsl_config_slurm
 
         config = build_parsl_config_slurm(
@@ -1336,8 +1413,8 @@ class TestBuildParslConfigSlurm:
             nodes_per_block=10,
         )
         provider = config.executors[0].provider
-        assert "--ntasks-per-node=192" in provider.scheduler_options
-        assert "--cpus-per-task=1" in provider.scheduler_options
+        assert "--ntasks-per-node" not in provider.scheduler_options
+        assert "--cpus-per-task" not in provider.scheduler_options
         assert provider.exclusive is True
 
     def test_slurm_cpu_shape_rejects_undersized_override(self):

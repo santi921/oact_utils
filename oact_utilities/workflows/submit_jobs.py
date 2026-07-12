@@ -1080,6 +1080,79 @@ def filter_jobs_for_submission(
     return jobs_to_submit
 
 
+def _build_orca_subprocess_environment(
+    job_dir: str | Path,
+    orca_config: dict[str, Any],
+    *,
+    ld_library_path: str | None = None,
+    mpirun_path: str | None = None,
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build an isolated environment for an ORCA subprocess.
+
+    ORCA starts its own local OpenMPI job. Scheduler allocation and MPI
+    session variables inherited from the Parsl manager must not leak into
+    that nested launch, or OpenMPI may try to reuse the outer allocation.
+    """
+    import tempfile
+
+    env = dict(os.environ if base_env is None else base_env)
+    for key in list(env):
+        if key.startswith(
+            (
+                "SLURM_",
+                "PBS_",
+                "PMI_",
+                "PMIX_",
+                "PRTE_",
+                "OMPI_COMM_WORLD_",
+            )
+        ):
+            env.pop(key, None)
+
+    for key in (
+        "OMPI_MCA_ess",
+        "OMPI_MCA_orte_default_hostfile",
+        "OMPI_MCA_orte_hnp_uri",
+        "OMPI_MCA_pmix",
+        "PMIX_SERVER_URI2",
+    ):
+        env.pop(key, None)
+
+    resolved_mpirun = mpirun_path or shutil.which("mpirun", path=env.get("PATH"))
+    mpirun_bin_dir = (
+        os.path.dirname(resolved_mpirun)
+        if resolved_mpirun and os.path.isabs(resolved_mpirun)
+        else None
+    )
+    orca_path = orca_config.get("orca_path")
+    orca_bin_dir = (
+        os.path.dirname(orca_path) if orca_path and os.path.isabs(orca_path) else None
+    )
+    path_entries = list(
+        dict.fromkeys(
+            entry for entry in (mpirun_bin_dir, orca_bin_dir) if entry is not None
+        )
+    )
+    if path_entries:
+        existing_path = env.get("PATH")
+        env["PATH"] = ":".join(
+            path_entries + ([existing_path] if existing_path else [])
+        )
+
+    if ld_library_path:
+        existing_ld = env.get("LD_LIBRARY_PATH")
+        env["LD_LIBRARY_PATH"] = (
+            f"{ld_library_path}:{existing_ld}" if existing_ld else ld_library_path
+        )
+
+    env["OMP_NUM_THREADS"] = "1"
+    env["TMPDIR"] = tempfile.mkdtemp(prefix="orca_tmp_", dir=Path(job_dir))
+    env["OMPI_MCA_btl"] = "self,tcp"
+    env["OMPI_MCA_plm"] = "isolated"
+    return env
+
+
 # Only define Parsl-related functions if Parsl is available
 if PARSL_AVAILABLE:
 
@@ -1127,10 +1200,8 @@ if PARSL_AVAILABLE:
             Dict with job_id, status, metrics
         """
         import os
-        import shutil
         import signal
         import subprocess
-        import tempfile
         import time
         from importlib import import_module
         from pathlib import Path
@@ -1199,74 +1270,12 @@ if PARSL_AVAILABLE:
             stdout_path = job_dir_path / "orca.out"
             stderr_path = job_dir_path / "orca.err"
 
-        # --- Environment isolation for concurrent ORCA instances ---
-        env = os.environ.copy()
-        env["OMP_NUM_THREADS"] = "1"
-
-        # OpenPBS/PMIx state inherited by the worker can confuse ORCA's own
-        # nested OpenMPI launcher. Strip scheduler/session MPI env before ORCA.
-        for key in list(env):
-            if key.startswith(("PMI_", "PMIX_", "PRTE_", "OMPI_COMM_WORLD_")):
-                env.pop(key, None)
-        for key in (
-            "OMPI_MCA_ess",
-            "OMPI_MCA_orte_hnp_uri",
-            "OMPI_MCA_pmix",
-            "PMIX_SERVER_URI2",
-        ):
-            env.pop(key, None)
-
-        resolved_mpirun = mpirun_path or shutil.which("mpirun")
-        mpirun_bin_dir = (
-            os.path.dirname(resolved_mpirun)
-            if resolved_mpirun and os.path.isabs(resolved_mpirun)
-            else None
+        env = submit_jobs_mod._build_orca_subprocess_environment(
+            job_dir_path,
+            orca_config,
+            ld_library_path=ld_library_path,
+            mpirun_path=mpirun_path,
         )
-        orca_bin_dir = (
-            os.path.dirname(orca_config.get("orca_path"))
-            if orca_config.get("orca_path")
-            and os.path.isabs(orca_config.get("orca_path"))
-            else None
-        )
-        path_entries = [entry for entry in [mpirun_bin_dir, orca_bin_dir] if entry]
-        path_entries = list(dict.fromkeys(path_entries))
-        if path_entries:
-            existing_path = env.get("PATH")
-            env["PATH"] = ":".join(
-                path_entries + ([existing_path] if existing_path else [])
-            )
-
-        if ld_library_path:
-            existing_ld = env.get("LD_LIBRARY_PATH")
-            env["LD_LIBRARY_PATH"] = (
-                f"{ld_library_path}:{existing_ld}" if existing_ld else ld_library_path
-            )
-
-        # Give each worker a private TMPDIR inside the job directory so that
-        # ORCA's temp files (orca_atom*.out/.gbw, MPI shared-memory segments)
-        # don't collide between concurrent jobs on the same node.
-        tmp_dir = tempfile.mkdtemp(prefix="orca_tmp_", dir=job_dir_path)
-        env["TMPDIR"] = tmp_dir
-
-        # Prevent OpenMPI from using shared-memory transport between unrelated
-        # ORCA instances that happen to share the same node.  vader (or sm)
-        # uses /dev/shm files whose names can collide.
-        env["OMPI_MCA_btl"] = "self,tcp"
-        env["OMPI_MCA_plm"] = "isolated"
-
-        # Restrict ORCA's mpirun to the local node only.  In multi-node
-        # SLURM blocks, mpirun would otherwise read the SLURM hostfile and
-        # place processes on neighboring nodes where different ORCA instances
-        # are running -- silently corrupting results.  These env vars are
-        # set unconditionally: harmless on single-node / Flux, protective
-        # on multi-node SLURM.
-        # DO NOT REMOVE -- see docs/plans/2026-03-16-feat-multi-node-slurm-parsl-support-plan.md
-        import socket
-
-        local_hostname = os.environ.get("SLURMD_NODENAME", socket.gethostname())
-        env["OMPI_MCA_orte_default_hostfile"] = "/dev/null"
-        env["SLURM_NODELIST"] = local_hostname
-        env["SLURM_NNODES"] = "1"
 
         start_time = time.time()
         deadline = start_time + timeout_seconds
@@ -1897,11 +1906,9 @@ def build_parsl_config_slurm(
     Args:
         max_workers: Maximum concurrent workers per node.
         cores_per_worker: CPU cores per worker (must match ORCA nprocs).
-        cpus_per_node: Scheduler CPU cores requested per node. When omitted,
-            defaults to ``max_workers * cores_per_worker`` for the
-            single-node path. For multi-node Slurm, exclusive allocations
-            already reserve whole nodes; when this is set explicitly, an
-            ``--ntasks-per-node`` request is added to the batch allocation.
+        cpus_per_node: Physical CPU capacity per node. It must be at least
+            ``max_workers * cores_per_worker``. Multi-node Slurm allocations
+            reserve whole nodes and still launch one Parsl manager per node.
         nodes_per_block: Nodes per SLURM block. >1 enables multi-node
             blocks with SrunLauncher.  Total capacity is
             ``max_blocks * nodes_per_block * max_workers``.
@@ -1963,16 +1970,10 @@ def build_parsl_config_slurm(
         # SrunLauncher: srun starts 1 Parsl worker manager per node.
         # The worker manager forks max_workers processes internally.
         launcher = SrunLauncher()
-        # exclusive=True reserves whole nodes by default. When an explicit
-        # CPU-per-node override is requested, add a matching ntasks-per-node
-        # request to the batch allocation while keeping the srun launcher.
-        if cpus_per_node is not None:
-            scheduler_options = (
-                f"#SBATCH --ntasks-per-node={requested_cpus_per_node}\n"
-                f"#SBATCH --cpus-per-task=1\n"
-            )
-        else:
-            scheduler_options = ""
+        # Whole-node reservation comes from exclusive=True. SrunLauncher
+        # requests one manager task per node; CPU capacity must not be encoded
+        # as an additional task-count directive.
+        scheduler_options = ""
     else:
         from parsl.launchers import SimpleLauncher
 
@@ -2386,7 +2387,7 @@ def submit_batch_parsl(
         requested_cpus = cpus_per_node or (max_workers * cores_per_worker)
         if cpus_per_node is not None:
             print(
-                f"Each SLURM node requests {requested_cpus} scheduler cores, "
+                f"Each SLURM node has {requested_cpus} physical cores, "
                 f"active worker cores per node: {max_workers * cores_per_worker}, "
                 f"each worker: {cores_per_worker} cores, "
                 f"job timeout: {timeout_seconds}s"
@@ -2845,9 +2846,9 @@ def submit_batch_parsl(
                                         try:
                                             gen_data = parse_generator_data(job_dir)
                                             if gen_data is not None:
-                                                metrics_dict["generator_data"] = (
-                                                    gen_data
-                                                )
+                                                metrics_dict[
+                                                    "generator_data"
+                                                ] = gen_data
                                         except Exception as e:
                                             print(
                                                 f"  Warning: generator parsing failed for job {job_id}: {e}"
