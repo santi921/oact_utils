@@ -15,6 +15,7 @@ from oact_utilities.scripts.merge_job_roots import (
     ACT_SKIP_MISMATCH,
     build_plan,
     execute_plan,
+    projected_final_counts,
     scan_root,
 )
 from oact_utilities.workflows.clean import MARKER_FILENAME
@@ -349,6 +350,38 @@ def test_execute_collision_replace_and_discard(tmp_path):
     assert not (root_a / "newer_in_a").exists()
     assert not (root_a / "b_is_done").exists()
     assert not (root_b / "b_is_done" / MARKER_FILENAME).exists()
+
+
+def test_projected_final_counts(tmp_path):
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    _make_completed(root_a, "a_done")  # moves in
+    _make_failed(root_a, "a_dead")  # moves in
+    _make_to_run(root_a, "a_queued")  # dropped
+    _make_completed(root_b, "b_done")  # stays
+    _make_to_run(root_b, "b_queued")  # dropped
+    # Same-hash collision: one completed copy survives.
+    _make_completed(root_a, "dup")
+    _make_completed(root_b, "dup")
+    # Hash-mismatch collision: skipped, B's completed copy still counts in B.
+    _make_completed(root_a, "clash", inp=_DEFAULT_INP)
+    _make_completed(root_b, "clash", inp=_OTHER_INP)
+
+    jobs_a, jobs_b = _scan_both(root_a, root_b)
+    plan = build_plan(jobs_a, jobs_b, drop_incomplete=True)
+    final = projected_final_counts(plan)
+
+    assert final["completed"] == 4  # a_done, b_done, dup, clash(B copy)
+    assert final["failed"] == 1  # a_dead
+    assert "to_run" not in final
+    assert sum(final.values()) == 5
+
+    # Ground truth: execute and count what actually sits in B.
+    execute_plan(plan, root_b, root_a, execute=True)
+    on_disk = scan_root(root_b, hours_cutoff=24, workers=2, label="B")
+    disk_counts = {}
+    for info in on_disk.values():
+        disk_counts[info.status] = disk_counts.get(info.status, 0) + 1
+    assert disk_counts == {"completed": 4, "failed": 1}
 
 
 def test_marker_idempotent(tmp_path):

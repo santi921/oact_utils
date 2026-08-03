@@ -579,6 +579,24 @@ def execute_plan(
 # ---------------------------------------------------------------------------
 
 
+def projected_final_counts(plan: list[PlanEntry]) -> Counter:
+    """Status -> count of jobs that live in DEST after the plan executes.
+
+    Survivors are the moved/kept copies; a skipped hash-mismatch collision
+    keeps B's copy in place (A's copy also survives, but in the SOURCE root,
+    so it is not part of DEST's composition). Dropped jobs count nowhere.
+    """
+    final: Counter = Counter()
+    for e in plan:
+        status = e.survivor_status
+        if status is None and e.action == ACT_SKIP_MISMATCH:
+            assert e.info_b is not None
+            status = e.info_b.status
+        if status is not None:
+            final[status] += 1
+    return final
+
+
 def _status_counts(jobs: dict[str, JobInfo]) -> Counter:
     """Status -> count for one scanned root."""
     return Counter(info.status for info in jobs.values())
@@ -687,6 +705,14 @@ def print_report(
         f"{counts[ACT_DROP_DEST] + counts[ACT_DROP_BOTH]}"
     )
     print(f"  Failed-job .do_not_rerun.json markers {verb}written: {markers}")
+
+    final = projected_final_counts(plan)
+    tense = "after this execute" if not execute else "now on disk"
+    print(f"\n--- Final B composition ({tense}) ---")
+    print("  status | jobs in B")
+    for status in _STATUS_ORDER:
+        print(f"  {status} | {final.get(status, 0)}")
+    print(f"  TOTAL | {sum(final.values())}")
 
     if collisions:
         print(f"\n--- Collisions (showing up to {top}) ---")
