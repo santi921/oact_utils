@@ -17,6 +17,7 @@ import pandas as pd
 from ase import Atoms
 
 from oact_utilities.utils.analysis import validate_spin_multiplicity
+from oact_utilities.utils.basis import count_basis_functions
 
 # Allowed SQLite column types for extra_columns validation
 ALLOWED_COLUMN_TYPES = {
@@ -293,6 +294,7 @@ def _init_db(
             fail_count INTEGER DEFAULT 0,
             wall_time REAL,
             n_cores INTEGER,
+            n_basis INTEGER,
             worker_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"""
@@ -308,6 +310,13 @@ def _init_db(
 
     cur = conn.cursor()
     cur.execute(create_table_sql)
+
+    # CREATE TABLE IF NOT EXISTS is a no-op on a pre-existing database, so a DB
+    # written before n_basis existed would still lack the column and every
+    # _insert_row would fail. Add it here as well.
+    existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(structures)")}
+    if "n_basis" not in existing_cols:
+        cur.execute("ALTER TABLE structures ADD COLUMN n_basis INTEGER DEFAULT NULL")
 
     # Create indexes for common queries
     cur.execute("CREATE INDEX IF NOT EXISTS idx_status ON structures(status)")
@@ -332,6 +341,7 @@ def _insert_row(
     final_energy: float | None = None,
     error_message: str | None = None,
     fail_count: int = 0,
+    n_basis: int | None = None,
     extra_values: dict[str, Any] | None = None,
 ):
     """Insert a structure row into the database.
@@ -351,8 +361,14 @@ def _insert_row(
         final_energy: Final energy in Hartree.
         error_message: Error message if failed.
         fail_count: Number of times the job has failed.
+        n_basis: Number of basis functions. When None it is derived from
+            ``elements`` so every caller populates the column; stays NULL if
+            an element is absent from the basis table.
         extra_values: Dictionary of extra column values to insert.
     """
+    if n_basis is None and elements:
+        n_basis = count_basis_functions(elements.split(";"), strict=False)
+
     # Base columns and values
     columns = [
         "orig_index",
@@ -368,6 +384,7 @@ def _insert_row(
         "final_energy",
         "error_message",
         "fail_count",
+        "n_basis",
     ]
     values = [
         orig_index,
@@ -383,6 +400,7 @@ def _insert_row(
         final_energy,
         error_message,
         fail_count,
+        n_basis,
     ]
 
     # Add extra columns if provided (validate keys to prevent SQL injection)

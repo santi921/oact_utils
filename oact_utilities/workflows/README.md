@@ -327,6 +327,7 @@ The SQLite database tracks each structure with:
 | `fail_count` | INTEGER | Number of times job has failed (for retry tracking) |
 | `wall_time` | REAL | Total wall time in seconds (extracted from ORCA output) |
 | `n_cores` | INTEGER | Number of CPU cores used |
+| `n_basis` | INTEGER | Basis-function count (derived from `elements`; drives memory/worker sizing) |
 | `worker_id` | TEXT | Scheduler job ID (SLURM/Flux) for crash recovery |
 | `created_at` | TIMESTAMP | Creation time |
 | `updated_at` | TIMESTAMP | Last update time |

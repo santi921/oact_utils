@@ -249,11 +249,22 @@ SQLite table `structures` with WAL mode for concurrent access:
 | `final_energy`  | REAL       | Final energy (Hartree)                                                                            |
 | `wall_time`     | REAL       | Wall time in seconds                                                                              |
 | `n_cores`       | INTEGER    | CPU cores used                                                                                    |
+| `n_basis`       | INTEGER    | Basis-function count (derived from `elements` at insert; drives memory/worker sizing)             |
 | `error_message` | TEXT       | Error message if failed                                                                           |
 | `fail_count`    | INTEGER    | Retry counter (incremented on reset)                                                              |
 | `worker_id`     | TEXT       | Scheduler job ID owning this molecule (SLURM/Flux ID), used for crash recovery                    |
 
 **Performance notes:** Always use `include_geometry=False` or `_LIGHT_COLS` when you don't need XYZ coordinates. Push `LIMIT` into SQL, never slice in Python.
+
+**Basis-function count (`n_basis`)**: memory scales as `n_basis**1.5`, so the basis count is the
+real cost driver -- `natoms` is a poor proxy (9 basis functions for H, 105 for an actinide). The
+per-element table lives in `utils/basis.py` (`BASIS_DICT`, `count_basis_functions()`); `calc.py`
+re-exports `BASIS_DICT` and `get_n_basis()` delegates to it. The table is validated against real
+ORCA outputs in `tests/test_basis.py` (NpF3: 225 predicted vs 223 reported).
+
+`_insert_row()` derives `n_basis` from `elements` automatically, so every workflow DB carries it.
+Inspect the distribution with `dashboard.py --show-basis` before choosing `--max-workers` /
+`--cores-per-worker`; fill it in on older databases with `dashboard.py --backfill-basis`.
 
 ## Job Status Lifecycle
 
@@ -397,6 +408,7 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --show-ready                 # Jobs ready to run
 --show-running               # Currently running jobs
 --show-chronic-failures N    # Jobs failed N+ times
+--show-basis                 # Basis-function distribution (drives memory/worker sizing)
 
 # Status updates
 --update <job_dir>           # Scan directory for completions
@@ -404,6 +416,7 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --recompute-metrics          # Re-extract metrics for ALL completed jobs
 --recheck-completed          # Re-verify completed jobs
 --unzip                      # Handle gzipped outputs (quacc)
+--backfill-basis             # Fill NULL n_basis from `elements` (pre-n_basis databases)
 
 # Status management
 --reset-failed               # Reset failed -> TO_RUN (increments fail_count)

@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+from ..utils.basis import count_basis_functions
 from ..utils.status import check_job_termination, parse_failure_reason
 from .architector_workflow import ArchitectorWorkflow, JobStatus, StatusGroupUpdate
 from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
@@ -98,6 +99,62 @@ def print_summary(workflow: ArchitectorWorkflow):
             f"{count_5} failed 5+ times,  {count_25} failed 25+ times"
         )
 
+    print()
+
+
+def print_basis_summary(workflow: ArchitectorWorkflow, bin_width: int = 200):
+    """Print the basis-function distribution across the workflow.
+
+    Basis-function count is the cost driver ORCA memory scales with
+    (``get_mem_estimate`` uses ``n_basis**1.5``), so this is what to look at
+    when choosing workers and cores per worker for a campaign.
+
+    Args:
+        workflow: Open workflow handle to query.
+        bin_width: Width of each basis-function bin (default 200).
+    """
+    print_header(f"Basis Functions per Job ({bin_width}-function bins)")
+
+    stats = workflow.get_basis_summary()
+    if not stats["n_rows"]:
+        print("\nNo jobs in database.\n")
+        return
+
+    if stats["max"] is None:
+        print(
+            f"\nNo basis counts stored ({stats['n_null']} rows). "
+            "Run with --backfill-basis to populate them.\n"
+        )
+        return
+
+    print(
+        f"\n  jobs: {stats['n_rows']}    min: {stats['min']}    "
+        f"median: {stats['median']}    mean: {stats['mean']:.0f}    "
+        f"max: {stats['max']}"
+    )
+    print(f"  total basis functions across campaign: {stats['total']:,}")
+    if stats["n_null"]:
+        print(
+            f"  WARNING: {stats['n_null']} rows have no count " "(run --backfill-basis)"
+        )
+
+    bins = workflow.count_by_basis_bins(bin_width=bin_width)
+    numeric_keys = sorted(k for k in bins if k is not None)
+    if not numeric_keys:
+        print()
+        return
+
+    peak = max(bins[k] for k in numeric_keys)
+    print(f"\n{'Basis functions':<20}{'Jobs':>8}")
+    print("-" * 60)
+    for key in numeric_keys:
+        lo = key * bin_width
+        label = f"{lo}-{lo + bin_width}"
+        count = bins[key]
+        bar = "#" * max(1, round(30 * count / peak))
+        print(f"{label:<20}{count:>8}  {bar}")
+    if None in bins:
+        print(f"{'unknown':<20}{bins[None]:>8}")
     print()
 
 
@@ -1154,6 +1211,61 @@ def _probe_unlinked_job(
     return True, disk_status_code, error_msg
 
 
+def backfill_basis_counts(
+    workflow: ArchitectorWorkflow,
+    batch_size: int = 5000,
+    verbose: bool = False,
+) -> dict[str, int]:
+    """Populate n_basis for rows that lack it, from the stored elements column.
+
+    Databases created before n_basis existed have the column (added by
+    ``_ensure_schema``) but no values. This computes the count from
+    ``elements``, so it never touches the heavy ``geometry`` column and never
+    reads the filesystem.
+
+    Args:
+        workflow: ArchitectorWorkflow instance.
+        batch_size: Rows to update per transaction (one commit each, since
+            commits are expensive on Lustre/GPFS).
+        verbose: Print the element string of each row that could not be counted.
+
+    Returns:
+        Dict with ``filled`` (rows updated) and ``unresolved`` (rows left NULL
+        because ``elements`` was empty or held an unknown symbol).
+    """
+    cur = workflow._execute_with_retry(
+        "SELECT id, elements FROM structures WHERE n_basis IS NULL"
+    )
+    pending = cur.fetchall()
+    if not pending:
+        print("Backfill-basis: all rows already have n_basis")
+        return {"filled": 0, "unresolved": 0}
+
+    updates: list[dict] = []
+    unresolved = 0
+    for job_id, elements in pending:
+        n_basis = (
+            count_basis_functions(elements.split(";"), strict=False)
+            if elements
+            else None
+        )
+        if n_basis is None:
+            unresolved += 1
+            if verbose:
+                print(f"  id={job_id}: cannot count elements={elements!r}")
+            continue
+        updates.append({"job_id": job_id, "n_basis": n_basis})
+
+    for start in range(0, len(updates), batch_size):
+        workflow.update_job_metrics_bulk(updates[start : start + batch_size])
+
+    print(
+        f"\nBackfill-basis: {len(updates)} rows filled, "
+        f"{unresolved} unresolved (of {len(pending)} missing)"
+    )
+    return {"filled": len(updates), "unresolved": unresolved}
+
+
 def fix_unlinked_jobs(
     workflow: ArchitectorWorkflow,
     root_dir: str | Path,
@@ -1939,6 +2051,19 @@ def main():
         help="Re-verify completed jobs during --update (catches tampered outputs or status checker changes)",
     )
     parser.add_argument(
+        "--show-basis",
+        action="store_true",
+        help="Show the basis-function distribution (drives per-job memory sizing)",
+    )
+    parser.add_argument(
+        "--backfill-basis",
+        action="store_true",
+        help=(
+            "Compute n_basis from the stored elements column for rows that lack "
+            "it (for databases created before the column existed)"
+        ),
+    )
+    parser.add_argument(
         "--hours-cutoff",
         type=float,
         default=24,
@@ -2110,6 +2235,10 @@ def main():
             f"{result['skipped']} skipped"
         )
 
+    # Backfill missing basis-function counts if requested
+    if args.backfill_basis:
+        backfill_basis_counts(workflow, verbose=getattr(args, "verbose", False))
+
     # Recover orphaned jobs if requested
     if args.recover_orphans:
         if not args.scheduler:
@@ -2135,6 +2264,10 @@ def main():
     # Show status-by-size breakdown if requested
     if args.show_size_breakdown:
         print_size_breakdown(workflow, bin_width=args.size_bin_width)
+
+    # Show basis-function distribution if requested
+    if args.show_basis:
+        print_basis_summary(workflow)
 
     # Show failed jobs if requested
     if args.show_failed:

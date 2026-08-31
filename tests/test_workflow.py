@@ -1064,6 +1064,149 @@ def test_ensure_schema_migrates_worker_id(tmp_path):
         assert running[0].worker_id == "test_123"
 
 
+def _legacy_db_without_n_basis(db_path, rows):
+    """Create a pre-n_basis 'structures' table and insert (elements, natoms) rows."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE structures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orig_index INTEGER,
+            elements TEXT,
+            natoms INTEGER,
+            status TEXT,
+            charge INTEGER,
+            spin INTEGER,
+            geometry TEXT,
+            job_dir TEXT,
+            max_forces REAL,
+            scf_steps INTEGER,
+            final_energy REAL,
+            error_message TEXT,
+            fail_count INTEGER DEFAULT 0,
+            wall_time REAL,
+            n_cores INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+    )
+    for i, (elements, natoms) in enumerate(rows):
+        conn.execute(
+            "INSERT INTO structures (orig_index, elements, natoms, status, geometry) "
+            "VALUES (?, ?, ?, 'to_run', 'x')",
+            (i, elements, natoms),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_ensure_schema_migrates_n_basis(tmp_path):
+    """_ensure_schema adds the n_basis column to old databases as NULL."""
+    db_path = tmp_path / "old_basis.db"
+    _legacy_db_without_n_basis(db_path, [("O;H;H", 3)])
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        jobs = workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        assert len(jobs) == 1
+        assert jobs[0].n_basis is None
+
+        # Column is writable through the normal metrics path.
+        workflow.update_job_metrics(jobs[0].id, n_basis=58)
+        assert workflow.get_jobs_by_status(JobStatus.TO_RUN)[0].n_basis == 58
+
+
+def test_create_workflow_db_populates_n_basis(tmp_path):
+    """create_workflow_db derives n_basis from the parsed geometry."""
+    import pandas as pd
+
+    from oact_utilities.utils.architector import create_workflow_db
+
+    df = pd.DataFrame(
+        {
+            "structure": ["O 0 0 0\nH 1 0 0\nH 0 1 0", "Np 0 0 0\nF 1 0 0"],
+            "charge": [0, 0],
+            "spinmult": [1, 2],
+        }
+    )
+    db_path = create_workflow_db(
+        csv_path=df,
+        db_path=tmp_path / "fresh.db",
+        geometry_column="structure",
+        charge_column="charge",
+        spin_column="spinmult",
+    )
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        jobs = sorted(
+            workflow.get_jobs_by_status(JobStatus.TO_RUN),
+            key=lambda j: j.orig_index,
+        )
+        assert [j.n_basis for j in jobs] == [58, 145]  # O+2H, Np+F
+
+
+def test_backfill_basis_counts_fills_nulls(tmp_path):
+    """backfill_basis_counts computes n_basis from elements, skipping bad rows."""
+    from oact_utilities.workflows.dashboard import backfill_basis_counts
+
+    db_path = tmp_path / "backfill.db"
+    _legacy_db_without_n_basis(
+        db_path,
+        [("O;H;H", 3), ("Np;F;F;F", 4), ("O;Xx", 2), ("", 0), (None, 0)],
+    )
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        result = backfill_basis_counts(workflow)
+        assert result == {"filled": 2, "unresolved": 3}
+
+        by_index = {
+            j.orig_index: j.n_basis
+            for j in workflow.get_jobs_by_status(JobStatus.TO_RUN)
+        }
+        assert by_index[0] == 58
+        assert by_index[1] == 225
+        assert by_index[2] is None  # unknown element
+        assert by_index[3] is None  # empty elements
+        assert by_index[4] is None  # NULL elements
+
+        # Idempotent: nothing left to fill on a second pass.
+        assert backfill_basis_counts(workflow)["filled"] == 0
+
+
+def test_basis_summary_and_bins(tmp_path):
+    """get_basis_summary and count_by_basis_bins aggregate over n_basis."""
+    db_path = tmp_path / "summary.db"
+    _legacy_db_without_n_basis(db_path, [("O;H;H", 3), ("Np;F;F;F", 4), ("O;Xx", 2)])
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # No counts stored yet -> stats are None but row counts are real.
+        empty = workflow.get_basis_summary()
+        assert empty["n_rows"] == 3
+        assert empty["n_null"] == 3
+        assert empty["max"] is None
+
+        from oact_utilities.workflows.dashboard import backfill_basis_counts
+
+        backfill_basis_counts(workflow)
+
+        stats = workflow.get_basis_summary()
+        assert stats["n_rows"] == 3
+        assert stats["n_null"] == 1  # the O;Xx row stays NULL
+        assert stats["min"] == 58
+        assert stats["max"] == 225
+        assert stats["total"] == 283
+
+        bins = workflow.count_by_basis_bins(bin_width=100)
+        assert bins[0] == 1  # 58
+        assert bins[2] == 1  # 225
+        assert bins[None] == 1  # uncounted row
+
+        with pytest.raises(ValueError):
+            workflow.count_by_basis_bins(bin_width=0)
+
+
 def test_sigterm_handler_sets_flag_and_raises():
     """SIGTERM handler sets the shutdown flag and raises KeyboardInterrupt.
 

@@ -73,6 +73,7 @@ class JobRecord:
     optimizer: str | None = None
     worker_id: str | None = None
     generator_data: str | None = None
+    n_basis: int | None = None
 
 
 class ArchitectorWorkflow:
@@ -194,6 +195,8 @@ class ArchitectorWorkflow:
         Adds columns that may not exist in older databases:
         - ``optimizer`` TEXT (added in v1)
         - ``worker_id`` TEXT (added in v2 -- scheduler job ID for crash recovery)
+        - ``n_basis`` INTEGER (basis-function count; backfill with
+          ``dashboard.py --backfill-basis``)
 
         Also migrates legacy ``ready`` status values to ``to_run``.
 
@@ -215,6 +218,7 @@ class ArchitectorWorkflow:
             "optimizer": "ALTER TABLE structures ADD COLUMN optimizer TEXT DEFAULT NULL",
             "worker_id": "ALTER TABLE structures ADD COLUMN worker_id TEXT DEFAULT NULL",
             "generator_data": "ALTER TABLE structures ADD COLUMN generator_data TEXT DEFAULT NULL",
+            "n_basis": "ALTER TABLE structures ADD COLUMN n_basis INTEGER DEFAULT NULL",
         }
         for col_name, alter_sql in migrations.items():
             if col_name not in existing_cols:
@@ -339,7 +343,7 @@ class ArchitectorWorkflow:
     _LIGHT_COLS = (
         "id, orig_index, elements, natoms, status, charge, spin, "
         "job_dir, max_forces, scf_steps, final_energy, error_message, "
-        "fail_count, wall_time, n_cores, optimizer, worker_id"
+        "fail_count, wall_time, n_cores, optimizer, worker_id, n_basis"
     )
 
     @staticmethod
@@ -374,6 +378,7 @@ class ArchitectorWorkflow:
             optimizer=r["optimizer"] if "optimizer" in keys else None,
             worker_id=r["worker_id"] if "worker_id" in keys else None,
             generator_data=r["generator_data"] if "generator_data" in keys else None,
+            n_basis=r["n_basis"] if "n_basis" in keys else None,
         )
 
     def get_jobs_by_status(
@@ -460,6 +465,7 @@ class ArchitectorWorkflow:
         wall_time: float | None = None,
         n_cores: int | None = None,
         generator_data: str | None = None,
+        n_basis: int | None = None,
     ):
         """Update job metrics (forces, SCF steps, etc).
 
@@ -473,9 +479,11 @@ class ArchitectorWorkflow:
             wall_time: Total wall time in seconds.
             n_cores: Number of CPU cores used.
             generator_data: JSON string from qtaim_generator parse_orca_output.
+            n_basis: Number of basis functions for the structure.
         """
-        updates = []
-        values = []
+        updates: list[str] = []
+        # Mixed str/int/float column values bound as SQL parameters.
+        values: list[object] = []
 
         if job_dir is not None:
             updates.append("job_dir = ?")
@@ -501,6 +509,9 @@ class ArchitectorWorkflow:
         if generator_data is not None:
             updates.append("generator_data = ?")
             values.append(generator_data)
+        if n_basis is not None:
+            updates.append("n_basis = ?")
+            values.append(n_basis)
 
         if updates:
             updates.append("updated_at = CURRENT_TIMESTAMP")
@@ -536,6 +547,7 @@ class ArchitectorWorkflow:
                 "wall_time",
                 "n_cores",
                 "generator_data",
+                "n_basis",
             ):
                 if metrics.get(col) is not None:
                     updates.append(f"{col} = ?")
@@ -699,6 +711,76 @@ class ArchitectorWorkflow:
             key = int(bin_idx) if bin_idx is not None else None
             result.setdefault(key, {})[JobStatus(status)] = count
         return result
+
+    def count_by_basis_bins(self, bin_width: int = 200) -> dict[int | None, int]:
+        """Count jobs grouped by basis-function-count bin.
+
+        Bins are half-open intervals ``[k * bin_width, (k + 1) * bin_width)``
+        keyed by the integer bin index ``k``. Rows with NULL ``n_basis`` are
+        collected under the ``None`` key. Counting is done in a single
+        ``GROUP BY`` query to avoid per-bin round-trips on Lustre/GPFS.
+
+        Args:
+            bin_width: Width of each basis-function bin (default 200).
+
+        Returns:
+            Mapping of bin index (or ``None`` for unknown) to job count.
+
+        Raises:
+            ValueError: If ``bin_width`` is not a positive integer.
+        """
+        if bin_width <= 0:
+            raise ValueError(f"bin_width must be positive, got {bin_width}")
+
+        query = (
+            "SELECT CASE WHEN n_basis IS NULL THEN NULL ELSE n_basis / ? END "
+            "AS bin_idx, COUNT(*) FROM structures GROUP BY bin_idx"
+        )
+        cur = self._execute_with_retry(query, (bin_width,))
+        return {
+            (int(bin_idx) if bin_idx is not None else None): count
+            for bin_idx, count in cur.fetchall()
+        }
+
+    def get_basis_summary(self) -> dict[str, int | float | None]:
+        """Summarize the basis-function distribution across the workflow.
+
+        Feeds per-job memory sizing: ``get_mem_estimate()`` models total ORCA
+        memory as ``a * n_basis**1.5 + b``, so the max drives how much memory a
+        worker must be given and the sum is a proxy for total campaign cost.
+
+        Returns:
+            Dict with ``n_rows``, ``n_null`` (rows lacking a count),
+            ``min``/``max``/``mean``/``total``, and ``median``. All statistics
+            except ``n_rows``/``n_null`` are None when no row has a count.
+        """
+        cur = self._execute_with_retry(
+            "SELECT COUNT(*), SUM(n_basis IS NULL), MIN(n_basis), MAX(n_basis), "
+            "AVG(n_basis), SUM(n_basis) FROM structures"
+        )
+        n_rows, n_null, lo, hi, mean, total = cur.fetchone()
+
+        # SQLite has no median; take the middle row of the sorted non-NULL set.
+        n_known = (n_rows or 0) - (n_null or 0)
+        median = None
+        if n_known:
+            cur = self._execute_with_retry(
+                "SELECT n_basis FROM structures WHERE n_basis IS NOT NULL "
+                "ORDER BY n_basis LIMIT 1 OFFSET ?",
+                (n_known // 2,),
+            )
+            row = cur.fetchone()
+            median = row[0] if row else None
+
+        return {
+            "n_rows": n_rows or 0,
+            "n_null": n_null or 0,
+            "min": lo,
+            "max": hi,
+            "mean": mean,
+            "median": median,
+            "total": total,
+        }
 
     def iter_terminal_history(self) -> list[tuple[str, str]]:
         """Return (status, updated_at_string) for terminal-state rows.
