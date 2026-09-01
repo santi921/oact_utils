@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import json
 import sqlite3
 from pathlib import Path
 
@@ -627,3 +628,116 @@ def test_expand_parquet_inputs(tmp_path):
 
     # explicit file
     assert expand_parquet_inputs([str(tmp_path / "a.parquet")])[0].name == "a.parquet"
+
+
+# ---------------------------------------------------------------------------
+# Purge markers (.do_not_rerun.json)
+# ---------------------------------------------------------------------------
+
+
+def _marker(job: Path, **fields) -> None:
+    """Write a .do_not_rerun.json purge marker into a job directory."""
+    (job / ".do_not_rerun.json").write_text(json.dumps(fields))
+
+
+def test_purge_marker_makes_job_failed_and_recovers_reason(tmp_path):
+    """A purged job's output is gone; the marker is the only record of why."""
+    root = tmp_path / "jobs"
+    job = _write_job(root, "carpenter_job_1")
+    _marker(
+        job,
+        purge_type="failed",
+        scf_steps=412,
+        failure_reason="SCF NOT CONVERGED AFTER 600 CYCLES",
+    )
+
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([root], out, fmt="csv")
+    row = next(iter(csv.DictReader(open(out))))
+
+    # Without the marker this would read to_run and overstate pending work.
+    assert row["status"] == "failed"
+    assert row["marker"] == "True"
+    assert row["purge_type"] == "failed"
+    assert row["scf_steps"] == "412"
+    assert row["failure_reason"] == "SCF NOT CONVERGED AFTER 600 CYCLES"
+    assert summary.status["failed"] == 1
+    assert summary.status["to_run"] == 0
+
+
+def test_purge_marker_without_reason_still_reports_failed(tmp_path):
+    root = tmp_path / "jobs"
+    job = _write_job(root, "job_2")
+    _marker(job, purge_type="incomplete_archive")
+
+    out = tmp_path / "census.csv"
+    run_census([root], out, fmt="csv")
+    row = next(iter(csv.DictReader(open(out))))
+    assert row["status"] == "failed"
+    assert row["purge_type"] == "incomplete_archive"
+    assert row["failure_reason"] == "purged, no reason recorded"
+
+
+def test_purge_marker_never_overrides_a_completed_job(tmp_path):
+    """A normally-terminated orca.out is its own proof; the marker loses."""
+    root = tmp_path / "jobs"
+    job = _write_job(root, "job_3", inp=_INP_AMO, out=_OUT_DONE)
+    _marker(job, purge_type="failed", failure_reason="stale marker")
+
+    out = tmp_path / "census.csv"
+    run_census([root], out, fmt="csv")
+    row = next(iter(csv.DictReader(open(out))))
+    assert row["status"] == "completed"
+    assert row["marker"] == "True"
+    assert row["purge_type"] == "failed"
+    assert row["failure_reason"] == ""
+
+
+def test_atom_scf_guess_files_are_not_job_output(tmp_path):
+    """orca_atom<N>.out is an initial-guess artefact, not a finished job."""
+    root = tmp_path / "jobs"
+    job = _write_job(root, "carpenter_job_0")
+    for ext in ("bibtex", "densities", "out", "property.txt"):
+        (job / f"orca_atom90.{ext}").write_text("atomic SCF guess scratch\n")
+
+    out = tmp_path / "census.csv"
+    run_census([root], out, fmt="csv")
+    row = next(iter(csv.DictReader(open(out))))
+    assert row["status"] == "to_run"
+    assert row["metal"] == ""
+    assert row["natoms"] == ""
+    assert row["final_energy"] == ""
+
+
+def test_corrupt_purge_marker_is_survivable(tmp_path):
+    from oact_utilities.workflows.census import read_purge_marker
+
+    root = tmp_path / "jobs"
+    job = _write_job(root, "job_4")
+    (job / ".do_not_rerun.json").write_text("{not json")
+    assert read_purge_marker(job) == {}
+
+    out = tmp_path / "census.csv"
+    run_census([root], out, fmt="csv")
+    row = next(iter(csv.DictReader(open(out))))
+    # Marker present but unreadable: still a give-up signal, no purge_type.
+    assert row["status"] == "failed"
+    assert row["purge_type"] == ""
+
+
+def test_mixed_purged_and_live_corpus_counts(tmp_path):
+    """The carpenter/08052026 shape: mostly purged, a real minority alive."""
+    root = tmp_path / "jobs"
+    for i in range(8):
+        job = _write_job(root, f"carpenter_job_p{i}")
+        _marker(job, purge_type="failed", failure_reason="aborting the run")
+    for i in range(3):
+        _write_job(root, f"carpenter_job_ok{i}", inp=_INP_AMO, out=_OUT_DONE)
+
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([root], out, fmt="csv")
+    assert summary.total == 11
+    assert summary.status["failed"] == 8
+    assert summary.status["completed"] == 3
+    assert summary.status["to_run"] == 0
+    assert summary.metal_status[("Am", "completed")] == 3

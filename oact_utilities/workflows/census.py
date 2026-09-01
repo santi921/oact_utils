@@ -175,6 +175,7 @@ _FIELDS: tuple[tuple[str, str], ...] = (
     ("optimizer", "str"),
     ("failure_reason", "str"),
     ("marker", "bool"),
+    ("purge_type", "str"),
     ("age_hours", "float"),
     # composition
     ("elements", "str"),
@@ -601,6 +602,29 @@ def _metal_population(
     return out
 
 
+def read_purge_marker(job_dir: Path) -> dict:
+    """Read a ``.do_not_rerun.json`` purge marker, or return {} if absent.
+
+    clean.py and merge_job_roots.py stamp this file onto a job they have given
+    up on, recording ``purge_type`` plus the ``scf_steps`` and
+    ``failure_reason`` parsed from the ORCA output *before* the contents were
+    deleted. For a purged job it is the only surviving record of why the job
+    died, so census reads it rather than just noting that it exists.
+
+    Args:
+        job_dir: The job directory.
+
+    Returns:
+        The parsed marker dict, or {} when missing or unreadable.
+    """
+    try:
+        with open(job_dir / MARKER_FILENAME, errors="replace") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _label_from_code(code: int) -> str:
     """Map a ``check_file_termination`` code to a status label.
 
@@ -764,14 +788,35 @@ def scan_job(
     else:
         status_label, status_code = _classify_job_status(job_dir, hours_cutoff)
 
-    row["status"] = status_label
-    row["termination_code"] = status_code
-
     if out_path is not None and status_label in (_STATUS_FAILED, _STATUS_TIMEOUT):
         try:
             row["failure_reason"] = parse_failure_reason(out_path)
         except OSError:
             pass
+
+    # A purge marker means clean.py/merge_job_roots.py gave up on this job. The
+    # dashboard treats the marker as an override and flips such a row to FAILED,
+    # so census matches that: without it a purged job whose output was deleted
+    # reads as `to_run`, overstating pending work by however many jobs were
+    # purged. A normally-terminated orca.out still wins -- the merge tooling
+    # never writes a marker to a completed dir, and if one is there anyway the
+    # output is its own proof.
+    if row["marker"]:
+        marker = read_purge_marker(job_dir)
+        row["purge_type"] = marker.get("purge_type")
+        if status_label != _STATUS_COMPLETED:
+            status_label = _STATUS_FAILED
+            if row["failure_reason"] is None:
+                reason = marker.get("failure_reason")
+                row["failure_reason"] = reason or "purged, no reason recorded"
+            if row["scf_steps"] is None and marker.get("scf_steps") is not None:
+                try:
+                    row["scf_steps"] = int(marker["scf_steps"])
+                except (TypeError, ValueError):
+                    pass
+
+    row["status"] = status_label
+    row["termination_code"] = status_code
 
     # max_forces / final_energy are the DB-shaped columns and come from the
     # output; fill them from the engrad tier when the output reported neither.
