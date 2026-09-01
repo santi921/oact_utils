@@ -856,3 +856,71 @@ def test_symlinked_job_dirs_are_discovered(tmp_path):
     rows = {r["job_name"]: r for r in csv.DictReader(open(out))}
     assert set(rows) == {"job_1", "job_2"}
     assert rows["job_1"]["metal"] == "Am"
+
+
+# ---------------------------------------------------------------------------
+# Wall time on the cheap path
+# ---------------------------------------------------------------------------
+
+
+def test_parse_total_run_time():
+    from oact_utilities.workflows.census import parse_total_run_time
+
+    lines = [
+        "                             ****ORCA TERMINATED NORMALLY****",
+        "TOTAL RUN TIME: 0 days 0 hours 1 minutes 19 seconds 893 msec",
+    ]
+    assert parse_total_run_time(lines) == pytest.approx(79.893)
+    assert parse_total_run_time(
+        ["TOTAL RUN TIME: 2 days 3 hours 4 minutes 5 seconds 6 msec"]
+    ) == pytest.approx(2 * 86400 + 3 * 3600 + 4 * 60 + 5 + 0.006)
+    assert parse_total_run_time(["no timing here"]) is None
+    assert parse_total_run_time([]) is None
+
+
+def test_no_metrics_still_reports_wall_time(tmp_path):
+    """--no-metrics must keep status AND time-to-completion.
+
+    TOTAL RUN TIME is the last line ORCA writes, so the tail read that
+    determines status already carries it -- no full-file read needed.
+    """
+    root = tmp_path / "jobs"
+    _write_job(
+        root,
+        "job_1",
+        inp=_INP_AMO,
+        out="SCF CONVERGED AFTER 12 CYCLES\n"
+        "Timings for individual modules:\n"
+        "Sum of individual times          ...       79.073 sec (=   1.318 min)\n"
+        "                             ****ORCA TERMINATED NORMALLY****\n"
+        "TOTAL RUN TIME: 0 days 0 hours 1 minutes 19 seconds 893 msec\n",
+    )
+    out = tmp_path / "census.csv"
+    run_census([root], out, fmt="csv", with_metrics=False)
+    row = next(iter(csv.DictReader(open(out))))
+
+    assert row["status"] == "completed"
+    assert float(row["wall_time"]) == pytest.approx(79.893)
+    # the expensive columns are genuinely gone
+    assert row["scf_steps"] == ""
+    # but the inp still supplies the requested core count
+    assert row["nprocs_requested"] == "6"
+
+
+def test_metrics_path_wall_time_is_not_clobbered(tmp_path):
+    """With metrics on, the parsed value wins; the tail fallback must not override."""
+    root = tmp_path / "jobs"
+    _write_job(
+        root,
+        "job_1",
+        inp=_INP_AMO,
+        out="SCF CONVERGED AFTER 12 CYCLES\n"
+        "Timings for individual modules:\n"
+        "Sum of individual times          ...       79.073 sec (=   1.318 min)\n"
+        "                             ****ORCA TERMINATED NORMALLY****\n"
+        "TOTAL RUN TIME: 0 days 0 hours 1 minutes 19 seconds 893 msec\n",
+    )
+    out = tmp_path / "census.csv"
+    run_census([root], out, fmt="csv", recompute=True)
+    row = next(iter(csv.DictReader(open(out))))
+    assert float(row["wall_time"]) == pytest.approx(79.073)

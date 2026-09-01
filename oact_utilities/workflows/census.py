@@ -70,7 +70,7 @@ from typing import Any
 
 from ..core.orca.calc import ACTINIDE_LIST
 from ..utils.analysis import parse_job_metrics
-from ..utils.status import parse_failure_reason, pull_log_file
+from ..utils.status import _read_last_lines, parse_failure_reason, pull_log_file
 from .clean import MARKER_FILENAME
 from .inventory import (
     _STATUS_COMPLETED,
@@ -625,6 +625,35 @@ def read_purge_marker(job_dir: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+_TOTAL_RUN_TIME_RE = re.compile(
+    r"TOTAL RUN TIME:\s*(\d+)\s*days?\s*(\d+)\s*hours?\s*(\d+)\s*minutes?"
+    r"\s*(\d+)\s*seconds?\s*(\d+)\s*msec"
+)
+
+
+def parse_total_run_time(lines: list[str]) -> float | None:
+    """Seconds from ORCA's ``TOTAL RUN TIME`` line, or None.
+
+    That line is the very last line an ORCA run writes, so a tail read already
+    has it -- which makes wall time free on the ``--no-metrics`` path, where the
+    output is never read in full. It is also the authoritative figure: the
+    metrics path reports "Sum of individual times" instead, which excludes
+    whatever ORCA did outside the timed modules.
+
+    Args:
+        lines: Trailing lines of an ORCA output, newest last.
+
+    Returns:
+        Wall time in seconds, or None when the line is absent.
+    """
+    for line in reversed(lines):
+        m = _TOTAL_RUN_TIME_RE.search(line)
+        if m:
+            d, h, mi, s, ms = (int(x) for x in m.groups())
+            return d * 86400 + h * 3600 + mi * 60 + s + ms / 1000.0
+    return None
+
+
 def _label_from_code(code: int) -> str:
     """Map a ``check_file_termination`` code to a status label.
 
@@ -817,6 +846,14 @@ def scan_job(
 
     row["status"] = status_label
     row["termination_code"] = status_code
+
+    # Wall time without the expensive tier: TOTAL RUN TIME is the last line of
+    # the file, so one tail read (a seek + single block on plain text) gets it.
+    if row["wall_time"] is None and out_path is not None:
+        try:
+            row["wall_time"] = parse_total_run_time(_read_last_lines(out_path, 15))
+        except OSError:
+            pass
 
     # max_forces / final_energy are the DB-shaped columns and come from the
     # output; fill them from the engrad tier when the output reported neither.
