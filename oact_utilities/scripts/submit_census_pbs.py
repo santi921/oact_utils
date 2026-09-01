@@ -46,6 +46,22 @@ cd "${{PBS_O_WORKDIR:-{workdir}}}"
 set +u
 {env_setup}set -u
 
+# Preamble: every one of these has cost a blind resubmit at least once, so the
+# log states them up front. A failure log that stops partway through this block
+# names its own cause.
+echo "=== census chunk preamble ==="
+echo "host      : $(hostname)"
+echo "pwd       : $(pwd)"
+echo "python    : $(command -v python || echo 'NOT FOUND')"
+echo "conda env : ${{CONDA_DEFAULT_ENV:-<none active>}}"
+if ! python -c "import oact_utilities.workflows.census" 2>&1; then
+    echo "FATAL: cannot import oact_utilities.workflows.census" >&2
+    echo "       (wrong conda env, or the package is not installed here)" >&2
+    exit 1
+fi
+echo "census    : importable"
+echo "============================="
+
 MANIFEST="{manifest}"
 SHARD_DIR="{shard_dir}"
 IDX="${{CENSUS_CHUNK:-${{PBS_ARRAY_INDEX:-0}}}}"
