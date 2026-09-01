@@ -841,7 +841,14 @@ def iter_job_dirs(roots: list[Path], limit: int | None = None):
     for root in roots:
         try:
             with os.scandir(root) as it:
-                entries = sorted(e.path for e in it if e.is_dir(follow_symlinks=False))
+                # follow_symlinks=True: a symlinked job directory is still a job
+                # directory, and skipping it silently under-counts a corpus that
+                # was assembled by linking rather than copying. inventory.py and
+                # clean.py both discover with a plain is_dir(), so this matches
+                # them. Note this is discovery only -- scan_job still walks with
+                # followlinks=False, so a link *inside* a job dir is not
+                # descended into and contributes no bytes.
+                entries = sorted(e.path for e in it if e.is_dir())
         except OSError as exc:
             print(f"  Warning: cannot list {root}: {exc}", file=sys.stderr)
             continue

@@ -828,3 +828,31 @@ def test_merge_rejects_unknown_shard_extension(tmp_path):
     bogus.write_text("nope")
     with pytest.raises(ValueError, match="unsupported shard type"):
         merge_census([bogus], tmp_path / "out.db", fmt="sqlite")
+
+
+def test_symlinked_job_dirs_are_discovered(tmp_path):
+    """A corpus assembled by linking must not silently under-count.
+
+    inventory.py and clean.py both discover job dirs with a plain is_dir(),
+    which follows symlinks; census has to match or the same root yields two
+    different job counts depending on which tool you ask.
+    """
+    real = tmp_path / "real"
+    _write_job(real, "job_1", inp=_INP_AMO, out=_OUT_DONE)
+    _write_job(real, "job_2", inp=_INP_AMO, out=_OUT_DONE)
+
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "job_1").symlink_to(real / "job_1")
+    (linked / "job_2").symlink_to(real / "job_2")
+    (linked / "dangling").symlink_to(tmp_path / "does_not_exist")
+
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([linked], out, fmt="csv")
+
+    # Both links resolved; the dangling one contributes nothing.
+    assert summary.total == 2
+    assert summary.status["completed"] == 2
+    rows = {r["job_name"]: r for r in csv.DictReader(open(out))}
+    assert set(rows) == {"job_1", "job_2"}
+    assert rows["job_1"]["metal"] == "Am"
