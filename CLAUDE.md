@@ -588,9 +588,8 @@ multiply by `EH_BOHR_TO_EV_ANG` (51.42206313) for eV/Angstrom.
 **Basis table import is branch-tolerant.** `census.count_basis()` sums
 `BASIS_DICT`, imported from `utils/basis.py` when that module exists and from
 `core/orca/calc.py` otherwise. Branches that have not split the table out of
-`calc.py` (e.g. `feat/sandia-hpc-support`) would otherwise fail at import. The
-two tables are identical (118 elements, verified equal), so `n_basis` is the
-same either way.
+`calc.py` would otherwise fail at import. The two tables are identical
+(118 elements, verified equal), so `n_basis` is the same either way.
 
 **Performance:** measured on 2000 gzipped quacc job dirs (~4 MB decompressed
 `orca.out` each) at 8 workers: ~83 jobs/s cold, ~2100 jobs/s once the

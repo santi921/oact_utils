@@ -252,6 +252,40 @@ class ArchitectorWorkflow:
         msg = str(e).lower()
         return any(token in msg for token in ("lock", "busy"))
 
+    def _lock_error(
+        self,
+        e: sqlite3.OperationalError,
+        waited: float,
+        op: str,
+        attempts: int,
+    ) -> sqlite3.OperationalError:
+        """Wrap a lock/busy error that survived the full retry budget.
+
+        A ``lock``/``busy`` error that persists across every retry is not
+        transient contention -- another process is holding the database open.
+        On a parallel filesystem (Lustre/GPFS) that holder can live on a
+        DIFFERENT node, where ``fuser``/``lsof`` on the local node cannot see
+        it, and a reader's SHARED lock alone blocks a writer's EXCLUSIVE
+        commit even while ``BEGIN IMMEDIATE`` still succeeds. The bare
+        "database is locked" gives no hint of any of this, so name the likely
+        cause and the fix.
+
+        Returns an ``OperationalError`` (same type, so existing
+        ``except sqlite3.OperationalError`` handlers still catch it) whose
+        message keeps the original error text as a prefix (substring checks
+        for "locked" still match). Raise it with ``raise ... from e``.
+        """
+        return sqlite3.OperationalError(
+            f"{e}: {op} on {self.db_path} stayed lock-blocked for "
+            f"{waited:.1f}s across {attempts} attempts -- not transient "
+            "contention. Another process is holding the database open "
+            "(commonly a dashboard or notebook still connected to the live "
+            "DB, possibly on ANOTHER node; fuser/lsof only show local "
+            "holders). Close that reader, or give the coordinator a fresh "
+            "inode: cp DB DB.fresh && mv DB DB.locked_old && mv DB.fresh DB. "
+            "Keep long-lived readers off the live campaign DB."
+        )
+
     def _execute_with_retry(
         self,
         query: str,
@@ -285,6 +319,7 @@ class ArchitectorWorkflow:
             .upper()
             .startswith(("INSERT", "UPDATE", "DELETE", "REPLACE", "ALTER"))
         )
+        start = time.monotonic()
         for attempt in range(max_retries):
             try:
                 cur = self.conn.cursor()
@@ -306,6 +341,10 @@ class ArchitectorWorkflow:
                     jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
                     continue
+                if self._is_retryable(e):
+                    raise self._lock_error(
+                        e, time.monotonic() - start, "write", max_retries
+                    ) from e
                 raise
 
     def _commit_with_retry(self, max_retries: int | None = None):
@@ -321,6 +360,7 @@ class ArchitectorWorkflow:
         """
         if max_retries is None:
             max_retries = self.max_retries
+        start = time.monotonic()
         for attempt in range(max_retries):
             try:
                 self.conn.commit()
@@ -331,6 +371,10 @@ class ArchitectorWorkflow:
                     jitter = random.uniform(0, delay * 0.2)
                     time.sleep(delay + jitter)
                     continue
+                if self._is_retryable(e):
+                    raise self._lock_error(
+                        e, time.monotonic() - start, "commit", max_retries
+                    ) from e
                 raise
 
     def __enter__(self):

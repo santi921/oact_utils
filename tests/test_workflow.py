@@ -1988,3 +1988,45 @@ def test_recover_orphans_skips_pid_sentinel(tmp_path, monkeypatch):
         assert jobs[1].status == JobStatus.RUNNING
         assert jobs[2].status == JobStatus.RUNNING
         assert jobs[3].status == JobStatus.RUNNING
+
+
+def test_lock_blocked_commit_reports_actionable_cause(sample_csv, tmp_path):
+    """A commit blocked past the retry budget names the real cause + fix.
+
+    Reproduces the Tuolumne/Lustre incident: a second connection holds a
+    SHARED read lock open, so the workflow's BEGIN IMMEDIATE (RESERVED) still
+    succeeds but its commit's EXCLUSIVE upgrade is blocked. The raised error
+    must stay an OperationalError (so existing handlers still catch it), keep
+    the original "locked" text, and add the cross-node holder + fresh-inode
+    guidance instead of the bare "database is locked".
+    """
+    db_path = tmp_path / "workflow.db"
+    _, workflow = create_workflow(
+        csv_path=sample_csv,
+        db_path=db_path,
+        geometry_column="aligned_csd_core",
+        charge_column="charge",
+        spin_column="uhf",
+    )
+    # Fail fast: short busy timeout + few retries so the lock exhausts quickly.
+    workflow.conn.execute("PRAGMA busy_timeout=300")
+    workflow.max_retries = 2
+    workflow.retry_delay_cap = 0.1
+
+    ids = [j.id for j in workflow.get_jobs_by_status(JobStatus.TO_RUN)]
+
+    blocker = sqlite3.connect(str(db_path))
+    blocker.isolation_level = None
+    blocker.execute("BEGIN")
+    blocker.execute("SELECT * FROM structures").fetchone()
+    try:
+        with pytest.raises(sqlite3.OperationalError) as exc:
+            workflow.update_status_bulk(ids, JobStatus.RUNNING)
+        msg = str(exc.value).lower()
+        assert "locked" in msg  # original error text preserved
+        assert "another node" in msg  # names the cross-node cause
+        assert "fresh" in msg  # gives the fresh-inode fix
+        assert isinstance(exc.value.__cause__, sqlite3.OperationalError)
+    finally:
+        blocker.close()
+        workflow.close()

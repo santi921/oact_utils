@@ -34,6 +34,7 @@ db_path = create_workflow_db(
 ```
 
 This creates:
+
 - `workflow.db` - SQLite database with job tracking and metrics columns
 
 ### 2. Submit Jobs to HPC
@@ -78,6 +79,7 @@ python -m oact_utilities.workflows.submit_jobs \\
 ```
 
 Creates job directories `jobs/job_0/`, `jobs/job_1/`, etc. with:
+
 - `orca.inp` - Complete ORCA input file (geometry + level of theory)
 - `flux_job.flux` or `slurm_job.sh` - Submission script that runs ORCA directly
 - Submits to scheduler and marks jobs as "running"
@@ -115,6 +117,7 @@ python -m oact_utilities.workflows.submit_jobs \\
 ```
 
 **How Parsl Mode Works:**
+
 1. Creates job directories with ORCA input files (same as traditional mode)
 2. Initializes Parsl with `HighThroughputExecutor` on the local node
 3. Submits all jobs as Parsl `python_app` futures
@@ -123,6 +126,7 @@ python -m oact_utilities.workflows.submit_jobs \\
 6. Graceful shutdown on Ctrl+C or completion
 
 **Parsl Mode Benefits:**
+
 - ✅ **High throughput**: Run 4+ jobs simultaneously on one node
 - ✅ **Real-time monitoring**: See jobs complete live with status updates
 - ✅ **Efficient resource use**: Better node utilization vs. sequential execution
@@ -131,6 +135,7 @@ python -m oact_utilities.workflows.submit_jobs \\
 - ✅ **Live database updates**: Status synced as jobs finish (not batch-updated later)
 
 **When to use Parsl mode:**
+
 - ✅ You have an exclusive node allocation (e.g., `flux alloc`)
 - ✅ Running many short-medium jobs (< 4 hours each)
 - ✅ Want to maximize node utilization and throughput
@@ -139,48 +144,50 @@ python -m oact_utilities.workflows.submit_jobs \\
 - ❌ Don't use if jobs have wildly different runtimes (load balancing issues)
 
 **ORCA Configuration Options:**
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--functional` | wB97M-V | DFT functional |
-| `--simple-input` | omol | Input template: `omol`, `omol_base`, `x2c`, `dk3`, or `pm3` |
-| `--actinide-basis` | ma-def-TZVP | Basis set for actinides |
-| `--actinide-ecp` | def-ECP | ECP for actinides. Pass `none` (case-insensitive) to disable. |
-| `--non-actinide-basis` | def2-TZVPD | Basis set for other elements |
-| `--scf-maxiter` | ORCA default | Maximum SCF iterations |
-| `--ks-method` | None | KS wavefunction: `rks`, `uks`, `roks` (None = ORCA auto-detect) |
-| `--nbo` | False | Enable NBO analysis |
-| `--mbis` | False | Enable MBIS population analysis |
-| `--kdiis` | False | Use KDIIS SCF convergence accelerator |
-| `--optimizer` | None | Geometry optimizer: `orca` (native) or `sella` (external ASE) |
-| `--mem-per-job` | None | Total-job memory budget (MB). Sizes `%maxcore` per MPI rank under 85% of this value. Recommended on memory-constrained nodes (Sandia CTS-1: ~60000, TLCC2: ~30000) |
-| `--orca-path` | scheduler-specific | Path to ORCA executable |
-| `--conda-env` | py10mpi | Conda environment to activate |
+
+| Option                   | Default            | Description                                                                                                                                                         |
+| ------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--functional`         | wB97M-V            | DFT functional                                                                                                                                                      |
+| `--simple-input`       | omol               | Input template:`omol`, `omol_base`, `x2c`, `dk3`, or `pm3`                                                                                                |
+| `--actinide-basis`     | ma-def-TZVP        | Basis set for actinides                                                                                                                                             |
+| `--actinide-ecp`       | def-ECP            | ECP for actinides. Pass`none` (case-insensitive) to disable.                                                                                                      |
+| `--non-actinide-basis` | def2-TZVPD         | Basis set for other elements                                                                                                                                        |
+| `--scf-maxiter`        | ORCA default       | Maximum SCF iterations                                                                                                                                              |
+| `--ks-method`          | None               | KS wavefunction:`rks`, `uks`, `roks` (None = ORCA auto-detect)                                                                                                |
+| `--nbo`                | False              | Enable NBO analysis                                                                                                                                                 |
+| `--mbis`               | False              | Enable MBIS population analysis                                                                                                                                     |
+| `--kdiis`              | False              | Use KDIIS SCF convergence accelerator                                                                                                                               |
+| `--optimizer`          | None               | Geometry optimizer:`orca` (native) or `sella` (external ASE)                                                                                                    |
+| `--mem-per-job`        | None               | Total-job memory budget (MB). Sizes`%maxcore` per MPI rank under 85% of this value. Recommended on memory-constrained nodes (Sandia CTS-1: ~60000, TLCC2: ~30000) |
+| `--orca-path`          | scheduler-specific | Path to ORCA executable                                                                                                                                             |
+| `--conda-env`          | py10mpi            | Conda environment to activate                                                                                                                                       |
 
 **Parsl Mode Options:**
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--use-parsl` | False | Enable Parsl concurrent execution mode |
-| `--max-workers` | 4 | Maximum number of concurrent Parsl workers |
-| `--cores-per-worker` | 16 | CPU cores allocated per worker |
-| `--n-cores` | auto (matches `cores_per_worker`) | Cores per ORCA job (auto-set to `cores_per_worker` if mismatch) |
-| `--job-timeout` | 72000 | Per-job timeout in seconds (20 hours) |
-| `--conda-base` | /usr/WS1/vargas58/miniconda3 | Conda base path for worker init |
+
+| Option                 | Default                            | Description                                                      |
+| ---------------------- | ---------------------------------- | ---------------------------------------------------------------- |
+| `--use-parsl`        | False                              | Enable Parsl concurrent execution mode                           |
+| `--max-workers`      | 4                                  | Maximum number of concurrent Parsl workers                       |
+| `--cores-per-worker` | 16                                 | CPU cores allocated per worker                                   |
+| `--n-cores`          | auto (matches`cores_per_worker`) | Cores per ORCA job (auto-set to`cores_per_worker` if mismatch) |
+| `--job-timeout`      | 72000                              | Per-job timeout in seconds (20 hours)                            |
+| `--conda-base`       | /usr/WS1/vargas58/miniconda3       | Conda base path for worker init                                  |
 
 **Scale-Out Parsl Options (`--use-parsl --scheduler slurm|pbspro`):**
 
 Parsl provisions worker allocations ("blocks") on the scheduler's behalf. Total capacity is `max_blocks * nodes_per_block * max_workers`.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--nodes-per-block` | 1 | Nodes per scheduler block (>1 enables multi-node blocks with SrunLauncher) |
-| `--max-blocks` | 10 | Maximum scheduler blocks Parsl will provision |
-| `--init-blocks` | 2 | Blocks to request at startup |
-| `--min-blocks` | 1 | Minimum blocks to keep alive |
-| `--walltime-hours` | 2 | Walltime per block allocation (hours) |
-| `--cpus-per-node` | `max_workers * cores_per_worker` | Scheduler CPU cores reserved per node (useful when a system requires whole-node requests but you intentionally idle some cores) |
-| `--qos` | frontier | SLURM QOS |
-| `--account` | ODEFN5169CYFZ | Scheduler account/allocation |
-| `--mpirun-path` | autodetect via `which mpirun` | PBS Pro only: override mpirun discovery when the queue's default module set lacks it |
+| Option                | Default                            | Description                                                                                                                     |
+| --------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `--nodes-per-block` | 1                                  | Nodes per scheduler block (>1 enables multi-node blocks with SrunLauncher)                                                      |
+| `--max-blocks`      | 10                                 | Maximum scheduler blocks Parsl will provision                                                                                   |
+| `--init-blocks`     | 2                                  | Blocks to request at startup                                                                                                    |
+| `--min-blocks`      | 1                                  | Minimum blocks to keep alive                                                                                                    |
+| `--walltime-hours`  | 2                                  | Walltime per block allocation (hours)                                                                                           |
+| `--cpus-per-node`   | `max_workers * cores_per_worker` | Scheduler CPU cores reserved per node (useful when a system requires whole-node requests but you intentionally idle some cores) |
+| `--qos`             | frontier                           | SLURM QOS                                                                                                                       |
+| `--account`         | ODEFN5169CYFZ                      | Scheduler account/allocation                                                                                                    |
+| `--mpirun-path`     | autodetect via`which mpirun`     | PBS Pro only: override mpirun discovery when the queue's default module set lacks it                                            |
 
 For single-node Parsl runs (`--max-blocks 1`), use the single-node launch scripts under `launch/` and run Parsl with `LocalProvider` inside an existing allocation.
 
@@ -188,20 +195,20 @@ For single-node Parsl runs (`--max-blocks 1`), use the single-node launch script
 
 `--hpc-site` selects a per-site bundle of defaults (modules, partition, MPI env, ORCA path) so a single submit command works on every cluster. Only `slurm` schedulers consult this flag.
 
-| `--hpc-site` | Job-script writer | When to use |
-|--------------|-------------------|-------------|
-| `default` | `write_slurm_job_file()` | Generic SLURM with `conda activate` + `--constraint=standard` (LLNL-style). ORCA expected on `PATH` unless `--orca-path` is set. |
-| `sandia` | `write_slurm_sandia_job_file()` | Sandia CTS1/TLCC2 (attaway/ecl). Emits `module load <openmpi>`, sets `OMPI_MCA_pml/mtl/btl` to bypass PSM2/Omni-Path, requests `--partition`, and points at the user-installed shared ORCA build. |
+| `--hpc-site` | Job-script writer                 | When to use                                                                                                                                                                                            |
+| -------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `default`    | `write_slurm_job_file()`        | Generic SLURM with`conda activate` + `--constraint=standard` (LLNL-style). ORCA expected on `PATH` unless `--orca-path` is set.                                                                |
+| `sandia`     | `write_slurm_sandia_job_file()` | Sandia CTS1/TLCC2 (attaway/ecl). Emits`module load <openmpi>`, sets `OMPI_MCA_pml/mtl/btl` to bypass PSM2/Omni-Path, requests `--partition`, and points at the user-installed shared ORCA build. |
 
 **Sandia defaults** (overridable via CLI):
 
-| Flag | Default | Notes |
-|------|---------|-------|
-| `--partition` | `attaway` | SLURM partition. CTS1 uses `attaway`; TLCC2 partitions differ. |
-| `--openmpi-module` | `aue/openmpi/4.1.6-gcc-12.3.0` | Must match ORCA's shared-library build. |
-| `--allocation` | `fy250086` | Sandia account. |
-| `--queue` (QOS) | `normal` | |
-| `--n-cores` | 36 | CTS1 attaway = 36 cores/node; TLCC2 = 16. |
+| Flag                 | Default                          | Notes                                                           |
+| -------------------- | -------------------------------- | --------------------------------------------------------------- |
+| `--partition`      | `attaway`                      | SLURM partition. CTS1 uses`attaway`; TLCC2 partitions differ. |
+| `--openmpi-module` | `aue/openmpi/4.1.6-gcc-12.3.0` | Must match ORCA's shared-library build.                         |
+| `--allocation`     | `fy250086`                     | Sandia account.                                                 |
+| `--queue` (QOS)    | `normal`                       |                                                                 |
+| `--n-cores`        | 36                               | CTS1 attaway = 36 cores/node; TLCC2 = 16.                       |
 
 **Sandia launch scripts** (under `oact_utilities/launch/`):
 
@@ -268,7 +275,7 @@ python -m oact_utilities.workflows.dashboard workflow.db --show-chronic-failures
 
 ### W&B Integration (Online Monitoring)
 
-Stream job progress and campaign metrics to [Weights & Biases](https://wandb.ai) for a team-visible live dashboard:
+Stream job progress and campaign metrics to [Weights &amp; Biases](https://wandb.ai) for a team-visible live dashboard:
 
 ```bash
 # During Parsl submission -- logs each job outcome in real-time
@@ -293,15 +300,15 @@ python -m oact_utilities.workflows.dashboard \
 
 **Installation:** `pip install wandb && wandb login`
 
-| Key namespace | Logged by | Description |
-|---------------|-----------|-------------|
-| `progress/completed` | submit_jobs | +1 per completed job |
-| `progress/failed` | submit_jobs | +1 per failed job |
-| `metrics/max_forces` | submit_jobs | Per-job max gradient |
-| `campaign/completed` | dashboard | Total completed count |
-| `campaign/progress_pct` | dashboard | % complete |
-| `metrics/wall_time_total_hours` | dashboard | Aggregate wall time |
-| `metrics/core_hours_total` | dashboard | Total core-hours consumed |
+| Key namespace                     | Logged by   | Description               |
+| --------------------------------- | ----------- | ------------------------- |
+| `progress/completed`            | submit_jobs | +1 per completed job      |
+| `progress/failed`               | submit_jobs | +1 per failed job         |
+| `metrics/max_forces`            | submit_jobs | Per-job max gradient      |
+| `campaign/completed`            | dashboard   | Total completed count     |
+| `campaign/progress_pct`         | dashboard   | % complete                |
+| `metrics/wall_time_total_hours` | dashboard   | Aggregate wall time       |
+| `metrics/core_hours_total`      | dashboard   | Total core-hours consumed |
 
 See `docs/parsl_integration.md` for full W&B documentation.
 
@@ -309,28 +316,28 @@ See `docs/parsl_integration.md` for full W&B documentation.
 
 The SQLite database tracks each structure with:
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER | Primary key (auto-increment) |
-| `orig_index` | INTEGER | Original row index from CSV |
-| `elements` | TEXT | Semicolon-separated element symbols |
-| `natoms` | INTEGER | Number of atoms |
-| `status` | TEXT | Job status: to_run, running, completed, failed, timeout (legacy "ready" auto-migrated) |
-| `charge` | INTEGER | Molecular charge (optional) |
-| `spin` | INTEGER | Spin multiplicity (2S+1) |
-| `geometry` | TEXT | XYZ geometry string |
-| `job_dir` | TEXT | Path to job directory |
-| `max_forces` | REAL | Maximum force from optimization (Eh/Bohr) |
-| `scf_steps` | INTEGER | Total SCF iterations |
-| `final_energy` | REAL | Final energy (Hartree) |
-| `error_message` | TEXT | Error message if failed |
-| `fail_count` | INTEGER | Number of times job has failed (for retry tracking) |
-| `wall_time` | REAL | Total wall time in seconds (extracted from ORCA output) |
-| `n_cores` | INTEGER | Number of CPU cores used |
-| `n_basis` | INTEGER | Basis-function count (derived from `elements`; drives memory/worker sizing) |
-| `worker_id` | TEXT | Scheduler job ID (SLURM/Flux) for crash recovery |
-| `created_at` | TIMESTAMP | Creation time |
-| `updated_at` | TIMESTAMP | Last update time |
+| Column            | Type      | Description                                                                            |
+| ----------------- | --------- | -------------------------------------------------------------------------------------- |
+| `id`            | INTEGER   | Primary key (auto-increment)                                                           |
+| `orig_index`    | INTEGER   | Original row index from CSV                                                            |
+| `elements`      | TEXT      | Semicolon-separated element symbols                                                    |
+| `natoms`        | INTEGER   | Number of atoms                                                                        |
+| `status`        | TEXT      | Job status: to_run, running, completed, failed, timeout (legacy "ready" auto-migrated) |
+| `charge`        | INTEGER   | Molecular charge (optional)                                                            |
+| `spin`          | INTEGER   | Spin multiplicity (2S+1)                                                               |
+| `geometry`      | TEXT      | XYZ geometry string                                                                    |
+| `job_dir`       | TEXT      | Path to job directory                                                                  |
+| `max_forces`    | REAL      | Maximum force from optimization (Eh/Bohr)                                              |
+| `scf_steps`     | INTEGER   | Total SCF iterations                                                                   |
+| `final_energy`  | REAL      | Final energy (Hartree)                                                                 |
+| `error_message` | TEXT      | Error message if failed                                                                |
+| `fail_count`    | INTEGER   | Number of times job has failed (for retry tracking)                                    |
+| `wall_time`     | REAL      | Total wall time in seconds (extracted from ORCA output)                                |
+| `n_cores`       | INTEGER   | Number of CPU cores used                                                               |
+| `n_basis`       | INTEGER   | Basis-function count (derived from `elements`; drives memory/worker sizing) |
+| `worker_id`     | TEXT      | Scheduler job ID (SLURM/Flux) for crash recovery                                       |
+| `created_at`    | TIMESTAMP | Creation time                                                                          |
+| `updated_at`    | TIMESTAMP | Last update time                                                                       |
 
 **Indexes:** `idx_status`, `idx_orig_index` for fast queries.
 
@@ -385,6 +392,7 @@ Config(
 ```
 
 **Key Design Choices:**
+
 - **LocalProvider (Flux)**: Uses the current allocated node only. Pass `--scheduler flux` (default).
 - **SlurmProvider (SLURM)**: Auto-provisions additional nodes via SLURM. Pass `--use-parsl --scheduler slurm`. Each provisioned node runs `max_workers` concurrent ORCA jobs.
 - **cores_per_worker**: CPU cores allocated per worker by Parsl
@@ -421,6 +429,7 @@ Uses `concurrent.futures.as_completed()` to process results as they finish (not 
 ### Resource Calculation
 
 **Node Capacity Check:**
+
 ```
 Total cores = max_workers × cores_per_worker × n_cores
 
@@ -428,6 +437,7 @@ Example: 4 workers × 16 cores = 64 cores
 ```
 
 Make sure this doesn't exceed your node allocation. For a 64-core node:
+
 - ✅ 4 workers × 16 cores = 64 cores (full utilization)
 - ✅ 2 workers × 32 cores = 64 cores (fewer, larger jobs)
 - ❌ 8 workers × 16 cores = 128 cores (oversubscribed!)
@@ -445,6 +455,7 @@ Parsl mode includes robust error handling:
 ### Performance Comparison
 
 **Traditional Mode (Sequential):**
+
 ```
 Job 1: ████████ (2 hours)
 Job 2:         ████████ (2 hours)
@@ -453,6 +464,7 @@ Total: 6 hours for 3 jobs
 ```
 
 **Parsl Mode (Concurrent, 3 workers):**
+
 ```
 Job 1: ████████ (2 hours)
 Job 2: ████████ (2 hours)
@@ -579,6 +591,7 @@ with ArchitectorWorkflow("workflow.db") as workflow:
 ```
 
 **Key differences from traditional mode:**
+
 - ✅ `submit_batch_parsl()` instead of `submit_batch()`
 - ✅ Uses `max_workers` and `cores_per_worker` instead of scheduler queue parameters
 - ✅ Jobs execute immediately on current node (no queue submission)
@@ -700,27 +713,28 @@ Jobs with timing data: 250
 ## Typical HPC Workflow
 
 1. **Prepare locally**:
+
    ```bash
    python setup_workflow.py  # Creates workflow.db
    scp workflow.db user@hpc:/project/
    ```
-
 2. **Submit on HPC**:
+
    ```bash
    python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 500
    ```
-
 3. **Monitor periodically**:
+
    ```bash
    python -m oact_utilities.workflows.dashboard workflow.db --update jobs/
    ```
-
 4. **Submit more as jobs finish**:
+
    ```bash
    python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 500
    ```
-
 5. **Handle failures and timeouts**:
+
    ```bash
    # View failed jobs with fail counts
    python -m oact_utilities.workflows.dashboard workflow.db --show-failed
@@ -760,6 +774,7 @@ The workflow tracks how many times each job has failed with the `fail_count` col
 This prevents wasting HPC resources on jobs that consistently fail.
 
 **Example workflow with retry limits:**
+
 ```bash
 # First attempt - submit all ready jobs
 python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --batch-size 500
@@ -799,6 +814,7 @@ python -m oact_utilities.workflows.dashboard workflow.db --recover-orphans --sch
 ```
 
 The recovery process:
+
 1. Finds all RUNNING jobs with a `worker_id` (scheduler job ID set at submission time)
 2. Queries the scheduler (`squeue`, `qstat`, or `flux jobs`) for active jobs -- single call for all
 3. Jobs whose `worker_id` is no longer active are orphans
@@ -836,11 +852,13 @@ python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --purge-f
 ### What Gets Cleaned
 
 **`--clean-tmp` (Scratch/Temp):**
+
 - `*.tmp`, `*.tmp.[N]` -- ORCA intermediate scratch files
 - `orca_tmp_*/` directories -- Parsl temp directories
 - `core`, `core.[N]`, `*.core` -- crash dump files
 
 **`--clean-bas` (Basis Set):**
+
 - `*.bas`, `*.bas[N]` -- basis set scratch files
 
 **`--clean-all`:** Fixed alias for `--clean-tmp --clean-bas`.
@@ -848,6 +866,7 @@ python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --purge-f
 ### Purging Failed Jobs (`--purge-failed`)
 
 Removes all contents from failed job directories except a `.do_not_rerun.json` marker file containing job metadata (SCF steps, failure reason, charge, spin, etc.). Failure reasons are extracted using `parse_failure_reason()` from `oact_utilities/utils/status.py`, which reads the last lines of the ORCA output file. This marker file:
+
 - Prevents the job from being resubmitted (submit guard in `submit_jobs.py`)
 - Preserves diagnostic information for post-hoc analysis
 - Reclaims disk space from jobs that will not be retried
@@ -979,7 +998,6 @@ python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ \
 ```
 
 - **`--clean-on-complete`** -- After each job completes successfully, removes scratch files (`*.tmp`, `*.core`, `orca_tmp_*/`) and basis-set files (`*.bas`, `*.basN`) from that job's directory. Equivalent to `clean.py --clean-all --execute` applied to a single job. Critical files (`orca.out`, `orca.inp`, `orca.engrad`, `orca.gbw`, `orca_metrics.json`, etc.) are never touched -- the same exclusion list as the standalone cleaner applies.
-
 - **`--purge-on-fail`** -- After each job fails, writes a `.do_not_rerun.json` marker file containing the job's failure metadata (orig_index, charge, spin, fail_count, error_message, parsed failure reason, SCF steps), then deletes all other contents of the job directory. Equivalent to `clean.py --purge-failed --execute` applied to a single job. The marker prevents resubmission via the existing submit guard.
 
 Both hooks run from the Parsl completion loop, after the per-job DB update commits. Failures inside the cleanup hooks are logged but never abort the submitter -- the campaign continues regardless. Traditional mode (`sbatch`/`flux batch`) does not support these flags because the submitter exits before any job finishes; continue to use `clean.py` for that path.
