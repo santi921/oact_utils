@@ -448,3 +448,182 @@ def test_run_census_on_real_orca_fixtures(tmp_path):
     assert float(npf3["metal_mulliken_charge"]) == pytest.approx(1.65, abs=0.01)
     assert float(npf3["metal_mulliken_spin"]) == pytest.approx(4.0, abs=0.01)
     assert npf3["charge_conserved"] in ("True", "1")
+
+
+# ---------------------------------------------------------------------------
+# Parallel shards and merge
+# ---------------------------------------------------------------------------
+
+
+def test_census_schema_is_declared_not_inferred(tmp_path):
+    """Shards must share one schema even when a column is all-null."""
+    pytest.importorskip("pyarrow")
+    import pyarrow.parquet as pq
+
+    from oact_utilities.workflows.census import census_schema
+
+    # Corpus A has engrad data; corpus B has none, so every force column is null.
+    root_a = _corpus(tmp_path / "a")
+    root_b = tmp_path / "b" / "jobs"
+    _write_job(root_b, "job_9", inp=_INP_AMO, out=_OUT_DONE)
+
+    out_a, out_b = tmp_path / "a.parquet", tmp_path / "b.parquet"
+    run_census([root_a], out_a, fmt="parquet")
+    run_census([root_b], out_b, fmt="parquet")
+
+    schema_a = pq.read_schema(out_a)
+    assert schema_a.equals(pq.read_schema(out_b))
+    assert schema_a.equals(census_schema())
+
+
+def test_merge_census_concatenates_shards(tmp_path):
+    pytest.importorskip("pyarrow")
+    import pandas as pd
+
+    from oact_utilities.workflows.census import merge_census
+
+    shards = []
+    for name in ("a", "b", "c"):
+        root = _corpus(tmp_path / name)
+        out = tmp_path / f"{name}.parquet"
+        run_census([root], out, fmt="parquet")
+        shards.append(out)
+
+    combined = tmp_path / "combined.parquet"
+    summary, written = merge_census(shards, combined)
+
+    assert written == combined
+    assert summary.total == 12  # 3 shards x 4 jobs
+    assert summary.duplicate_job_dirs == 0
+    assert summary.status["completed"] == 6
+    assert summary.status["failed"] == 3
+
+    want = pd.concat([pd.read_parquet(s) for s in shards], ignore_index=True)
+    got = pd.read_parquet(combined)
+    sort_on = ["root", "job_name"]
+    pd.testing.assert_frame_equal(
+        want.sort_values(sort_on).reset_index(drop=True),
+        got.sort_values(sort_on).reset_index(drop=True),
+    )
+
+
+def test_merge_census_preserves_root_column(tmp_path):
+    """A merged table must still be groupable by source root."""
+    pytest.importorskip("pyarrow")
+    import pandas as pd
+
+    from oact_utilities.workflows.census import merge_census
+
+    roots, shards = [], []
+    for name in ("a", "b"):
+        root = _corpus(tmp_path / name)
+        out = tmp_path / f"{name}.parquet"
+        run_census([root], out, fmt="parquet")
+        roots.append(str(root))
+        shards.append(out)
+
+    combined = tmp_path / "combined.parquet"
+    summary, _ = merge_census(shards, combined)
+
+    assert {summary.by_root[r] for r in roots} == {4}
+    df = pd.read_parquet(combined)
+    assert set(df["root"]) == set(roots)
+    assert dict(df.groupby("root").size()) == {roots[0]: 4, roots[1]: 4}
+
+
+def test_merge_census_flags_duplicate_job_dirs(tmp_path):
+    """Re-ingesting a shard double-counts; the summary must say so."""
+    pytest.importorskip("pyarrow")
+
+    from oact_utilities.workflows.census import merge_census
+
+    root = _corpus(tmp_path)
+    shard = tmp_path / "a.parquet"
+    run_census([root], shard, fmt="parquet")
+
+    combined = tmp_path / "combined.parquet"
+    summary, _ = merge_census([shard, shard], combined)
+    # expand_parquet_inputs de-duplicates, but a direct call must still detect it
+    assert summary.total == 8
+    assert summary.duplicate_job_dirs == 4
+
+
+def test_run_census_flags_overlapping_roots(tmp_path):
+    """The same root twice (or a nested root) inflates every count."""
+    root = _corpus(tmp_path)
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([root, root], out, fmt="csv")
+    assert summary.total == 8
+    assert summary.duplicate_job_dirs == 4
+
+
+def test_merge_census_rejects_foreign_parquet(tmp_path):
+    pytest.importorskip("pyarrow")
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from oact_utilities.workflows.census import merge_census
+
+    bogus = tmp_path / "bogus.parquet"
+    pq.write_table(pa.table({"x": [1], "y": ["a"]}), bogus)
+    with pytest.raises(ValueError, match="not a census table"):
+        merge_census([bogus], tmp_path / "out.parquet")
+
+
+def test_merge_census_rejects_output_as_input(tmp_path):
+    pytest.importorskip("pyarrow")
+
+    from oact_utilities.workflows.census import merge_census
+
+    root = _corpus(tmp_path)
+    shard = tmp_path / "a.parquet"
+    run_census([root], shard, fmt="parquet")
+    with pytest.raises(ValueError, match="also an input"):
+        merge_census([shard.resolve()], shard)
+
+
+def test_merge_census_to_sqlite(tmp_path):
+    """Shards can be merged into a different output format."""
+    pytest.importorskip("pyarrow")
+
+    from oact_utilities.workflows.census import merge_census
+
+    shards = []
+    for name in ("a", "b"):
+        root = _corpus(tmp_path / name)
+        out = tmp_path / f"{name}.parquet"
+        run_census([root], out, fmt="parquet")
+        shards.append(out)
+
+    combined = tmp_path / "combined.db"
+    summary, _ = merge_census(shards, combined, fmt="sqlite")
+    assert summary.total == 8
+
+    conn = sqlite3.connect(combined)
+    (n,) = conn.execute("SELECT COUNT(*) FROM census").fetchone()
+    assert n == 8
+    counts = dict(conn.execute("SELECT status, COUNT(*) FROM census GROUP BY status"))
+    assert counts["completed"] == 4
+    conn.close()
+
+
+def test_expand_parquet_inputs(tmp_path):
+    from oact_utilities.workflows.census import expand_parquet_inputs
+
+    (tmp_path / "a.parquet").touch()
+    (tmp_path / "b.parquet").touch()
+    (tmp_path / "notes.txt").touch()
+
+    # directory picks up only .parquet
+    got = expand_parquet_inputs([str(tmp_path)])
+    assert [p.name for p in got] == ["a.parquet", "b.parquet"]
+
+    # glob works
+    assert len(expand_parquet_inputs([str(tmp_path / "*.parquet")])) == 2
+
+    # a directory plus one of its own files must not double-count
+    got = expand_parquet_inputs([str(tmp_path), str(tmp_path / "a.parquet")])
+    assert [p.name for p in got] == ["a.parquet", "b.parquet"]
+
+    # explicit file
+    assert expand_parquet_inputs([str(tmp_path / "a.parquet")])[0].name == "a.parquet"
