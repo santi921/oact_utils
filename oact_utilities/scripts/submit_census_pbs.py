@@ -97,7 +97,7 @@ for r in "${{ROOTS[@]}}"; do echo "  $r"; done
 python -m oact_utilities.workflows.census "${{ROOTS[@]}}" \\
     -o "$SHARD_DIR/$LABEL{suffix}" \\
     --format {fmt} \\
-    --workers {workers}
+    --workers {workers}{census_flags}
 rc=$?
 echo "chunk $IDX exit=$rc"
 exit $rc
@@ -122,6 +122,17 @@ def bin_pack(sized: list[tuple[str, int]], n: int) -> list[list[tuple[str, int]]
         buckets[i].append((root, size))
         loads[i] += size
     return [b for b in buckets if b]
+
+
+def _census_flags(args: argparse.Namespace) -> str:
+    """Extra census flags to append to the command inside the job script."""
+    flags = []
+    if args.no_forces:
+        flags.append("--no-forces")
+    if args.no_metrics:
+        flags.append("--no-metrics")
+    flags.extend(args.census_arg)
+    return (" \\\n    " + " ".join(flags)) if flags else ""
 
 
 def main() -> int:
@@ -175,6 +186,28 @@ def main() -> int:
     p.add_argument("--conda-base", default=None, help="Conda install prefix")
     p.add_argument(
         "--venv", default=None, help="Virtualenv to activate instead of conda"
+    )
+    p.add_argument(
+        "--no-forces",
+        action="store_true",
+        help="Pass --no-forces to census: skip orca.engrad (no per-atom force "
+        "stats, no engrad energy).",
+    )
+    p.add_argument(
+        "--no-metrics",
+        action="store_true",
+        help="Pass --no-metrics to census: skip the full orca.out read (no "
+        "scf_steps/wall_time/n_cores/populations). Much cheaper -- status still "
+        "comes from a tail read -- so this is the flag for a status-only census.",
+    )
+    p.add_argument(
+        "--census-arg",
+        action="append",
+        default=[],
+        metavar="ARG",
+        help="Extra argument passed verbatim to census, repeatable. Use = for "
+        "values starting with a dash, or argparse consumes them as options: "
+        "--census-arg=--hours-cutoff --census-arg=48",
     )
     p.add_argument(
         "--rerunnable",
@@ -293,6 +326,7 @@ def main() -> int:
                 suffix=suffix,
                 fmt=fmt,
                 workers=args.workers,
+                census_flags=_census_flags(args),
             )
         )
     os.chmod(script, 0o755)
