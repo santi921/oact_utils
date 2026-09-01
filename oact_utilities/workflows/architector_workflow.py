@@ -255,8 +255,9 @@ class ArchitectorWorkflow:
     def _execute_with_retry(
         self,
         query: str,
-        params: tuple = (),
+        params: tuple | list = (),
         max_retries: int | None = None,
+        many: bool = False,
     ) -> sqlite3.Cursor:
         """Execute a query with retry logic for handling database locks.
 
@@ -267,9 +268,12 @@ class ArchitectorWorkflow:
 
         Args:
             query: SQL query string.
-            params: Query parameters.
+            params: Query parameters, or a sequence of parameter tuples when
+                ``many`` is set.
             max_retries: Maximum number of retries. Defaults to
                 ``self.max_retries``.
+            many: Run the statement once per parameter tuple via
+                ``executemany`` instead of a single ``execute``.
 
         Returns:
             Cursor after execution.
@@ -286,7 +290,10 @@ class ArchitectorWorkflow:
                 cur = self.conn.cursor()
                 if is_write and not self.conn.in_transaction:
                     cur.execute("BEGIN IMMEDIATE")
-                cur.execute(query, params)
+                if many:
+                    cur.executemany(query, params)
+                else:
+                    cur.execute(query, params)
                 return cur
             except sqlite3.OperationalError as e:
                 if self._is_retryable(e) and attempt < max_retries - 1:
@@ -525,7 +532,11 @@ class ArchitectorWorkflow:
 
         Each dict in metrics_list must have a 'job_id' key and may have:
         job_dir, max_forces, scf_steps, final_energy, error_message,
-        wall_time, n_cores.
+        wall_time, n_cores, generator_data, n_basis.
+
+        Every write also stamps ``updated_at``. To set derived metadata on
+        finished jobs without disturbing their completion timestamps, use a
+        dedicated setter such as ``set_basis_counts``.
 
         Args:
             metrics_list: List of dicts with job_id and metric values.
@@ -712,6 +723,29 @@ class ArchitectorWorkflow:
             result.setdefault(key, {})[JobStatus(status)] = count
         return result
 
+    def set_basis_counts(self, counts: list[tuple[int, int]]) -> None:
+        """Set ``n_basis`` for many jobs in one statement.
+
+        Deliberately does NOT touch ``updated_at``, unlike
+        ``update_job_metrics_bulk``. ``n_basis`` is derived metadata (a pure
+        function of ``elements``), not job progress, and a backfill sweeps
+        every row including long-finished ones. Stamping ``updated_at`` there
+        would overwrite completion timestamps that ``iter_terminal_history``
+        feeds to the W&B campaign curves, collapsing the whole history onto
+        the backfill instant -- irreversibly.
+
+        Args:
+            counts: ``(job_id, n_basis)`` pairs.
+        """
+        if not counts:
+            return
+        self._execute_with_retry(
+            "UPDATE structures SET n_basis = ? WHERE id = ?",
+            [(n_basis, job_id) for job_id, n_basis in counts],
+            many=True,
+        )
+        self._commit_with_retry()
+
     def count_by_basis_bins(self, bin_width: int = 200) -> dict[int | None, int]:
         """Count jobs grouped by basis-function-count bin.
 
@@ -746,8 +780,11 @@ class ArchitectorWorkflow:
         """Summarize the basis-function distribution across the workflow.
 
         Feeds per-job memory sizing: ``get_mem_estimate()`` models total ORCA
-        memory as ``a * n_basis**1.5 + b``, so the max drives how much memory a
-        worker must be given and the sum is a proxy for total campaign cost.
+        memory as ``a * n_basis**1.5 + b``, so ``max`` is what a worker must be
+        sized for. ``total`` is the plain sum of the column, which is NOT a
+        cost estimate -- cost is superlinear, so many small jobs and one huge
+        job can sum alike while differing by orders of magnitude. Size off
+        ``max`` and the distribution, not ``total``.
 
         Returns:
             Dict with ``n_rows``, ``n_null`` (rows lacking a count),

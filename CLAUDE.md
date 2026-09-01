@@ -89,6 +89,7 @@ oact_utilities/
 ├── workflows/                  # High-throughput workflow management
 │   ├── architector_workflow.py # Workflow manager with SQLite tracking (WAL mode)
 │   ├── clean.py                # Job directory cleanup utility (scratch, basis, purge failed)
+│   ├── census.py               # DB-free per-job census (metal, status, energies, forces) -> parquet
 │   ├── dashboard.py            # CLI dashboard for monitoring + parallel status updates
 │   ├── submit_jobs.py          # Batch job submission (Traditional + Parsl modes)
 │   ├── parsl_launchers.py      # Parsl Config builders (LocalProvider, SlurmProvider, PBSProProvider, Sandia variants)
@@ -265,6 +266,13 @@ ORCA outputs in `tests/test_basis.py` (NpF3: 225 predicted vs 223 reported).
 `_insert_row()` derives `n_basis` from `elements` automatically, so every workflow DB carries it.
 Inspect the distribution with `dashboard.py --show-basis` before choosing `--max-workers` /
 `--cores-per-worker`; fill it in on older databases with `dashboard.py --backfill-basis`.
+
+**Caveat:** the count assumes the default basis (`ma-def-TZVP` + `def-ECP` for actinides,
+`def2-TZVPD` otherwise) and the column records no basis provenance. A campaign run with
+`--simple-input x2c` (AutoAux) or `dk3` (SARC), or with `--actinide-basis` /
+`--non-actinide-basis` overridden, stores a count for the default basis, not the one it ran.
+For `--simple-input pm3` (semiempirical, no Gaussian basis) `n_basis` is meaningless -- that
+path bypasses `get_mem_estimate` and hardcodes `%maxcore 512` anyway.
 
 ## Job Status Lifecycle
 
@@ -515,6 +523,85 @@ Add `--reroot` to every clean invocation above so each job resolves to
 reroots the `--validate-db` gate. Writes nothing to the DB, so the stored column
 stays as-is -- rerooting is per-run only.
 
+### 3c. Corpus Census (DB-free, metal-aware)
+
+Running count of what a job-directory corpus contains, keyed on metal class,
+reconstructed entirely from files on disk:
+
+- `oact_utilities/workflows/census.py` - one flat table per run (one row per job dir)
+
+The column set is the union of what `notebooks/baseline_profiling_actinides.ipynb`
+and `notebooks/check_initial_dbs_oact.ipynb` consume, minus what only a workflow
+DB can supply (`id`, `fail_count`, `worker_id`, `generator_data`, `source_db`).
+`orig_index` survives only when the directory name encodes it.
+
+**Where each column comes from:**
+
+| Source | Columns | Cost |
+| ------ | ------- | ---- |
+| directory name | `orig_index` | free |
+| `orca.inp` (or `.inp.gz`) | `elements`, `formula`, `natoms`, `charge`, `spin`, `n_basis`, `metal`, `metal_class`, `ligand_elements`, `n_ligand_types`, `functional`, `simple_input`, `nprocs_requested` | free |
+| `orca.out` (or `.out.gz`) | `status`, `termination_code`, `failure_reason`, `scf_steps`, `wall_time`, `n_cores`, `final_energy`, `max_forces`, `sella_steps`, `metal_{mulliken,loewdin}_{charge,spin}`, `charge_conserved`, `spin_conserved` | expensive; uses the `orca_metrics.json` cache |
+| `orca.engrad` (or `.engrad.gz`) | `engrad_energy`, `force_{max,mean,median}`, `metal_force`, `ligand_force_{max,mean}`, `n_neighbors`, `neighbor_force_{max,mean}`, `frac_conv_{tight,normal,loose}` | cheap |
+
+**Census CLI reference:**
+
+```bash
+python -m oact_utilities.workflows.census <root> [<root> ...] -o out.parquet [options]
+
+# Roots
+--roots-file PATH        # JSON array or one path per line, instead of / alongside positionals
+
+# Output
+-o PATH                  # required
+--format {parquet,sqlite,csv}   # default parquet; falls back to sqlite without pyarrow
+--chunk-size N           # rows buffered before each flush (default: 20000)
+
+# What to extract (both tiers are ON by default)
+--no-forces              # skip orca.engrad (no energies/forces/neighbor stats)
+--no-metrics             # skip the full orca.out read (no scf_steps/wall_time/n_cores/populations)
+--recompute              # bypass each job's orca_metrics.json cache
+--neighbor-cutoff ANG    # metal coordination radius (default: 4.0)
+
+# Performance / output
+--workers N              # parallel scan threads (default: 8)
+--hours-cutoff H         # running-vs-timeout threshold (default: 24)
+--top N                  # failure reasons to list (default: 15)
+--debug N                # limit to first N job dirs per root
+```
+
+**Metal classification** is two-way and tiered. `metal_class` is `actinide`
+(Ac-Lr, matching `ACTINIDE_LIST` and `stratify_lanes.py:is_actinide`) or
+`non_actinide`. `pick_metal()` scans metal tiers in priority order (actinide,
+heavy p-block Po-Ra, lanthanide, d-block, other metal) and takes the highest-Z
+member of the first tier present, so a heavy ligand atom (Bi, Pb, Te) can never
+outrank the real centre the way a plain highest-Z scan would.
+
+**Two force columns, different quantities:** `max_forces` is what the workflow
+DB stores (ORCA's reported MAX gradient *component*, or Sella's final fmax),
+so it lines up with the notebooks' DB-sourced plots. `force_max` is the largest
+per-atom gradient *norm* from `orca.engrad`, matching the `force_baselines`
+tables. `max_forces` falls back to `force_max` when the output reported none;
+`final_energy` falls back to `engrad_energy` the same way. Both are Eh/Bohr;
+multiply by `EH_BOHR_TO_EV_ANG` (51.42206313) for eV/Angstrom.
+
+**Basis table import is branch-tolerant.** `census.count_basis()` sums
+`BASIS_DICT`, imported from `utils/basis.py` when that module exists and from
+`core/orca/calc.py` otherwise. Branches that have not split the table out of
+`calc.py` (e.g. `feat/sandia-hpc-support`) would otherwise fail at import. The
+two tables are identical (118 elements, verified equal), so `n_basis` is the
+same either way.
+
+**Performance:** measured on 2000 gzipped quacc job dirs (~4 MB decompressed
+`orca.out` each) at 8 workers: ~83 jobs/s cold, ~2100 jobs/s once the
+`orca_metrics.json` caches are warm. Status is taken from the cached
+`termination_status` rather than re-tailing the output, because tailing a
+`.out.gz` costs a full decompress. That makes `--no-metrics` *slower* than a
+warm full run on a gzipped corpus -- it is a cold-corpus optimization only. At
+400k rows the parquet lands near 100 MB and reads back in under a second; pass
+`columns=[...]` to `read_parquet` for analysis work, since materialising every
+column costs a few hundred MB of pandas memory.
+
 ### 4. Analysis & Parsing
 
 Parsing ORCA outputs, extracting energies, gradients, timings, populations:
@@ -591,6 +678,7 @@ Tests live in `tests/` with test data in `tests/files/`. When adding new functio
 - `test_io.py` - I/O utilities
 - `test_status.py` - Status checking and timeout detection
 - `test_clean.py` - Job directory cleanup (patterns, purge, submit guard)
+- `test_census.py` - DB-free corpus census (metal tiers, inp/engrad parsing, force stats, end-to-end)
 - `test_fix_unlinked.py` - Fix unlinked jobs (auto-link, reset, status revalidation)
 - `test_workflow.py` - Workflow DB operations
 - `test_workflow_parsers.py` - Parsers with real ORCA data

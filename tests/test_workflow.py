@@ -1175,6 +1175,66 @@ def test_backfill_basis_counts_fills_nulls(tmp_path):
         assert backfill_basis_counts(workflow)["filled"] == 0
 
 
+def test_backfill_basis_preserves_updated_at(tmp_path):
+    """Backfilling n_basis must not rewrite completion timestamps.
+
+    n_basis is derived metadata, but a backfill sweeps every NULL row --
+    including long-finished ones. Stamping updated_at there would collapse the
+    campaign history that iter_terminal_history feeds to the W&B curves onto
+    the backfill instant, irreversibly.
+    """
+    import sqlite3
+
+    from oact_utilities.workflows.dashboard import backfill_basis_counts
+
+    db_path = tmp_path / "timestamps.db"
+    _legacy_db_without_n_basis(db_path, [("O;H;H", 3), ("Np;F;F;F", 4)])
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "UPDATE structures SET status='completed', updated_at=? WHERE id=1",
+        ("2024-01-01 00:00:00",),
+    )
+    conn.execute(
+        "UPDATE structures SET status='completed', updated_at=? WHERE id=2",
+        ("2024-03-05 12:00:00",),
+    )
+    conn.commit()
+    conn.close()
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        assert backfill_basis_counts(workflow)["filled"] == 2
+
+        rows = dict(
+            workflow._execute_with_retry(
+                "SELECT id, updated_at FROM structures"
+            ).fetchall()
+        )
+        assert rows[1] == "2024-01-01 00:00:00"
+        assert rows[2] == "2024-03-05 12:00:00"
+
+        # And the terminal history the W&B logger reads is still two distinct points.
+        assert len({ts for _, ts in workflow.iter_terminal_history()}) == 2
+
+
+def test_backfill_basis_batches_past_unresolved_rows(tmp_path):
+    """A batch full of uncountable rows must not stall the paging loop."""
+    from oact_utilities.workflows.dashboard import backfill_basis_counts
+
+    db_path = tmp_path / "batched.db"
+    _legacy_db_without_n_basis(
+        db_path,
+        [("O;Xx", 2), ("Yy;Zz", 2), ("O;H;H", 3), ("Np;F;F;F", 4), ("U;C;C", 3)],
+    )
+
+    with ArchitectorWorkflow(db_path) as workflow:
+        # batch_size below the unresolved count forces the OFFSET to advance.
+        assert backfill_basis_counts(workflow, batch_size=1) == {
+            "filled": 3,
+            "unresolved": 2,
+        }
+
+
 def test_basis_summary_and_bins(tmp_path):
     """get_basis_summary and count_by_basis_bins aggregate over n_basis."""
     db_path = tmp_path / "summary.db"

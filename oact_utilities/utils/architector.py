@@ -313,10 +313,18 @@ def _init_db(
 
     # CREATE TABLE IF NOT EXISTS is a no-op on a pre-existing database, so a DB
     # written before n_basis existed would still lack the column and every
-    # _insert_row would fail. Add it here as well.
+    # _insert_row would fail. Add it here as well. The duplicate-column catch
+    # mirrors ArchitectorWorkflow._ensure_schema: another process may add the
+    # column between the PRAGMA and the ALTER.
     existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(structures)")}
     if "n_basis" not in existing_cols:
-        cur.execute("ALTER TABLE structures ADD COLUMN n_basis INTEGER DEFAULT NULL")
+        try:
+            cur.execute(
+                "ALTER TABLE structures ADD COLUMN n_basis INTEGER DEFAULT NULL"
+            )
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
 
     # Create indexes for common queries
     cur.execute("CREATE INDEX IF NOT EXISTS idx_status ON structures(status)")
@@ -557,6 +565,7 @@ def create_workflow_db(
 
     # Read CSV in chunks for memory efficiency
     total_inserted = 0
+    n_basis_unresolved = 0
 
     try:
         if debug:
@@ -653,7 +662,13 @@ def create_workflow_db(
                     if extra_values:
                         print(f"  Extra columns: {extra_values}")
 
-                # Insert into database
+                # Insert into database. n_basis is computed here rather than
+                # left to _insert_row so an uncountable element symbol can be
+                # tallied and reported instead of silently becoming NULL.
+                n_basis = count_basis_functions(elems, strict=False)
+                if n_basis is None:
+                    n_basis_unresolved += 1
+
                 _insert_row(
                     conn,
                     orig_index=int(idx),
@@ -663,6 +678,7 @@ def create_workflow_db(
                     status="to_run",
                     charge=charge,
                     spin=spin,
+                    n_basis=n_basis,
                     extra_values=extra_values,
                 )
 
@@ -690,6 +706,11 @@ def create_workflow_db(
         conn.close()
 
     print(f"Created workflow database with {total_inserted} structures at: {db_path}")
+    if n_basis_unresolved:
+        print(
+            f"  WARNING: {n_basis_unresolved} structures have no n_basis "
+            "(unrecognized element symbol); memory/worker sizing will skip them"
+        )
     return db_path
 
 

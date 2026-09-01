@@ -68,14 +68,27 @@ class TestGroundTruthAgainstOrcaOutputs:
     (actinide ma-def-TZVP + def-ECP, everything else def2-TZVPD).
     """
 
-    # tests/files/quacc_example/orca.out.gz -- NpF3, reports 223.
-    def test_npf3_matches_real_orca_count(self):
-        assert count_basis_functions(["Np", "F", "F", "F"]) == pytest.approx(
-            223, rel=0.05
-        )
+    # Exact predicted values are asserted so any table edit fails loudly; the
+    # ORCA reference number and the resulting delta are recorded alongside.
+    # A tolerance band here would defeat the purpose -- rel=0.15 on Am would
+    # have accepted anything from 80 to 108.
 
-    # tests/files/orca_direct_example/AmO_orca_atom95.out -- lone Am, reports 94.
-    # The table's actinide entries are a uniform 105, which runs ~12% high on a
-    # bare actinide (conservative: it over-allocates memory).
+    def test_npf3_matches_real_orca_count(self):
+        """NpF3: tests/files/quacc_example/orca.out.gz reports 223."""
+        orca_reported = 223
+        predicted = count_basis_functions(["Np", "F", "F", "F"])
+        assert predicted == 225
+        assert predicted - orca_reported == 2  # +0.9%
+
     def test_lone_actinide_matches_real_orca_count(self):
-        assert count_basis_functions(["Am"]) == pytest.approx(94, rel=0.15)
+        """Lone Am: orca_direct_example/AmO_orca_atom95.out reports 94.
+
+        The table's actinide entries are a uniform 105, so a bare actinide
+        runs ~12% high. That is conservative (it over-allocates memory) and
+        amounts to a fixed ~+11 per actinide atom, which is negligible on the
+        40-100-atom complexes these campaigns actually run.
+        """
+        orca_reported = 94
+        predicted = count_basis_functions(["Am"])
+        assert predicted == 105
+        assert predicted - orca_reported == 11  # +11.7%

@@ -132,7 +132,9 @@ def print_basis_summary(workflow: ArchitectorWorkflow, bin_width: int = 200):
         f"median: {stats['median']}    mean: {stats['mean']:.0f}    "
         f"max: {stats['max']}"
     )
-    print(f"  total basis functions across campaign: {stats['total']:,}")
+    # Deliberately not labelled a cost total: memory goes as n_basis**1.5, so
+    # this linear sum does not rank campaigns by cost. Size off max.
+    print(f"  sum of n_basis across campaign: {stats['total']:,}")
     if stats["n_null"]:
         print(
             f"  WARNING: {stats['n_null']} rows have no count " "(run --backfill-basis)"
@@ -149,7 +151,9 @@ def print_basis_summary(workflow: ArchitectorWorkflow, bin_width: int = 200):
     print("-" * 60)
     for key in numeric_keys:
         lo = key * bin_width
-        label = f"{lo}-{lo + bin_width}"
+        # Bins are half-open [lo, lo+width); label the inclusive last value so
+        # adjacent rows do not both appear to contain the boundary.
+        label = f"{lo}-{lo + bin_width - 1}"
         count = bins[key]
         bar = "#" * max(1, round(30 * count / peak))
         print(f"{label:<20}{count:>8}  {bar}")
@@ -1223,47 +1227,63 @@ def backfill_basis_counts(
     ``elements``, so it never touches the heavy ``geometry`` column and never
     reads the filesystem.
 
+    Rows are streamed in batches rather than materialized at once, and each
+    batch is written with a single ``executemany`` via
+    ``workflow.set_basis_counts`` -- which leaves ``updated_at`` alone, so
+    backfilling a finished campaign does not rewrite its completion history.
+
     Args:
         workflow: ArchitectorWorkflow instance.
-        batch_size: Rows to update per transaction (one commit each, since
-            commits are expensive on Lustre/GPFS).
+        batch_size: Rows to fetch and update per transaction (one commit each,
+            since commits are expensive on Lustre/GPFS).
         verbose: Print the element string of each row that could not be counted.
 
     Returns:
         Dict with ``filled`` (rows updated) and ``unresolved`` (rows left NULL
         because ``elements`` was empty or held an unknown symbol).
     """
-    cur = workflow._execute_with_retry(
-        "SELECT id, elements FROM structures WHERE n_basis IS NULL"
-    )
-    pending = cur.fetchall()
-    if not pending:
+    filled = 0
+    unresolved = 0
+    while True:
+        # Re-query rather than paging by OFFSET: filled rows drop out of the
+        # NULL set, so the next batch is always the next `batch_size` unfilled
+        # rows. Unresolved rows stay NULL, so skip past those already seen.
+        cur = workflow._execute_with_retry(
+            "SELECT id, elements FROM structures WHERE n_basis IS NULL "
+            "ORDER BY id LIMIT ? OFFSET ?",
+            (batch_size, unresolved),
+        )
+        batch = cur.fetchall()
+        if not batch:
+            break
+
+        counts: list[tuple[int, int]] = []
+        for job_id, elements in batch:
+            n_basis = (
+                count_basis_functions(elements.split(";"), strict=False)
+                if elements
+                else None
+            )
+            if n_basis is None:
+                unresolved += 1
+                if verbose:
+                    print(f"  id={job_id}: cannot count elements={elements!r}")
+                continue
+            counts.append((job_id, n_basis))
+
+        workflow.set_basis_counts(counts)
+        filled += len(counts)
+
+    total = filled + unresolved
+    if not total:
         print("Backfill-basis: all rows already have n_basis")
         return {"filled": 0, "unresolved": 0}
 
-    updates: list[dict] = []
-    unresolved = 0
-    for job_id, elements in pending:
-        n_basis = (
-            count_basis_functions(elements.split(";"), strict=False)
-            if elements
-            else None
-        )
-        if n_basis is None:
-            unresolved += 1
-            if verbose:
-                print(f"  id={job_id}: cannot count elements={elements!r}")
-            continue
-        updates.append({"job_id": job_id, "n_basis": n_basis})
-
-    for start in range(0, len(updates), batch_size):
-        workflow.update_job_metrics_bulk(updates[start : start + batch_size])
-
     print(
-        f"\nBackfill-basis: {len(updates)} rows filled, "
-        f"{unresolved} unresolved (of {len(pending)} missing)"
+        f"\nBackfill-basis: {filled} rows filled, "
+        f"{unresolved} unresolved (of {total} missing)"
     )
-    return {"filled": len(updates), "unresolved": unresolved}
+    return {"filled": filled, "unresolved": unresolved}
 
 
 def fix_unlinked_jobs(
@@ -2056,6 +2076,13 @@ def main():
         help="Show the basis-function distribution (drives per-job memory sizing)",
     )
     parser.add_argument(
+        "--basis-bin-width",
+        type=int,
+        default=200,
+        metavar="N",
+        help="Basis-function bin width for --show-basis (default: 200)",
+    )
+    parser.add_argument(
         "--backfill-basis",
         action="store_true",
         help=(
@@ -2107,6 +2134,8 @@ def main():
 
     if args.show_size_breakdown and args.size_bin_width <= 0:
         parser.error("--size-bin-width must be a positive integer")
+    if args.show_basis and args.basis_bin_width <= 0:
+        parser.error("--basis-bin-width must be a positive integer")
 
     try:
         effective_job_dir_pattern = apply_job_dir_prefix(
@@ -2267,7 +2296,7 @@ def main():
 
     # Show basis-function distribution if requested
     if args.show_basis:
-        print_basis_summary(workflow)
+        print_basis_summary(workflow, bin_width=args.basis_bin_width)
 
     # Show failed jobs if requested
     if args.show_failed:
