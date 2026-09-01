@@ -105,6 +105,10 @@ oact_utilities/
 │   ├── run_parsl_single_node_sandia.sh    # Sandia CTS1/TLCC2 single-node LocalProvider
 │   └── run_parsl_coordinator.sh           # Lightweight coordinator wrapper
 ├── scripts/                    # Campaign-specific workflow scripts
+│   ├── check_census_roots.py   # Validate census roots (nesting, guess-only dirs) before a run
+│   ├── run_census_all.py       # Load-balanced multi-process census on one node, then merge
+│   ├── submit_census_pbs.py    # Chunk a census across a PBS Pro array job (one shard per chunk)
+│   ├── census_roots_final.json # ALCF Eagle root list (35 roots, ~621k job dirs)
 │   ├── wave_one/               # First wave calculations
 │   ├── wave_two/               # Second wave calculations
 │   ├── multi_spin/             # Multi-spin state workflows
@@ -541,6 +545,7 @@ DB can supply (`id`, `fail_count`, `worker_id`, `generator_data`, `source_db`).
 | ------ | ------- | ---- |
 | directory name | `orig_index` | free |
 | `orca.inp` (or `.inp.gz`) | `elements`, `formula`, `natoms`, `charge`, `spin`, `n_basis`, `metal`, `metal_class`, `ligand_elements`, `n_ligand_types`, `functional`, `simple_input`, `nprocs_requested` | free |
+| `.do_not_rerun.json` | `marker`, `purge_type`, and the `failure_reason` / `scf_steps` recorded before the purge | free |
 | `orca.out` (or `.out.gz`) | `status`, `termination_code`, `failure_reason`, `scf_steps`, `wall_time`, `n_cores`, `final_energy`, `max_forces`, `sella_steps`, `metal_{mulliken,loewdin}_{charge,spin}`, `charge_conserved`, `spin_conserved` | expensive; uses the `orca_metrics.json` cache |
 | `orca.engrad` (or `.engrad.gz`) | `engrad_energy`, `force_{max,mean,median}`, `metal_force`, `ligand_force_{max,mean}`, `n_neighbors`, `neighbor_force_{max,mean}`, `frac_conv_{tight,normal,loose}` | cheap |
 
@@ -568,7 +573,64 @@ python -m oact_utilities.workflows.census <root> [<root> ...] -o out.parquet [op
 --hours-cutoff H         # running-vs-timeout threshold (default: 24)
 --top N                  # failure reasons to list (default: 15)
 --debug N                # limit to first N job dirs per root
+
+# Merge shards from parallel runs (positionals become parquet files/dirs/globs)
+--merge                  # concatenate census shards instead of scanning job dirs
 ```
+
+**Running in parallel, then merging.** Separate census processes on separate
+roots are safe to run concurrently: each writes its own output, and the only
+files census touches inside a corpus are the per-job `orca_metrics.json` caches,
+written via temp + atomic rename. Do NOT point two processes at the *same* root
+-- the cache temp file name is fixed per job dir, so concurrent scanners of one
+directory can lose a cache write (harmless but wasteful).
+
+```bash
+# one process per root, in parallel
+for r in chunk00 chunk01 chunk02 chunk03; do
+    python -m oact_utilities.workflows.census /scratch/jobs_parsl/$r \
+        -o /scratch/census/$r.parquet --workers 8 > /scratch/census/$r.log 2>&1 &
+done
+wait
+
+# then combine into one table (reprints the combined running count)
+python -m oact_utilities.workflows.census --merge /scratch/census \
+    -o /scratch/census_combined.parquet
+```
+
+Merging is a plain concatenation because `census_schema()` is declared up front
+rather than inferred from data -- an all-null column in one shard cannot come
+back with a different type and break the merge. Shards stream in record batches:
+800k rows across 8 shards merges in ~14 s at ~0.9 GB peak RSS (0.63 GB at 200k;
+0.23 GB is the interpreter/import floor). `--merge` also accepts explicit files
+and globs, and can write `--format sqlite`/`csv`.
+
+**Duplicate detection.** Both scanning and merging track repeated `job_dir`
+values and print a loud warning when any are found. This catches the two ways
+counts get silently inflated: overlapping roots (one nested inside another) and
+a merge that re-ingested a shard -- notably `--merge <dir>` on a directory that
+already holds a previous merge output. Keep merge outputs outside the shard
+directory. The `root` column survives a merge, so a combined table can still be
+grouped per source root.
+
+**Purged jobs are `failed`, not `to_run`.** When a job carries a
+`.do_not_rerun.json` marker (written by `clean.py --purge-failed` or
+`merge_job_roots.py`) its ORCA output has usually been deleted, so a naive
+content check reads it as never-run. Census matches the dashboard instead and
+treats the marker as an override: marker + not-completed becomes `failed`, and
+the `failure_reason` / `scf_steps` the marker preserved from before the purge
+are recovered into those columns. `purge_type` records why it was purged
+(`failed`, `incomplete_archive`). A normally-terminated `orca.out` always wins
+-- the merge tooling never marks a completed dir, and if a stale marker is there
+anyway the output is its own proof. Without this override a purged corpus
+overstates pending work by however many jobs were purged (23,956 dirs in one
+real root, of which only 5,804 still held output).
+
+**`orca_atom<N>.out` is not job output.** It is ORCA's atomic SCF initial-guess
+artefact. `utils.status._ORCA_ATOM_RE` excludes it, so a directory holding
+nothing but abandoned guess scratch is correctly `to_run` with no composition,
+not a finished job. Any external tooling that scans for `*.out` must apply the
+same exclusion or it will count these as real.
 
 **Metal classification** is two-way and tiered. `metal_class` is `actinide`
 (Ac-Lr, matching `ACTINIDE_LIST` and `stratify_lanes.py:is_actinide`) or
@@ -590,6 +652,42 @@ multiply by `EH_BOHR_TO_EV_ANG` (51.42206313) for eV/Angstrom.
 `core/orca/calc.py` otherwise. Branches that have not split the table out of
 `calc.py` would otherwise fail at import. The two tables are identical
 (118 elements, verified equal), so `n_basis` is the same either way.
+
+**Running it at corpus scale.** Three helpers live in `oact_utilities/scripts/`:
+
+```bash
+# 1. Validate the roots FIRST. Census reads the IMMEDIATE subdirectories of a
+#    root, so a root that nests its job dirs under jobs_parsl/ silently yields
+#    zero jobs. Writes a corrected list.
+python oact_utilities/scripts/check_census_roots.py roots.json --write-fixed roots_fixed.json
+
+# 2. One node, N processes, load-balanced by job count, then merged.
+python oact_utilities/scripts/run_census_all.py roots_fixed.json \
+    --outdir $HOME/census_out --workers 32 --clean-shards
+
+# 3. Or spread the same roots across a PBS Pro array job (much faster: this
+#    workload is Lustre-bound, so throughput scales with nodes, not cores).
+python oact_utilities/scripts/submit_census_pbs.py roots_fixed.json \
+    -A myproject -q prod --chunks 16 --workers 32 --walltime 04:00:00
+qsub -J 0-15 $HOME/census_out/census_chunk.pbs
+python -m oact_utilities.workflows.census --merge $HOME/census_out/shards \
+    -o $HOME/census_out/census_combined.parquet
+```
+
+Both runners bin-pack roots into equal-size groups (root sizes span 60 to 45k
+job dirs, so naive grouping leaves one process running hours after the others),
+refuse to start when a root does not exist, and warn on stale shards. Shard
+names are derived from enough path components to be unique -- two roots sharing
+their last two components (`oact/nonact_4_06/jobs_parsl` and
+`BLASTNet/nonact_4_06/jobs_parsl`) would otherwise write the same file, and the
+SQLite sink unlinks on open, so one process would destroy the other's output.
+
+**Measured on ALCF Crux (Lustre, `/lus/eagle`), 621k job dirs across 35 roots:**
+~1.6 jobs/s per process from a login node, ~11 jobs/s aggregate over 8
+processes, i.e. ~16 h for a cold pass. Local-SSD benchmarks (83 jobs/s per
+process) overstate Lustre throughput by 5-15x -- do not size a run from them.
+Prefer compute nodes over a login node and raise `--workers` well past 8; the
+work is I/O bound, not CPU bound.
 
 **Performance:** measured on 2000 gzipped quacc job dirs (~4 MB decompressed
 `orca.out` each) at 8 workers: ~83 jobs/s cold, ~2100 jobs/s once the

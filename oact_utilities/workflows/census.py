@@ -1250,25 +1250,32 @@ def run_census(
     return summary, written
 
 
+# Shard extensions a merge will pick up from a directory.
+_SHARD_GLOBS = ("*.parquet", "*.db")
+
+
 def expand_parquet_inputs(patterns: list[str]) -> list[Path]:
     """Resolve merge inputs: files, directories, or glob patterns.
 
-    A directory contributes every ``*.parquet`` inside it (non-recursive).
-    Results are de-duplicated by resolved path and sorted, so passing both a
-    directory and one of its files cannot double-count a shard.
+    A directory contributes every ``*.parquet`` and ``*.db`` inside it
+    (non-recursive) -- census writes sqlite shards when pyarrow is unavailable,
+    and those merge just as well. Results are de-duplicated by resolved path and
+    sorted, so passing both a directory and one of its files cannot double-count
+    a shard.
 
     Args:
         patterns: Paths, directories, or shell-style globs.
 
     Returns:
-        Sorted, de-duplicated parquet file paths.
+        Sorted, de-duplicated shard file paths.
     """
     found: set[Path] = set()
     for pattern in patterns:
         expanded = os.path.expanduser(pattern)
         path = Path(expanded)
         if path.is_dir():
-            found.update(p.resolve() for p in sorted(path.glob("*.parquet")))
+            for pat in _SHARD_GLOBS:
+                found.update(p.resolve() for p in sorted(path.glob(pat)))
         elif path.is_file():
             found.add(path.resolve())
         else:
@@ -1277,6 +1284,45 @@ def expand_parquet_inputs(patterns: list[str]) -> list[Path]:
                 print(f"  Warning: no match for {pattern}", file=sys.stderr)
             found.update(m for m in matches if m.is_file())
     return sorted(found)
+
+
+def _sqlite_columns(path: Path) -> list[str]:
+    """Column names of a census sqlite shard's ``census`` table."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return [r[1] for r in conn.execute("PRAGMA table_info(census)")]
+    finally:
+        conn.close()
+
+
+# SQLite has no boolean type: the sink stores these as INTEGER 0/1. Reading a
+# sqlite shard back out has to restore them, or writing into a parquet sink fails
+# with "Could not convert 0 with type int: tried to convert to boolean".
+_BOOL_FIELDS = tuple(name for name, kind in _FIELDS if kind == "bool")
+
+
+def _iter_sqlite_rows(path: Path, batch_size: int):
+    """Yield row dicts from a census sqlite shard, in batches.
+
+    Restores the boolean columns that SQLite flattened to 0/1 so the rows are
+    interchangeable with those read from a parquet shard.
+    """
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        cur = conn.execute(f"SELECT {', '.join(_FIELD_NAMES)} FROM census")
+        while True:
+            rows = cur.fetchmany(batch_size)
+            if not rows:
+                return
+            for row in rows:
+                record = dict(zip(_FIELD_NAMES, row))
+                for name in _BOOL_FIELDS:
+                    value = record[name]
+                    if value is not None:
+                        record[name] = bool(value)
+                yield record
+    finally:
+        conn.close()
 
 
 def merge_census(
@@ -1288,8 +1334,10 @@ def merge_census(
 ) -> tuple[Summary, Path]:
     """Concatenate census shards written by separate (possibly parallel) runs.
 
-    Every shard carries the same declared schema (see :func:`census_schema`), so
-    the merge is a straight concatenation -- no schema unification, no type
+    Handles both parquet and sqlite shards (census writes sqlite when pyarrow is
+    unavailable) and they can be mixed in one merge.
+    Every shard carries the same declared column order (see :func:`census_schema`
+    and ``_FIELDS``), so the merge is a straight concatenation -- no schema unification, no type
     reconciliation. Shards stream through in record batches, so nothing scales
     with the number of shards and the corpus is never held whole; the combined
     running count is tallied on the same pass. Measured peak RSS grows
@@ -1312,50 +1360,67 @@ def merge_census(
         ``(summary, written_path)`` for the combined table.
 
     Raises:
-        ValueError: If a shard's schema does not match, or if ``out_path`` is
-            also one of the inputs.
+        ValueError: If a shard's schema does not match, if a shard type is
+            unsupported, or if ``out_path`` is also one of the inputs.
     """
-    if not PYARROW_AVAILABLE:
-        raise ValueError("merging parquet shards requires pyarrow")
 
-    expected = census_schema()
+    def _brief(names: list[str]) -> str:
+        head = ", ".join(names[:5])
+        return head + (f", ... (+{len(names) - 5} more)" if len(names) > 5 else "")
+
+    def _reject(path: Path, names: list[str]) -> None:
+        missing = sorted(set(_FIELD_NAMES) - set(names))
+        extra = sorted(set(names) - set(_FIELD_NAMES))
+        detail = ""
+        if missing:
+            detail += f" missing=[{_brief(missing)}]"
+        if extra:
+            detail += f" unexpected=[{_brief(extra)}]"
+        raise ValueError(
+            f"{path} is not a census table written by this version"
+            f" ({len(names)} columns, expected {len(_FIELD_NAMES)}){detail}"
+        )
+
     resolved_out = out_path.resolve()
     for path in inputs:
         if path == resolved_out:
             raise ValueError(
                 f"output {out_path} is also an input; pick a different -o path"
             )
-        schema = pq.read_schema(path)
-        if not schema.equals(expected):
-            missing = sorted(set(expected.names) - set(schema.names))
-            extra = sorted(set(schema.names) - set(expected.names))
-
-            def _brief(names: list[str]) -> str:
-                head = ", ".join(names[:5])
-                return head + (
-                    f", ... (+{len(names) - 5} more)" if len(names) > 5 else ""
+        if path.suffix == ".parquet":
+            if not PYARROW_AVAILABLE:
+                raise ValueError(
+                    f"{path} is a parquet shard but pyarrow is not installed"
                 )
-
-            detail = ""
-            if missing:
-                detail += f" missing=[{_brief(missing)}]"
-            if extra:
-                detail += f" unexpected=[{_brief(extra)}]"
+            names = list(pq.read_schema(path).names)
+        elif path.suffix == ".db":
+            names = _sqlite_columns(path)
+        else:
             raise ValueError(
-                f"{path} is not a census table written by this version"
-                f" ({len(schema.names)} columns, expected {len(expected.names)})"
-                f"{detail}"
+                f"{path}: unsupported shard type {path.suffix or '(none)'}; "
+                "expected .parquet or .db"
             )
+        if names != list(_FIELD_NAMES):
+            _reject(path, names)
 
     sink, written = _make_sink(out_path, fmt, chunk_size)
     summary = Summary()
     progress = tqdm(total=len(inputs), desc="Merging", unit="shard") if tqdm else None
     try:
         for path in inputs:
-            for batch in pq.ParquetFile(path).iter_batches(batch_size=batch_size):
-                for row in batch.to_pylist():
-                    summary.add(row)
-                    sink.write(row)
+            if path.suffix == ".parquet":
+                rows = (
+                    row
+                    for batch in pq.ParquetFile(path).iter_batches(
+                        batch_size=batch_size
+                    )
+                    for row in batch.to_pylist()
+                )
+            else:
+                rows = _iter_sqlite_rows(path, batch_size)
+            for row in rows:
+                summary.add(row)
+                sink.write(row)
             if progress is not None:
                 progress.update(1)
     finally:

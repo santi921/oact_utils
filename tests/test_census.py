@@ -741,3 +741,90 @@ def test_mixed_purged_and_live_corpus_counts(tmp_path):
     assert summary.status["completed"] == 3
     assert summary.status["to_run"] == 0
     assert summary.metal_status[("Am", "completed")] == 3
+
+
+# ---------------------------------------------------------------------------
+# SQLite shards (the no-pyarrow path) and cross-format merges
+# ---------------------------------------------------------------------------
+
+
+def test_merge_sqlite_shards_into_sqlite(tmp_path):
+    from oact_utilities.workflows.census import merge_census
+
+    shards = []
+    for name in ("a", "b"):
+        root = _corpus(tmp_path / name)
+        out = tmp_path / f"{name}.db"
+        run_census([root], out, fmt="sqlite")
+        shards.append(out)
+
+    combined = tmp_path / "combined.db"
+    summary, _ = merge_census(shards, combined, fmt="sqlite")
+    assert summary.total == 8
+    assert summary.duplicate_job_dirs == 0
+    conn = sqlite3.connect(combined)
+    (n,) = conn.execute("SELECT COUNT(*) FROM census").fetchone()
+    assert n == 8
+    conn.close()
+
+
+def test_merge_sqlite_shard_into_parquet_restores_bools(tmp_path):
+    """SQLite flattens bools to 0/1; parquet's bool column rejects raw ints."""
+    pytest.importorskip("pyarrow")
+    import pandas as pd
+
+    from oact_utilities.workflows.census import merge_census
+
+    root = tmp_path / "jobs"
+    job = _write_job(root, "job_1", inp=_INP_AMO, out=_OUT_DONE)
+    _marker(job, purge_type="failed")  # marker=True exercises a real bool
+
+    shard = tmp_path / "a.db"
+    run_census([root], shard, fmt="sqlite")
+
+    combined = tmp_path / "combined.parquet"
+    summary, _ = merge_census([shard], combined, fmt="parquet")
+    assert summary.total == 1
+
+    df = pd.read_parquet(combined)
+    assert df["marker"].dtype == bool
+    assert bool(df["marker"].iloc[0]) is True
+
+
+def test_merge_mixed_parquet_and_sqlite_shards(tmp_path):
+    pytest.importorskip("pyarrow")
+    import pandas as pd
+
+    from oact_utilities.workflows.census import merge_census
+
+    root_a = _corpus(tmp_path / "a")
+    root_b = _corpus(tmp_path / "b")
+    shard_a, shard_b = tmp_path / "a.parquet", tmp_path / "b.db"
+    run_census([root_a], shard_a, fmt="parquet")
+    run_census([root_b], shard_b, fmt="sqlite")
+
+    combined = tmp_path / "combined.parquet"
+    summary, _ = merge_census([shard_a, shard_b], combined)
+    assert summary.total == 8
+    df = pd.read_parquet(combined)
+    assert df["root"].nunique() == 2
+    assert df["job_dir"].nunique() == 8
+
+
+def test_expand_inputs_picks_up_both_shard_types(tmp_path):
+    from oact_utilities.workflows.census import expand_parquet_inputs
+
+    (tmp_path / "a.parquet").touch()
+    (tmp_path / "b.db").touch()
+    (tmp_path / "notes.txt").touch()
+    got = [p.name for p in expand_parquet_inputs([str(tmp_path)])]
+    assert got == ["a.parquet", "b.db"]
+
+
+def test_merge_rejects_unknown_shard_extension(tmp_path):
+    from oact_utilities.workflows.census import merge_census
+
+    bogus = tmp_path / "shard.txt"
+    bogus.write_text("nope")
+    with pytest.raises(ValueError, match="unsupported shard type"):
+        merge_census([bogus], tmp_path / "out.db", fmt="sqlite")
