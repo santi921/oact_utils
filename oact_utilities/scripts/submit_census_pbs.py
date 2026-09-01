@@ -35,7 +35,7 @@ PBS_TEMPLATE = """#!/bin/bash -l
 #PBS -q {queue}
 #PBS -l select={select}
 {place_directive}#PBS -l walltime={walltime}
-{filesystems_directive}{extra_directives}#PBS -j oe
+{filesystems_directive}{rerunnable_directive}{extra_directives}#PBS -j oe
 #PBS -o {logdir}/
 
 set -u
@@ -45,7 +45,7 @@ cd "${{PBS_O_WORKDIR:-{workdir}}}"
 {env_setup}
 MANIFEST="{manifest}"
 SHARD_DIR="{shard_dir}"
-IDX="${{PBS_ARRAY_INDEX:-0}}"
+IDX="${{CENSUS_CHUNK:-${{PBS_ARRAY_INDEX:-0}}}}"
 LABEL=$(printf 'chunk%02d' "$IDX")
 
 mkdir -p "$SHARD_DIR"
@@ -157,6 +157,21 @@ def main() -> int:
     p.add_argument(
         "--venv", default=None, help="Virtualenv to activate instead of conda"
     )
+    p.add_argument(
+        "--rerunnable",
+        choices=("y", "n"),
+        default="y",
+        help="PBS -r value. PBS Pro REFUSES a non-rerunnable array job "
+        "('cannot submit non-rerunable Array Job'), and some sites default to "
+        "-r n, so this is emitted explicitly as 'y' (default).",
+    )
+    p.add_argument(
+        "--no-array",
+        action="store_true",
+        help="Emit N independent jobs instead of one array job, plus a "
+        "submit_all.sh that qsubs them with -v CENSUS_CHUNK=<i>. Use this when "
+        "the site restricts or disallows array jobs.",
+    )
     p.add_argument("--name", default="census", help="PBS job name (default: census)")
     p.add_argument("--submit", action="store_true", help="Actually qsub the array job")
     args = p.parse_args()
@@ -243,6 +258,7 @@ def main() -> int:
                 queue=args.queue,
                 select=select,
                 place_directive=(f"#PBS -l place={args.place}\n" if args.place else ""),
+                rerunnable_directive=f"#PBS -r {args.rerunnable}\n",
                 extra_directives="".join(f"#PBS {d}\n" for d in args.pbs),
                 walltime=args.walltime,
                 filesystems_directive=(
@@ -273,7 +289,18 @@ def main() -> int:
     print(f"script   : {script}")
     print(f"shards   : {shard_dir}/chunkNN{suffix}")
     print(f"logs     : {logdir}/")
-    print(f"\nSubmit the array job:\n  qsub -J 0-{last} {script}")
+    if args.no_array:
+        submit_all = os.path.join(outdir, "submit_all.sh")
+        with open(submit_all, "w") as f:
+            f.write("#!/usr/bin/env bash\n")
+            f.write("# One independent PBS job per chunk (no array job).\n")
+            f.write("set -u\n")
+            for i in range(len(chunks)):
+                f.write(f"qsub -v CENSUS_CHUNK={i} -N {args.name}{i:02d} {script}\n")
+        os.chmod(submit_all, 0o755)
+        print(f"\nSubmit {len(chunks)} independent jobs:\n  bash {submit_all}")
+    else:
+        print(f"\nSubmit the array job:\n  qsub -J 0-{last} {script}")
     print(f"\nThen, once every task has finished, merge:\n  {merge_cmd}")
     print(
         "\nThe merge takes seconds and is safe on a login node. Chaining it with\n"
@@ -283,6 +310,9 @@ def main() -> int:
     )
 
     if args.submit:
+        if args.no_array:
+            print("\n--submit with --no-array: run the submit_all.sh above instead")
+            return 0
         cmd = ["qsub", "-J", f"0-{last}", script]
         print(f"\nSubmitting: {' '.join(cmd)}")
         try:
