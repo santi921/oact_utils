@@ -38,11 +38,14 @@ PBS_TEMPLATE = """#!/bin/bash -l
 {filesystems_directive}{rerunnable_directive}{extra_directives}#PBS -j oe
 #PBS -o {logdir}/
 
-set -u
-
 cd "${{PBS_O_WORKDIR:-{workdir}}}"
 
-{env_setup}
+# conda's shell functions reference unset variables ($PS1, $_CE_M, $CONDA_SHLVL),
+# so `set -u` must not be active while activating an environment -- it aborts the
+# job in the first second with a bare "PS1: unbound variable" and no output.
+set +u
+{env_setup}set -u
+
 MANIFEST="{manifest}"
 SHARD_DIR="{shard_dir}"
 IDX="${{CENSUS_CHUNK:-${{PBS_ARRAY_INDEX:-0}}}}"
