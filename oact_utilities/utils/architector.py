@@ -157,29 +157,49 @@ def chunk_architector_to_lmdb(
     return lmdb_path
 
 
+def _xyz_coordinate_lines(xyz_str: str) -> list[str]:
+    """Return the non-blank coordinate lines of an XYZ string.
+
+    Two layouts are accepted:
+
+    1. Standard XYZ: an integer atom count, then exactly one comment line,
+       then the coordinates. The comment line may be blank or hold anything
+       (an extended-XYZ ``Lattice=... Properties=...`` header, an energy, a
+       title): it is dropped unconditionally.
+    2. Headerless (architector CSV): every non-blank line is a coordinate.
+
+    The header is identified on the raw lines BEFORE blank lines are removed.
+    Filtering blanks first made a blank comment line disappear, so the first
+    coordinate line (the metal centre in architector geometries) was skipped
+    as if it were the comment. Leading blank lines are ignored.
+    """
+    raw = xyz_str.splitlines()
+    start = 0
+    while start < len(raw) and not raw[start].strip():
+        start += 1
+    if start >= len(raw):
+        return []
+
+    try:
+        int(raw[start].strip())
+    except ValueError:
+        body = raw[start:]
+    else:
+        body = raw[start + 2 :]
+
+    return [ln for ln in body if ln.strip()]
+
+
 def parse_xyz_elements(xyz_str: str) -> list[str]:
     """Return element symbols from an XYZ string (best-effort parser).
 
     Handles two formats:
-    1. Standard XYZ: atom_count\\ncomment\\nelement x y z...
+    1. Standard XYZ: atom_count\\ncomment\\nelement x y z... (the comment line
+       may be blank)
     2. Architector CSV format: element x y z... (no header)
     """
-    lines = [ln for ln in xyz_str.splitlines() if ln.strip()]
-    if not lines:
-        return []
-
     elems = []
-
-    # Try to parse first line as atom count (standard XYZ format)
-    try:
-        int(lines[0].strip())
-        # If successful, skip first two lines (count + comment)
-        atom_lines = lines[2:] if len(lines) > 2 else []
-    except ValueError:
-        # First line is not a number - assume no header (architector format)
-        atom_lines = lines
-
-    for ln in atom_lines:
+    for ln in _xyz_coordinate_lines(xyz_str):
         parts = ln.split()
         if not parts:
             continue
@@ -193,7 +213,8 @@ def xyz_string_to_atoms(xyz_str: str) -> Atoms:
     """Convert XYZ-format string to ASE Atoms object.
 
     Handles two formats:
-    1. Standard XYZ: atom_count\\ncomment\\nelement x y z...
+    1. Standard XYZ: atom_count\\ncomment\\nelement x y z... (the comment line
+       may be blank)
     2. Architector CSV format: element x y z... (no header)
 
     Args:
@@ -205,33 +226,17 @@ def xyz_string_to_atoms(xyz_str: str) -> Atoms:
     Raises:
         ValueError: If the string is empty or contains no valid atoms.
     """
-    # print("xyz_str:", xyz_str)
-    lines = [ln for ln in xyz_str.strip().splitlines() if ln.strip()]
-    if not lines:
+    if not xyz_str.strip():
         raise ValueError("Empty XYZ string")
 
-    # Detect format: first line is atom count or coordinate line
-    # find line with *xyz and start from there to be safe
-    xyz_info_line = 0
-    for i, line in enumerate(lines):
-        if "*xyz" in line:
-            xyz_info_line = i + 1
-            break
-    try:
-        int(lines[0].strip())
-        # Standard XYZ format: skip atom count and comment lines
-        coord_lines = lines[xyz_info_line + 1 :] if len(lines) > 2 else []
-        # print(coord_lines)
-    except ValueError:
-        # Architector format: no header, all lines are coordinates
-        coord_lines = lines
+    coord_lines = _xyz_coordinate_lines(xyz_str)
 
     symbols: list[str] = []
     positions: list[list[float]] = []
 
     for line in coord_lines:
         parts = line.split()
-        if len(parts) < 3:
+        if len(parts) < 4:
             continue
         symbols.append(parts[0])
         positions.append([float(parts[1]), float(parts[2]), float(parts[3])])
