@@ -171,6 +171,9 @@ class BatchedStructureOptimizer:
         best_step = torch.zeros(m, dtype=torch.long, device=R0.device)
         score0 = None
         x_step0 = None
+        traj = torch.full(
+            (m, opt.max_steps + 1), float("nan"), device=R0.device, dtype=torch.float64
+        )
 
         for step in range(opt.max_steps + 1):
             metal = f.featurize_batch(data, pos, offsets)  # (M, D)
@@ -179,6 +182,7 @@ class BatchedStructureOptimizer:
             q = (d @ C_inv_t * d).sum(1)  # (M,)
             score = torch.log1p(q / denom)  # (M,) f64
             sc = score.detach()
+            traj[:, step] = sc
             if step == 0:
                 score0 = sc.clone()
                 x_step0 = x.detach().clone()
@@ -229,6 +233,7 @@ class BatchedStructureOptimizer:
         score0_c = score0.cpu().numpy()
         delta_opt_c = delta_opt.cpu().numpy()
         best_step_c = best_step.cpu().numpy()
+        traj_c = (d_const + traj).cpu().numpy()  # per-step delta_logdet, NaN-padded
         md_before = per_structure_min_dist(R0, offsets, natoms).cpu().numpy()
         md_after = per_structure_min_dist(best_pos, offsets, natoms).cpu().numpy()
         x_step0_c = x_step0.cpu().numpy()
@@ -255,6 +260,7 @@ class BatchedStructureOptimizer:
                 "min_dist_after": float(md_after[i]),
                 "feature_drift": drift,
                 "stop_reason": "batched" if bool(improved[i]) else "no_valid_step",
+                "delta_logdet_traj": [round(float(v), 10) for v in traj_c[i]],
             }
             out.append((x_commit_c[i], atoms_out, diag))
         return out

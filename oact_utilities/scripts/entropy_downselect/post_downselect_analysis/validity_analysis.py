@@ -111,7 +111,7 @@ def bond_change_stats(
             i, j = bonds[:, 0], bonds[:, 1]
             d0 = np.linalg.norm(po[i] - po[j], axis=1)
             d1 = np.linalg.norm(pp[i] - pp[j], axis=1)
-            rel = np.abs(d1 - d0) / d0
+            rel = (d1 - d0) / d0  # signed: + = lengthened, - = shortened
 
         # bonds broken (was bonded, now beyond cutoff) / formed (reverse)
         n = len(orig)
@@ -136,7 +136,7 @@ def bond_change_stats(
 
     rel_all = np.concatenate([r for r, _, _ in results]) if results else np.empty(0)
     rel_max_per_struct = np.array(
-        [float(r.max()) if r.size else 0.0 for r, _, _ in results]
+        [float(np.abs(r).max()) if r.size else 0.0 for r, _, _ in results]
     )
     broken = np.array([b for _, b, _ in results])
     formed = np.array([f for _, _, f in results])
@@ -214,10 +214,13 @@ def main() -> None:
             print(f"    structures w/ min_dist < {t:.1f} A : {frac:.2f}%")
         b = bond[r["name"]]
         rel = b["rel_all"]
-        print(f"  bond-length |rel change| (sampled {len(b['broken']):,} structs,"
+        abs_rel = np.abs(rel)
+        print(f"  bond-length rel change (sampled {len(b['broken']):,} structs,"
               f" {len(rel):,} bonds):")
-        print(f"    median {np.median(rel)*100:.2f}% | p90 {np.percentile(rel,90)*100:.2f}%"
-              f" | p99 {np.percentile(rel,99)*100:.2f}% | max {rel.max()*100:.2f}%")
+        print(f"    signed : mean {rel.mean()*100:+.2f}% | median {np.median(rel)*100:+.2f}%"
+              f" | lengthened {100*(rel>0).mean():.1f}% | shortened {100*(rel<0).mean():.1f}%")
+        print(f"    |change|: median {np.median(abs_rel)*100:.2f}% | p90 {np.percentile(abs_rel,90)*100:.2f}%"
+              f" | p99 {np.percentile(abs_rel,99)*100:.2f}% | max {abs_rel.max()*100:.2f}%")
         print(f"    bonds broken/struct: mean {b['broken'].mean():.3f}"
               f" (max {b['broken'].max()}) | formed: mean {b['formed'].mean():.3f}"
               f" (max {b['formed'].max()})")
@@ -228,13 +231,16 @@ def main() -> None:
     colors = plt.cm.tab10(np.arange(len(reps)))
 
     ax = axes[0, 0]
-    for r, c in zip(reps, colors):
+    for i, (r, c) in enumerate(zip(reps, colors)):
+        ax.hist(r["min_dist_before"], bins=120, range=(0, 3.0), histtype="step",
+                lw=1.3, color="red", ls="--", alpha=0.7 if i == 0 else 0.35,
+                label="before opt" if i == 0 else None, density=True)
         ax.hist(r["min_dist_after"], bins=120, range=(0, 3.0), histtype="step",
-                lw=1.8, color=c, label=r["name"], density=True)
+                lw=1.8, color=c, label=f"{r['name']} (after)", density=True)
     ax.axvline(0.7, color="k", ls="--", lw=1, alpha=0.6, label="min-dist target 0.7 A")
-    ax.set_xlabel("min interatomic distance AFTER opt (A)")
+    ax.set_xlabel("min interatomic distance (A)")
     ax.set_ylabel("density")
-    ax.set_title("Clash distribution")
+    ax.set_title("Clash distribution: before vs after opt")
     ax.legend(fontsize=8)
 
     ax = axes[0, 1]
@@ -248,9 +254,10 @@ def main() -> None:
 
     ax = axes[1, 0]
     for (name, b), c in zip(bond.items(), colors):
-        ax.hist(b["rel_all"] * 100, bins=120, range=(0, 60), histtype="step",
+        ax.hist(b["rel_all"] * 100, bins=160, range=(-60, 60), histtype="step",
                 lw=1.8, color=c, label=name, density=True)
-    ax.set_xlabel("per-bond |length change| (%)")
+    ax.axvline(0, color="k", lw=1, alpha=0.5)
+    ax.set_xlabel("per-bond length change (%)  [+ longer, - shorter]")
     ax.set_ylabel("density")
     ax.set_title("Bond-length change (sampled)")
     ax.legend(fontsize=8)

@@ -39,7 +39,7 @@ omol_val:
 act_train:
   splits:
     train:
-      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large/act/train
+      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large_100/act/train
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0
@@ -56,7 +56,7 @@ act_train:
 act_val:
   splits:
     val:
-      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large/act/val
+      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large_100/act/val
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0
@@ -73,7 +73,7 @@ act_val:
 nonact_train:
   splits:
     train:
-      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large/nonact/train
+      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large_100/nonact/train
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0
@@ -90,7 +90,7 @@ nonact_train:
 nonact_val:
   splits:
     val:
-      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large/nonact/val
+      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large_100/nonact/val
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0

@@ -100,6 +100,7 @@ def optimize_structure(
     C_inv_t = torch.as_tensor(C_inv, dtype=torch.float64, device=dev)
     mu_t = torch.as_tensor(mu, dtype=torch.float64, device=dev)
     denom = float(n_current + 1)
+    d_const = float(len(mu)) * float(np.log(n_current / denom))
 
     data = featurizer.build_data(atoms)
     R0 = featurizer.initial_pos(data)
@@ -122,11 +123,13 @@ def optimize_structure(
     drift = float("nan")
     n_steps = 0
     stop_reason = "max_steps"
+    traj: list[float] = []
 
     for step in range(opt.max_steps + 1):
         x_w = whitened_feature(pos)
         score_t = log1p_score(x_w)
         score = float(score_t.detach())
+        traj.append(round(d_const + score, 10))
 
         if step == 0:
             drift = float(np.linalg.norm(x_w.detach().cpu().numpy() - x_orig_whitened))
@@ -189,6 +192,7 @@ def optimize_structure(
         "min_dist_after": _min_pair_dist(best_pos),
         "feature_drift": drift,
         "stop_reason": stop_reason,
+        "delta_logdet_traj": traj,
     }
     return best_x_np, atoms_out, diag
 
@@ -421,6 +425,7 @@ class OptimizingCommitHook(_StreamingHookBase):
             "min_dist_after": np.nan,
             "feature_drift": np.nan,
             "stop_reason": reason,
+            "delta_logdet_traj": [],
             **extra,
         }
         self._emit(rank, atoms, diag)
@@ -682,6 +687,14 @@ def _save_report(output_dir: Path, diagnostics: list[dict]) -> None:
     cols["fallback"] = np.array(
         [bool(d.get("fallback", False)) for d in diagnostics], dtype=bool
     )
+    # Per-step delta_logdet trajectories, NaN-padded to (n, max_steps+1).
+    trajs = [d.get("delta_logdet_traj") or [] for d in diagnostics]
+    n_cols = max((len(t) for t in trajs), default=0)
+    if n_cols:
+        traj_arr = np.full((len(trajs), n_cols), np.nan, dtype=np.float32)
+        for i, t in enumerate(trajs):
+            traj_arr[i, : len(t)] = t
+        cols["delta_logdet_traj"] = traj_arr
     np.savez(str(output_dir / "optimization_report.npz"), **cols)
 
     opt_mask = cols["optimized"]
@@ -743,6 +756,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Use only first N candidate structures (for testing).",
+    )
+    parser.add_argument(
+        "--exclude-indices",
+        type=str,
+        nargs="+",
+        default=None,
+        help="One or more .npy files of global candidate indices (into --features-dir, "
+        "same ordering as load_features) to exclude from selection, e.g. indices "
+        "already selected and sent to DFT in prior runs. Concatenated and deduped.",
     )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
@@ -832,6 +854,19 @@ def main() -> None:
     debug_log("Loading candidate features...")
     X, file_boundaries = load_features(args.features_dir, limit=args.limit)
 
+    exclude_indices = None
+    if args.exclude_indices:
+        arrs = []
+        for path in args.exclude_indices:
+            arr = np.load(path).astype(np.int64)
+            debug_log(f"Loaded {len(arr):,} exclude indices from {path}")
+            arrs.append(arr)
+        exclude_indices = np.unique(np.concatenate(arrs))
+        debug_log(
+            f"Excluding {len(exclude_indices):,} unique indices "
+            f"({len(arrs)} file(s))"
+        )
+
     debug_log("Whitening (transform computed from seed features)...")
     seed_mean, W = whiten(X, ref=seed_X, reg=args.regularization)
     seed_X -= seed_mean.astype(np.float32)
@@ -907,6 +942,7 @@ def main() -> None:
         output_dir=output_dir,
         resume=args.resume,
         random_seed=args.random_seed,
+        exclude_indices=exclude_indices,
         **run_kwargs,
     )
 

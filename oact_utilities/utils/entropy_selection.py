@@ -335,6 +335,7 @@ def run_selection(
     random_seed: int,
     commit_hook: CommitHook | None = None,
     batch_optimize_fn: BatchOptimizeFn | None = None,
+    exclude_indices: np.ndarray | None = None,
 ) -> dict:
     """Batch greedy selection: full scan -> top-K pool -> exact greedy within pool.
 
@@ -358,6 +359,11 @@ def run_selection(
     At most one of the two hooks should be set. Both may expose ``on_checkpoint(step)``,
     called at each checkpoint so the hook can flush streamed outputs in lockstep. Without
     either hook the original feature is committed (default behavior).
+
+    ``exclude_indices``, if given, are global indices into ``X`` that are marked
+    pre-selected so they are never picked, without being added to ``selected_indices``
+    or folded into the covariance (e.g. candidates already selected and sent to DFT in
+    a prior run).
     """
     N, D = X.shape
     chunk = 2_000_000
@@ -398,6 +404,14 @@ def run_selection(
         start_step = 0
         delta_log_dets = []
         log_dets = [float(np.linalg.slogdet(C)[1])]
+
+    if exclude_indices is not None and len(exclude_indices) > 0:
+        n_newly_excluded = int((~selected[exclude_indices]).sum())
+        selected[exclude_indices] = True
+        debug_log(
+            f"Excluding {len(exclude_indices):,} prior-selected indices from candidate "
+            f"pool ({n_newly_excluded:,} newly masked)"
+        )
 
     buf_Xc = np.empty((chunk, D), dtype=np.float32)
     buf_Q = np.empty((chunk, D), dtype=np.float32)

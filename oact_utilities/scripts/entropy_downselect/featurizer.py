@@ -83,6 +83,15 @@ class DifferentiableFeaturizer:
             target_dtype=self.dtype,
         )
         self._initialized = False
+        # Keys present in a freshly built batch, before any forward pass. The
+        # model injects graph-derived state back into the data object during
+        # forward and caches some of it behind a ``not in data_dict`` guard
+        # (e.g. ``scatter_target`` in escn_md._generate_graph). Because we reuse
+        # one data object across optimization steps with otf_graph=True, that
+        # cached state goes stale as soon as moving atoms change the edge count,
+        # causing an index_add size mismatch. We snapshot the pristine key set
+        # at build time and strip everything else before each forward.
+        self._input_keys: set[str] = set()
 
     def _hook_fn(self, _mod, inp, _out) -> None:
         # Capture the pre-activation input WITHOUT detaching (preserve the graph).
@@ -100,6 +109,22 @@ class DifferentiableFeaturizer:
                 self.predictor.predict(data.clone())
             self._initialized = True
 
+    def _snapshot_input_keys(self, data: AtomicData) -> None:
+        """Record the pristine key set of a freshly built batch (pre-forward)."""
+        self._input_keys = {key for key, _ in data}
+
+    def _strip_injected_keys(self, data: AtomicData) -> None:
+        """Delete any model-injected key so the next forward regenerates it.
+
+        Must run before every forward on a reused data object: it clears stale
+        graph-derived state (notably ``scatter_target``) left by the previous
+        step, which is otherwise kept behind the model's ``not in data_dict``
+        guard and would mismatch the freshly regenerated edge count.
+        """
+        stale = [key for key, _ in data if key not in self._input_keys]
+        for key in stale:
+            del data[key]
+
     def build_data(self, atoms) -> AtomicData:
         """Convert an ASE Atoms to a device-resident AtomicData batch of one."""
         data = data_list_collater([self._a2g(atoms)], otf_graph=True)
@@ -109,6 +134,7 @@ class DifferentiableFeaturizer:
             if torch.is_tensor(val) and val.is_floating_point():
                 data[key] = val.to(self.dtype)
         self.predictor.model.module.on_predict_check(data)
+        self._snapshot_input_keys(data)
         return data
 
     def initial_pos(self, data: AtomicData) -> torch.Tensor:
@@ -123,6 +149,7 @@ class DifferentiableFeaturizer:
         a gradient back to ``pos``.
         """
         data.pos = pos
+        self._strip_injected_keys(data)
         self._pre_activation = None
         with torch.enable_grad():
             self.predictor.model(data)
@@ -156,6 +183,7 @@ class DifferentiableFeaturizer:
             if torch.is_tensor(val) and val.is_floating_point():
                 data[key] = val.to(self.dtype)
         self.predictor.model.module.on_predict_check(data)
+        self._snapshot_input_keys(data)
         natoms = data["natoms"].to(torch.long)
         offsets = torch.zeros(len(natoms), dtype=torch.long, device=self.device)
         if len(natoms) > 1:
@@ -172,6 +200,7 @@ class DifferentiableFeaturizer:
         are regenerated on the fly, so the returned features carry gradients to ``pos``.
         """
         data.pos = pos
+        self._strip_injected_keys(data)
         self._pre_activation = None
         with torch.enable_grad():
             self.predictor.model(data)
