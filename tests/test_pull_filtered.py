@@ -17,13 +17,18 @@ from oact_utilities.workflows.pull_filtered import (
     BUCKET_ALL,
     BUCKET_FOLDER,
     BUCKET_REASON,
+    FORCE_CLASS_METAL,
+    FORCE_CLASS_NEIGHBOR,
+    FORCE_CLASS_OTHER,
     KEPT,
+    NEIGHBOR_CUTOFF_ANG,
     Label,
     Reservoir,
     Row,
     build_row,
     collect_rows,
     folder_of,
+    force_breakdown,
     load_labels,
     main,
     normalise_job_path,
@@ -477,3 +482,145 @@ def test_main_returns_nonzero_when_nothing_matches(corpus, tmp_path, capsys):
     code = main([str(extxyz), str(csv_path), "-o", str(out), "--folder", "nope"])
     assert code == 1
     assert not out.exists()
+
+
+# ---------------------------------------------------------------------------
+# force_breakdown -- which atom carries fmax, relative to the metal centre
+# ---------------------------------------------------------------------------
+
+
+def _force_frame(symbols: list[str], positions, forces) -> Atoms:
+    """A frame whose per-atom forces are set explicitly."""
+    atoms = Atoms(symbols=symbols, positions=np.asarray(positions, dtype=float))
+    atoms.calc = SinglePointCalculator(
+        atoms, energy=-1.0, forces=np.asarray(forces, dtype=float)
+    )
+    return atoms
+
+
+def test_force_breakdown_peak_on_the_metal() -> None:
+    frame = _force_frame(
+        ["U", "O", "C"],
+        [(0, 0, 0), (2.0, 0, 0), (12.0, 0, 0)],
+        [(9.0, 0, 0), (1.0, 0, 0), (2.0, 0, 0)],
+    )
+    out = force_breakdown(frame, "U")
+    assert out["fmax_atom_class"] == FORCE_CLASS_METAL
+    assert out["fmax_atom_element"] == "U"
+    assert out["fmax_atom_index"] == 0
+    assert out["force_max_ev_ang"] == pytest.approx(9.0)
+    assert out["force_max_metal"] == pytest.approx(9.0)
+    assert out["force_max_neighbor"] == pytest.approx(1.0)
+    assert out["force_max_other"] == pytest.approx(2.0)
+    assert out["n_metal_neighbors"] == 1
+
+
+def test_force_breakdown_peak_on_a_neighbor() -> None:
+    frame = _force_frame(
+        ["U", "O", "C"],
+        [(0, 0, 0), (2.0, 0, 0), (12.0, 0, 0)],
+        [(1.0, 0, 0), (7.0, 0, 0), (2.0, 0, 0)],
+    )
+    out = force_breakdown(frame, "U")
+    assert out["fmax_atom_class"] == FORCE_CLASS_NEIGHBOR
+    assert out["fmax_atom_element"] == "O"
+    assert out["force_max_neighbor"] == pytest.approx(7.0)
+
+
+def test_force_breakdown_peak_on_a_distant_atom() -> None:
+    frame = _force_frame(
+        ["U", "O", "C"],
+        [(0, 0, 0), (2.0, 0, 0), (12.0, 0, 0)],
+        [(1.0, 0, 0), (2.0, 0, 0), (8.0, 0, 0)],
+    )
+    out = force_breakdown(frame, "U")
+    assert out["fmax_atom_class"] == FORCE_CLASS_OTHER
+    assert out["fmax_atom_element"] == "C"
+    assert out["force_max_other"] == pytest.approx(8.0)
+
+
+def test_force_breakdown_uses_norms_not_components() -> None:
+    """A 3-4-5 vector on the neighbour beats a larger single component."""
+    frame = _force_frame(
+        ["U", "O"],
+        [(0, 0, 0), (2.0, 0, 0)],
+        [(4.5, 0, 0), (3.0, 4.0, 0)],
+    )
+    out = force_breakdown(frame, "U")
+    assert out["force_max_neighbor"] == pytest.approx(5.0)
+    assert out["fmax_atom_class"] == FORCE_CLASS_NEIGHBOR
+
+
+def test_force_breakdown_cutoff_moves_atoms_between_classes() -> None:
+    positions = [(0, 0, 0), (3.0, 0, 0)]
+    forces = [(1.0, 0, 0), (6.0, 0, 0)]
+    frame = _force_frame(["U", "O"], positions, forces)
+
+    near = force_breakdown(frame, "U", cutoff=4.0)
+    assert near["fmax_atom_class"] == FORCE_CLASS_NEIGHBOR
+    assert near["n_metal_neighbors"] == 1
+
+    far = force_breakdown(frame, "U", cutoff=2.0)
+    assert far["fmax_atom_class"] == FORCE_CLASS_OTHER
+    assert far["n_metal_neighbors"] == 0
+    assert far["force_max_neighbor"] is None
+
+
+def test_force_breakdown_without_a_metal_is_all_other() -> None:
+    frame = _force_frame(
+        ["C", "O"], [(0, 0, 0), (1.2, 0, 0)], [(1.0, 0, 0), (3.0, 0, 0)]
+    )
+    out = force_breakdown(frame, None)
+    assert out["fmax_atom_class"] == FORCE_CLASS_OTHER
+    assert out["force_max_metal"] is None
+    assert out["force_max_neighbor"] is None
+    assert out["force_max_other"] == pytest.approx(3.0)
+    assert out["n_metal_neighbors"] == 0
+
+
+def test_force_breakdown_without_forces_is_all_none() -> None:
+    frame = Atoms(symbols=["U", "O"], positions=[(0, 0, 0), (2.0, 0, 0)])
+    out = force_breakdown(frame, "U")
+    assert set(out.values()) == {None}
+
+
+def test_build_row_records_the_force_breakdown() -> None:
+    frame = _force_frame(
+        ["U", "O", "C"],
+        [(0, 0, 0), (2.0, 0, 0), (12.0, 0, 0)],
+        [(1.0, 0, 0), (9.0, 0, 0), (2.0, 0, 0)],
+    )
+    frame.info["job_path"] = f"{ROOT}/act_531/jobs_parsl/job_1"
+    row = build_row(frame, 0, {})
+    assert row.fmax_atom_class == FORCE_CLASS_NEIGHBOR
+    assert row.fmax_atom_element == "O"
+    assert row.neighbor_cutoff_ang == NEIGHBOR_CUTOFF_ANG
+
+
+def test_write_db_round_trips_the_force_columns(tmp_path: Path) -> None:
+    frame = _force_frame(
+        ["U", "O", "C"],
+        [(0, 0, 0), (2.0, 0, 0), (12.0, 0, 0)],
+        [(1.0, 0, 0), (9.0, 0, 0), (2.0, 0, 0)],
+    )
+    frame.info["job_path"] = f"{ROOT}/act_531/jobs_parsl/job_1"
+    out = tmp_path / "forces.db"
+    write_db([build_row(frame, 0, {})], out)
+
+    with sqlite3.connect(out) as conn:
+        record = conn.execute(
+            "SELECT fmax_atom_class, fmax_atom_element, fmax_atom_index, "
+            "force_max_ev_ang, force_max_metal, force_max_neighbor, "
+            "force_max_other, n_metal_neighbors, neighbor_cutoff_ang "
+            "FROM structures"
+        ).fetchone()
+
+    assert record[0] == FORCE_CLASS_NEIGHBOR
+    assert record[1] == "O"
+    assert record[2] == 1
+    assert record[3] == pytest.approx(9.0)
+    assert record[4] == pytest.approx(1.0)
+    assert record[5] == pytest.approx(9.0)
+    assert record[6] == pytest.approx(2.0)
+    assert record[7] == 1
+    assert record[8] == pytest.approx(NEIGHBOR_CUTOFF_ANG)

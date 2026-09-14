@@ -28,9 +28,21 @@ it feeds ``notebooks/classifier_homoleptics.ipynb`` directly: ``elements``,
 for its Phase 1 SOAP descriptors.
 
 LEAKY COLUMNS.  ``fmax_ev_ang``, ``s_squared``, ``homo_lumo_gap_min``,
-``n_electrons_scf``, and ``energy_ev`` are the *inputs to the filter itself*.
-A classifier trained on them scores ~1.0 and has learned nothing.  They are
-stored for inspection and for checking a label, never as features.
+``n_electrons_scf``, ``energy_ev``, and every ``force_*`` / ``fmax_atom_*``
+column are the *inputs to the filter itself*, or are derived from the DFT
+forces that produced them.  A classifier trained on them scores ~1.0 and has
+learned nothing.  They are stored for inspection and for checking a label,
+never as features.
+
+WHERE THE FORCE LANDS.  The extxyz carries per-atom forces, but the filter only
+ever looks at the ``fmax`` scalar, so the atom carrying that force was
+previously lost.  Each frame's per-atom force norms are now split three ways
+relative to the metal centre -- the metal itself, anything within
+``--neighbor-cutoff`` of it, and everything else -- giving ``fmax_atom_class``
+for the peak atom plus the per-class maxima ``force_max_metal``,
+``force_max_neighbor`` and ``force_max_other``.  That distinguishes a metal
+centre under strain from a distant ligand blowing up.  The cutoff is recorded
+in ``neighbor_cutoff_ang`` so a DB is self-describing.
 
 UNITS.  ``energy_ev`` is eV and ``fmax_ev_ang`` is eV/Angstrom, both as the
 extxyz stores them.  The schema's own ``final_energy`` (Hartree) and
@@ -95,6 +107,24 @@ BUCKET_FOLDER = "folder"
 _JOB_PARENTS = ("jobs_parsl", "jobs_parsl_backup")
 _CHUNK_RE = re.compile(r"_chunk_?\d+$")
 
+# Metal coordination radius, Angstrom. Matches census.py's --neighbor-cutoff.
+NEIGHBOR_CUTOFF_ANG = 4.0
+
+FORCE_CLASS_METAL = "metal"
+FORCE_CLASS_NEIGHBOR = "metal_neighbor"
+FORCE_CLASS_OTHER = "other"
+
+_FORCE_FIELDS = (
+    "force_max_ev_ang",
+    "fmax_atom_index",
+    "fmax_atom_element",
+    "fmax_atom_class",
+    "force_max_metal",
+    "force_max_neighbor",
+    "force_max_other",
+    "n_metal_neighbors",
+)
+
 # Columns beyond the standard structures schema.
 EXTRA_COLUMNS: dict[str, str] = {
     "filtered": "INTEGER",
@@ -113,6 +143,16 @@ EXTRA_COLUMNS: dict[str, str] = {
     "homo_lumo_gap_min": "REAL",
     "n_electrons_scf": "REAL",
     "energy_ev": "REAL",
+    # Per-atom force breakdown. Also derived from the DFT forces -- leaky.
+    "force_max_ev_ang": "REAL",
+    "fmax_atom_index": "INTEGER",
+    "fmax_atom_element": "TEXT",
+    "fmax_atom_class": "TEXT",
+    "force_max_metal": "REAL",
+    "force_max_neighbor": "REAL",
+    "force_max_other": "REAL",
+    "n_metal_neighbors": "INTEGER",
+    "neighbor_cutoff_ang": "REAL",
 }
 
 
@@ -149,6 +189,15 @@ class Row:
     homo_lumo_gap_min: float | None
     n_electrons_scf: float | None
     energy_ev: float | None
+    force_max_ev_ang: float | None = None
+    fmax_atom_index: int | None = None
+    fmax_atom_element: str | None = None
+    fmax_atom_class: str | None = None
+    force_max_metal: float | None = None
+    force_max_neighbor: float | None = None
+    force_max_other: float | None = None
+    n_metal_neighbors: int | None = None
+    neighbor_cutoff_ang: float | None = None
 
     @property
     def reason_bucket(self) -> str:
@@ -294,11 +343,82 @@ def geometry_block(atoms: Atoms) -> str:
     )
 
 
+def per_atom_forces(atoms: Atoms) -> np.ndarray | None:
+    """The frame's (natoms, 3) DFT forces, or None when it carries none.
+
+    ASE attaches them to a ``SinglePointCalculator`` when the extxyz has a
+    ``forces`` column; some writers put them in ``atoms.arrays`` instead.
+    """
+    try:
+        return np.asarray(atoms.get_forces(), dtype=float)
+    except (RuntimeError, AttributeError, ValueError, NotImplementedError):
+        pass
+    for key in ("forces", "REF_forces"):
+        value = atoms.arrays.get(key)
+        if value is not None:
+            return np.asarray(value, dtype=float)
+    return None
+
+
+def force_breakdown(
+    atoms: Atoms,
+    metal: str | None,
+    cutoff: float = NEIGHBOR_CUTOFF_ANG,
+) -> dict[str, Any]:
+    """Split the frame's per-atom force norms into metal / neighbour / other.
+
+    The filter records only an ``fmax`` scalar, which says nothing about where
+    the force sits. This locates the peak atom and reports the largest force in
+    each of the three classes, so a strained metal centre can be told apart
+    from a distant ligand that blew up.
+
+    Args:
+        atoms: The frame.
+        metal: Metal centre symbol from :func:`pick_metal`; None or an element
+            absent from the frame puts every atom in the ``other`` class.
+        cutoff: Neighbour radius in Angstrom, measured from the metal.
+
+    Returns:
+        A dict over :data:`_FORCE_FIELDS`, all None when the frame has no
+        forces. Forces are in the extxyz's own units (eV/Angstrom).
+    """
+    forces = per_atom_forces(atoms)
+    if forces is None or forces.size == 0:
+        return dict.fromkeys(_FORCE_FIELDS)
+
+    norms = np.linalg.norm(forces, axis=1)
+    symbols = atoms.get_chemical_symbols()
+    classes = np.array([FORCE_CLASS_OTHER] * len(symbols), dtype=object)
+
+    if metal and metal in symbols:
+        centre = symbols.index(metal)
+        distances = np.linalg.norm(atoms.positions - atoms.positions[centre], axis=1)
+        classes[distances <= cutoff] = FORCE_CLASS_NEIGHBOR
+        classes[centre] = FORCE_CLASS_METAL
+
+    def _peak(tag: str) -> float | None:
+        selected = norms[classes == tag]
+        return float(selected.max()) if selected.size else None
+
+    peak = int(norms.argmax())
+    return {
+        "force_max_ev_ang": float(norms[peak]),
+        "fmax_atom_index": peak,
+        "fmax_atom_element": symbols[peak],
+        "fmax_atom_class": str(classes[peak]),
+        "force_max_metal": _peak(FORCE_CLASS_METAL),
+        "force_max_neighbor": _peak(FORCE_CLASS_NEIGHBOR),
+        "force_max_other": _peak(FORCE_CLASS_OTHER),
+        "n_metal_neighbors": int((classes == FORCE_CLASS_NEIGHBOR).sum()),
+    }
+
+
 def build_row(
     atoms: Atoms,
     frame_index: int,
     labels: dict[str, Label],
     include_geometry: bool = True,
+    neighbor_cutoff: float = NEIGHBOR_CUTOFF_ANG,
 ) -> Row:
     """Turn one extxyz frame into a labelled row.
 
@@ -307,6 +427,8 @@ def build_row(
         frame_index: Position of the frame in the extxyz.
         labels: Output of :func:`load_labels`.
         include_geometry: False leaves the geometry column empty.
+        neighbor_cutoff: Metal neighbour radius in Angstrom, for the force
+            breakdown.
 
     Returns:
         A :class:`Row` whose ``filtered`` is 1 when the frame's job path is in
@@ -322,7 +444,7 @@ def build_row(
 
     try:
         energy_ev: float | None = float(atoms.get_potential_energy())
-    except (RuntimeError, AttributeError):
+    except (RuntimeError, AttributeError, NotImplementedError):
         energy_ev = None
 
     # job_id: the CSV's when labelled, else the job directory's own name.
@@ -350,6 +472,8 @@ def build_row(
         homo_lumo_gap_min=_min_float(info.get("homo_lumo_gap")),
         n_electrons_scf=_as_float(info.get("num_electrons_scf")),
         energy_ev=energy_ev,
+        neighbor_cutoff_ang=neighbor_cutoff,
+        **force_breakdown(atoms, metal, neighbor_cutoff),
     )
 
 
@@ -413,6 +537,7 @@ def collect_rows(
     include_geometry: bool = True,
     seed: int | None = 0,
     max_frames: int | None = None,
+    neighbor_cutoff: float = NEIGHBOR_CUTOFF_ANG,
 ) -> tuple[list[Row], Counter, Counter]:
     """Stream the extxyz once and return the selected rows.
 
@@ -429,6 +554,8 @@ def collect_rows(
         include_geometry: False leaves the geometry column empty.
         seed: Seed for the reservoir; None gives a fresh random draw.
         max_frames: Stop after this many frames, for testing.
+        neighbor_cutoff: Metal neighbour radius in Angstrom, for the force
+            breakdown.
 
     Returns:
         ``(rows, by_reason, by_folder)``. Both counters cover every frame that
@@ -453,7 +580,9 @@ def collect_rows(
                 break
             if progress is not None:
                 progress.update(1)
-            row = build_row(atoms, frame_index, labels, include_geometry)
+            row = build_row(
+                atoms, frame_index, labels, include_geometry, neighbor_cutoff
+            )
             if only == "filtered" and not row.filtered:
                 continue
             if only == "kept" and row.filtered:
@@ -511,6 +640,15 @@ def write_db(rows: list[Row], out_path: Path) -> None:
                     "homo_lumo_gap_min": row.homo_lumo_gap_min,
                     "n_electrons_scf": row.n_electrons_scf,
                     "energy_ev": row.energy_ev,
+                    "force_max_ev_ang": row.force_max_ev_ang,
+                    "fmax_atom_index": row.fmax_atom_index,
+                    "fmax_atom_element": row.fmax_atom_element,
+                    "fmax_atom_class": row.fmax_atom_class,
+                    "force_max_metal": row.force_max_metal,
+                    "force_max_neighbor": row.force_max_neighbor,
+                    "force_max_other": row.force_max_other,
+                    "n_metal_neighbors": row.n_metal_neighbors,
+                    "neighbor_cutoff_ang": row.neighbor_cutoff_ang,
                 },
             )
         conn.commit()
@@ -628,6 +766,14 @@ def main(argv: list[str] | None = None) -> int:
         "scalar-feature classifier, not for SOAP descriptors)",
     )
     parser.add_argument(
+        "--neighbor-cutoff",
+        type=float,
+        default=NEIGHBOR_CUTOFF_ANG,
+        metavar="ANG",
+        help="Radius from the metal that counts as a neighbour, for the "
+        f"three-way force breakdown (default: {NEIGHBOR_CUTOFF_ANG})",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=0,
@@ -673,6 +819,7 @@ def main(argv: list[str] | None = None) -> int:
         include_geometry=not args.no_geometry,
         seed=args.seed,
         max_frames=args.debug,
+        neighbor_cutoff=args.neighbor_cutoff,
     )
 
     if not rows:
