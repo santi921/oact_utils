@@ -546,8 +546,9 @@ DB can supply (`id`, `fail_count`, `worker_id`, `generator_data`, `source_db`).
 | directory name | `orig_index` | free |
 | `orca.inp` (or `.inp.gz`) | `elements`, `formula`, `natoms`, `charge`, `spin`, `n_basis`, `metal`, `metal_class`, `ligand_elements`, `n_ligand_types`, `functional`, `simple_input`, `nprocs_requested` | free |
 | `.do_not_rerun.json` | `marker`, `purge_type`, and the `failure_reason` / `scf_steps` recorded before the purge | free |
-| `orca.out` (or `.out.gz`) | `status`, `termination_code`, `failure_reason`, `scf_steps`, `wall_time`, `n_cores`, `final_energy`, `max_forces`, `sella_steps`, `metal_{mulliken,loewdin}_{charge,spin}`, `charge_conserved`, `spin_conserved` | expensive; uses the `orca_metrics.json` cache |
+| `orca.out` (or `.out.gz`) | `status`, `termination_code`, `failure_reason`, `scf_steps`, `wall_time`, `n_cores`, `final_energy`, `max_forces`, `num_electrons_scf`, `sella_steps`, `metal_{mulliken,loewdin}_{charge,spin}`, `charge_conserved`, `spin_conserved` | expensive; uses the `orca_metrics.json` cache |
 | `orca.engrad` (or `.engrad.gz`) | `engrad_energy`, `force_{max,mean,median}`, `metal_force`, `ligand_force_{max,mean}`, `n_neighbors`, `neighbor_force_{max,mean}`, `frac_conv_{tight,normal,loose}` | cheap |
+| `generator_metrics.json` | `s_squared`, `n_alpha`, `n_beta`, `homo_lumo_gap_{alpha,beta}`, `exchange_deviation`, and the derived `quality_pass` / `quality_reason` | cheap (one small JSON); never triggers a qtaim parse |
 
 **Census CLI reference:**
 
@@ -562,9 +563,11 @@ python -m oact_utilities.workflows.census <root> [<root> ...] -o out.parquet [op
 --format {parquet,sqlite,csv}   # default parquet; falls back to sqlite without pyarrow
 --chunk-size N           # rows buffered before each flush (default: 20000)
 
-# What to extract (both tiers are ON by default)
+# What to extract (all three tiers are ON by default)
 --no-forces              # skip orca.engrad (no energies/forces/neighbor stats)
 --no-metrics             # skip the full orca.out read (no scf_steps/wall_time/n_cores/populations)
+--no-quality             # skip generator_metrics.json and the dataset quality filter
+--force-thresh EV_ANG    # quality filter fmax cutoff (default: 50 eV/Angstrom)
 --recompute              # bypass each job's orca_metrics.json cache
 --neighbor-cutoff ANG    # metal coordination radius (default: 4.0)
 
@@ -612,6 +615,28 @@ a merge that re-ingested a shard -- notably `--merge <dir>` on a directory that
 already holds a previous merge output. Keep merge outputs outside the shard
 directory. The `root` column survives a merge, so a combined table can still be
 grouped per source root.
+
+**Dataset quality filter.** `census.quality_filter()` mirrors `quality_filter`
+in `data/v4_model_dev/build_dataset.py` (same checks, same order, same
+thresholds), so a census predicts how much of a corpus survives into a training
+set without exporting it first. Per completed job it records `quality_pass` and,
+on a failure, the `quality_reason` the dataset build would attribute; the
+running count prints pass rate, reason breakdown, and pass rate per metal class.
+Three caveats:
+
+- fmax uses `force_max` (the `orca.engrad` per-atom norm) converted with
+  `EH_BOHR_TO_EV_ANG`, so `--no-forces` grades everything `missing: forces`.
+- the HOMO-LUMO check sees only the spin channels `generator_metrics.json`
+  recorded. Until `qtaim_generator` reads the `SPIN DOWN ORBITALS` block that is
+  alpha alone, so a beta-only aufbau violation is missed (`homo_lumo_gap_beta`
+  is declared and stays null until that lands).
+- the energy/linref filter is not reproducible per job: it needs a fit over the
+  whole set.
+
+A corpus whose campaign ran without `qtaim_generator` installed has no
+`generator_metrics.json` files and grades as `missing: s_squared`. Census only
+reads that cache, it never creates it -- generating one is a second full read of
+`orca.out` per job, via `analysis.parse_generator_data`.
 
 **Purged jobs are `failed`, not `to_run`.** When a job carries a
 `.do_not_rerun.json` marker (written by `clean.py --purge-failed` or
