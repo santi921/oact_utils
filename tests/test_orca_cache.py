@@ -276,3 +276,126 @@ class TestCacheFileDiscovery:
         # Should still detect completion from orca.out, not read cache
         status = check_job_termination(str(tmp_job_dir))
         assert status == 1  # COMPLETED (from orca.out content)
+
+
+# --- schema version tests ---
+
+
+class TestCacheSchemaVersion:
+    def test_write_stamps_schema_version(
+        self, tmp_path: Path, sample_metrics: dict
+    ) -> None:
+        """write_orca_cache records the schema version alongside the mtime."""
+        from oact_utilities.utils.analysis import _ORCA_CACHE_SCHEMA_VERSION
+
+        cache_path = tmp_path / "orca_metrics.json"
+        write_orca_cache(cache_path, sample_metrics, 100.0)
+
+        data = json.loads(cache_path.read_text())
+        assert data["_schema_version"] == _ORCA_CACHE_SCHEMA_VERSION
+
+    def test_read_strips_schema_version(
+        self, tmp_path: Path, sample_metrics: dict
+    ) -> None:
+        """The version marker is not returned to callers."""
+        cache_path = tmp_path / "orca_metrics.json"
+        write_orca_cache(cache_path, sample_metrics, 100.0)
+
+        result = read_orca_cache(cache_path, 100.0)
+        assert result is not None
+        assert "_schema_version" not in result
+
+    def test_rejects_unversioned_cache(
+        self, tmp_path: Path, sample_metrics: dict
+    ) -> None:
+        """A pre-versioning cache is rejected even when its mtime is fresh.
+
+        Without this, warm caches written before force_max / num_electrons_scf
+        existed would be served forever with those keys silently absent.
+        """
+        cache_path = tmp_path / "orca_metrics.json"
+        cache_path.write_text(json.dumps({**sample_metrics, "_source_mtime": 100.0}))
+
+        assert read_orca_cache(cache_path, 100.0) is None
+
+    def test_rejects_other_schema_version(
+        self, tmp_path: Path, sample_metrics: dict
+    ) -> None:
+        """A cache from a different schema version is re-parsed."""
+        cache_path = tmp_path / "orca_metrics.json"
+        cache_path.write_text(
+            json.dumps(
+                {**sample_metrics, "_source_mtime": 100.0, "_schema_version": 999}
+            )
+        )
+
+        assert read_orca_cache(cache_path, 100.0) is None
+
+    def test_stale_cache_regenerated_with_new_keys(self, tmp_job_dir: Path) -> None:
+        """An unversioned on-disk cache is replaced by a full parse."""
+        cache_path = tmp_job_dir / "orca_metrics.json"
+        source_mtime = (tmp_job_dir / "orca.out").stat().st_mtime
+        cache_path.write_text(
+            json.dumps({"scf_steps": 999, "_source_mtime": source_mtime})
+        )
+
+        result = parse_job_metrics(tmp_job_dir)
+
+        assert result.get("_cache_hit") is not True
+        assert result["scf_steps"] == 12
+        assert "force_max" in result
+        assert "num_electrons_scf" in result
+
+
+# --- with_engrad tests ---
+
+
+class TestWithEngrad:
+    @pytest.fixture
+    def job_with_engrad(self, tmp_job_dir: Path) -> Path:
+        """Add an .engrad whose single atom carries a 3-4-0 gradient (norm 5)."""
+        (tmp_job_dir / "orca.engrad").write_text(
+            "#\n# Number of atoms\n#\n 1\n"
+            "#\n# The current total energy in Eh\n#\n  -1234.567890\n"
+            "#\n# The current gradient in Eh/bohr\n#\n"
+            "  3.000000000\n  4.000000000\n  0.000000000\n"
+            "#\n# The atomic numbers and current coordinates in Bohr\n#\n"
+            "   8  0.000000 0.000000 0.000000\n"
+        )
+        return tmp_job_dir
+
+    def test_engrad_read_by_default(self, job_with_engrad: Path) -> None:
+        metrics = parse_job_metrics(job_with_engrad, recompute=True)
+        assert metrics["force_max"] == pytest.approx(5.0)
+
+    def test_with_engrad_false_skips_the_file(self, job_with_engrad: Path) -> None:
+        """Census parses the .engrad itself and opts out of a second read."""
+        metrics = parse_job_metrics(job_with_engrad, recompute=True, with_engrad=False)
+        assert metrics["force_max"] is None
+
+    def test_cache_hit_backfills_a_skipped_force_max(
+        self, job_with_engrad: Path
+    ) -> None:
+        """A cache written with with_engrad=False must not starve later callers.
+
+        Census writes such caches. A dashboard run over the same corpus would
+        otherwise see force_max as permanently absent.
+        """
+        parse_job_metrics(job_with_engrad, recompute=True, with_engrad=False)
+        cache_path = job_with_engrad / "orca_metrics.json"
+        assert json.loads(cache_path.read_text())["force_max"] is None
+
+        metrics = parse_job_metrics(job_with_engrad)
+
+        assert metrics.get("_cache_hit") is True
+        assert metrics["force_max"] == pytest.approx(5.0)
+        # Written back, so the corpus converges on complete caches.
+        assert json.loads(cache_path.read_text())["force_max"] == pytest.approx(5.0)
+
+    def test_cache_hit_without_engrad_does_not_loop(self, tmp_job_dir: Path) -> None:
+        """A job with no .engrad at all stays a clean cache hit."""
+        parse_job_metrics(tmp_job_dir, recompute=True)
+        metrics = parse_job_metrics(tmp_job_dir)
+
+        assert metrics.get("_cache_hit") is True
+        assert metrics["force_max"] is None

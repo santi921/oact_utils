@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import contextlib
+import gzip
 import json
 import os
 import re
+import tempfile
 import time as time_mod
 import warnings
 from collections import deque
@@ -1262,6 +1264,8 @@ def parse_orca_output_single_pass(
             - success: True if terminated normally (bool)
             - is_timeout: True if timed out (bool)
             - mulliken_population: Population analysis dict or None
+            - num_electrons_scf: Exact electron count from the NEL line
+              (int or None)
     """
     output_file = Path(output_file)
 
@@ -1271,6 +1275,7 @@ def parse_orca_output_single_pass(
     scf_found = False
     final_energy: float | None = None
     nprocs: int | None = None
+    num_electrons_scf: int | None = None
     last_lines: deque[str] = deque(maxlen=30)
 
     # Population parsing state machine
@@ -1372,6 +1377,18 @@ def parse_orca_output_single_pass(
                     except (ValueError, IndexError):
                         pass
 
+                # Exact SCF electron count. Cannot be derived from the geometry
+                # because ECPs replace core electrons (NpF3: sum(Z)=120, NEL=60).
+                elif (
+                    num_electrons_scf is None
+                    and "Number of Electrons" in line
+                    and "NEL" in line
+                ):
+                    try:
+                        num_electrons_scf = int(line.strip().split()[-1])
+                    except (ValueError, IndexError):
+                        pass
+
                 else:
                     match = _SCF_CONVERGED_RE.search(line)
                     if match:
@@ -1391,6 +1408,7 @@ def parse_orca_output_single_pass(
             "success": False,
             "is_timeout": False,
             "mulliken_population": None,
+            "num_electrons_scf": None,
         }
 
     # -- Termination status from last 10 lines --
@@ -1447,6 +1465,7 @@ def parse_orca_output_single_pass(
         "success": termination_status == 1,
         "is_timeout": termination_status == -2,
         "mulliken_population": mulliken_pop,
+        "num_electrons_scf": num_electrons_scf,
     }
 
 
@@ -1495,6 +1514,12 @@ def _build_population_result(
     return result
 
 
+# Bumped whenever the cached metrics dict gains or changes keys. A cache
+# written under a different version is rejected and re-parsed, otherwise warm
+# caches would keep serving results that silently lack the new keys.
+_ORCA_CACHE_SCHEMA_VERSION = 2
+
+
 def write_orca_cache(cache_path: Path, metrics: dict, source_mtime: float) -> None:
     """Write metrics dict as JSON cache file with atomic rename.
 
@@ -1505,7 +1530,11 @@ def write_orca_cache(cache_path: Path, metrics: dict, source_mtime: float) -> No
         metrics: Metrics dictionary from parse_job_metrics.
         source_mtime: mtime of the source ORCA output file for staleness detection.
     """
-    data = {**metrics, "_source_mtime": source_mtime}
+    data = {
+        **metrics,
+        "_source_mtime": source_mtime,
+        "_schema_version": _ORCA_CACHE_SCHEMA_VERSION,
+    }
     tmp = cache_path.with_suffix(".tmp")
     try:
         tmp.write_text(json.dumps(data))
@@ -1518,8 +1547,8 @@ def write_orca_cache(cache_path: Path, metrics: dict, source_mtime: float) -> No
 def read_orca_cache(cache_path: Path, source_mtime: float) -> dict[str, Any] | None:
     """Read cached metrics from JSON file.
 
-    Returns None if the cache is missing, stale, or corrupt, triggering
-    fallback to a full ORCA output parse.
+    Returns None if the cache is missing, stale, corrupt, or written under a
+    different schema version, triggering fallback to a full ORCA output parse.
 
     Args:
         cache_path: Path to the cache file.
@@ -1534,9 +1563,54 @@ def read_orca_cache(cache_path: Path, source_mtime: float) -> dict[str, Any] | N
         data: dict[str, Any] = json.loads(cache_path.read_text())
         if data.get("_source_mtime", 0) < source_mtime:
             return None
+        if data.get("_schema_version") != _ORCA_CACHE_SCHEMA_VERSION:
+            return None
         data.pop("_source_mtime", None)
+        data.pop("_schema_version", None)
         return data
     except (json.JSONDecodeError, OSError, KeyError):
+        return None
+
+
+def _engrad_force_max(job_dir: Path, unzip: bool) -> float | None:
+    """Largest per-atom gradient norm (Eh/Bohr) from a job's .engrad file.
+
+    Returns None when the directory holds no .engrad or the file is unreadable:
+    a truncated engrad from a killed job must never discard an otherwise good
+    output parse.
+
+    Args:
+        job_dir: The job directory.
+        unzip: Look for ``*.engrad.gz`` (quacc) instead of a plain file.
+
+    Returns:
+        The force norm, or None.
+    """
+    try:
+        if unzip:
+            matches = list(job_dir.glob("*.engrad.gz"))
+            if not matches:
+                return None
+            with gzip.open(matches[0], "rt", errors="replace") as f_in:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", delete=False, suffix=".engrad"
+                ) as f_out:
+                    f_out.write(f_in.read())
+                    temp_path = f_out.name
+            try:
+                return get_engrad(temp_path).get("max_force_Eh_per_bohr")
+            finally:
+                os.unlink(temp_path)
+
+        engrad_file = job_dir / "orca.engrad"
+        if not engrad_file.exists():
+            # Direct ORCA runs name the engrad after the input basename.
+            candidates = sorted(job_dir.glob("*.engrad"))
+            if not candidates:
+                return None
+            engrad_file = candidates[0]
+        return get_engrad(str(engrad_file)).get("max_force_Eh_per_bohr")
+    except Exception:
         return None
 
 
@@ -1545,12 +1619,14 @@ def parse_job_metrics(
     unzip: bool = False,
     hours_cutoff: float = 6.0,
     recompute: bool = False,
+    with_engrad: bool = True,
 ) -> dict[str, float | int | None]:
     """Extract multiple metrics from ORCA output files in a job directory.
 
     This function handles both regular and gzipped ORCA output files.
-    It tries to extract max forces from .engrad file first (more reliable),
-    then falls back to parsing text output.
+    max_forces comes from the output's MAX gradient line when present and falls
+    back to the .engrad file; force_max always comes from .engrad when it exists.
+    The two are different quantities -- see Returns.
 
     Uses check_file_termination() to robustly detect job completion status,
     including timeouts, errors, and aborted runs.
@@ -1564,10 +1640,20 @@ def parse_job_metrics(
         unzip: If True, look for gzipped files (e.g., quacc output).
         hours_cutoff: Timeout threshold in hours for stale output files (default: 6.0).
         recompute: If True, skip cache read and regenerate the cache file.
+        with_engrad: If True, read the .engrad file for force_max (and for
+            max_forces when the output printed no MAX gradient). Pass False from
+            a caller that parses the .engrad itself -- census does -- to avoid
+            opening the same file twice per job, which is the dominant cost on a
+            latency-bound filesystem.
 
     Returns:
         Dictionary with keys:
-            - max_forces: Maximum force from optimization (float or None)
+            - max_forces: Optimization-level max force (float or None). ORCA's
+                MAX gradient *component*, or the .engrad norm when the output
+                printed none, or Sella's final fmax on a Sella job. Mixed
+                provenance -- use force_max to threshold on a single quantity.
+            - force_max: Largest per-atom gradient *norm* from .engrad in
+                Eh/Bohr (float or None). None when no .engrad is present.
             - scf_steps: Number of SCF iterations (int or None)
             - final_energy: Final energy in Hartree (float or None)
             - success: True if job completed successfully (bool)
@@ -1575,18 +1661,21 @@ def parse_job_metrics(
             - termination_status: Raw status from check_file_termination (int)
                 1 = normal termination, -1 = failed/aborted, -2 = timeout, 0 = running
             - mulliken_population: Dict with charges/spins if available (dict or None)
+            - num_electrons_scf: Exact SCF electron count, ECP-aware (int or None)
     """
     job_dir = Path(job_dir)
     cache_path = job_dir / "orca_metrics.json"
 
     _empty_result: dict = {
         "max_forces": None,
+        "force_max": None,
         "scf_steps": None,
         "final_energy": None,
         "success": False,
         "is_timeout": False,
         "termination_status": 0,
         "mulliken_population": None,
+        "num_electrons_scf": None,
     }
 
     # Try cache before doing any I/O on the full ORCA output
@@ -1604,6 +1693,17 @@ def parse_job_metrics(
                 source_mtime = os.path.getmtime(str(source_file))
                 cached = read_orca_cache(cache_path, source_mtime)
                 if cached is not None:
+                    # A cache written by a with_engrad=False caller (census,
+                    # which parses the .engrad itself) has no force_max. Fill
+                    # it in rather than serving the gap on, and write it back so
+                    # the corpus converges on complete caches.
+                    if with_engrad and cached.get("force_max") is None:
+                        filled = _engrad_force_max(job_dir, unzip)
+                        if filled is not None:
+                            cached["force_max"] = filled
+                            if cached.get("max_forces") is None:
+                                cached["max_forces"] = filled
+                            write_orca_cache(cache_path, cached, source_mtime)
                     cached["_cache_hit"] = True
                     return cached
         except OSError:
@@ -1613,11 +1713,9 @@ def parse_job_metrics(
         # Parse charge/multiplicity from .inp file for population validation
         expected_charge = None
         expected_multiplicity = None
+        force_max: float | None = None
 
         if unzip:
-            import gzip
-            import tempfile
-
             # Look for gzipped output
             gz_files = list(job_dir.glob("*.out.gz"))
             if not gz_files:
@@ -1657,23 +1755,13 @@ def parse_job_metrics(
                     expected_multiplicity=expected_multiplicity,
                 )
 
-                # Try engrad for more reliable max forces
-                if result["max_forces"] is None:
-                    engrad_gz = list(job_dir.glob("*.engrad.gz"))
-                    if engrad_gz:
-                        with gzip.open(engrad_gz[0], "rt", errors="replace") as f_in:
-                            with tempfile.NamedTemporaryFile(
-                                mode="w", delete=False, suffix=".engrad"
-                            ) as f_out:
-                                f_out.write(f_in.read())
-                                engrad_temp = f_out.name
-                        try:
-                            engrad_data = get_engrad(engrad_temp)
-                            result["max_forces"] = engrad_data.get(
-                                "max_force_Eh_per_bohr"
-                            )
-                        finally:
-                            os.unlink(engrad_temp)
+                # engrad gives the per-atom gradient norm (force_max), and a
+                # more reliable max_forces when the output printed no MAX
+                # gradient.
+                if with_engrad:
+                    force_max = _engrad_force_max(job_dir, unzip=True)
+                    if result["max_forces"] is None:
+                        result["max_forces"] = force_max
             finally:
                 os.unlink(temp_path)
         else:
@@ -1695,14 +1783,12 @@ def parse_job_metrics(
                 expected_multiplicity=expected_multiplicity,
             )
 
-            # Try engrad for more reliable max forces
-            engrad_file = job_dir / "orca.engrad"
-            if engrad_file.exists() and result["max_forces"] is None:
-                try:
-                    engrad_data = get_engrad(str(engrad_file))
-                    result["max_forces"] = engrad_data.get("max_force_Eh_per_bohr")
-                except Exception:
-                    pass
+            # engrad gives the per-atom gradient norm (force_max), and a more
+            # reliable max_forces when the output printed no MAX gradient.
+            if with_engrad:
+                force_max = _engrad_force_max(job_dir, unzip=False)
+                if result["max_forces"] is None:
+                    result["max_forces"] = force_max
 
         # Check for Sella optimization results and merge metrics.
         # Use run_sella.py as canonical Sella detection marker (matches
@@ -1732,12 +1818,14 @@ def parse_job_metrics(
         # Build final metrics dict
         final_result = {
             "max_forces": result["max_forces"],
+            "force_max": force_max,
             "scf_steps": result["scf_steps"],
             "final_energy": result["final_energy"],
             "success": result["success"],
             "is_timeout": result["is_timeout"],
             "termination_status": result["termination_status"],
             "mulliken_population": result["mulliken_population"],
+            "num_electrons_scf": result.get("num_electrons_scf"),
             # Pass through extra fields for dashboard use
             "nprocs": result.get("nprocs"),
             "wall_time": result.get("wall_time"),
