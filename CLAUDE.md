@@ -548,7 +548,7 @@ DB can supply (`id`, `fail_count`, `worker_id`, `generator_data`, `source_db`).
 | `.do_not_rerun.json` | `marker`, `purge_type`, and the `failure_reason` / `scf_steps` recorded before the purge | free |
 | `orca.out` (or `.out.gz`) | `status`, `termination_code`, `failure_reason`, `scf_steps`, `wall_time`, `n_cores`, `final_energy`, `max_forces`, `num_electrons_scf`, `sella_steps`, `metal_{mulliken,loewdin}_{charge,spin}`, `charge_conserved`, `spin_conserved` | expensive; uses the `orca_metrics.json` cache |
 | `orca.engrad` (or `.engrad.gz`) | `engrad_energy`, `force_{max,mean,median}`, `metal_force`, `ligand_force_{max,mean}`, `n_neighbors`, `neighbor_force_{max,mean}`, `frac_conv_{tight,normal,loose}` | cheap |
-| `generator_metrics.json` | `s_squared`, `n_alpha`, `n_beta`, `homo_lumo_gap_{alpha,beta}`, `exchange_deviation`, and the derived `quality_pass` / `quality_reason` | cheap (one small JSON); never triggers a qtaim parse |
+| `generator_metrics.json` | `s_squared`, `n_alpha`, `n_beta`, `homo_lumo_gap_{alpha,beta}`, `exchange_deviation`, `orca_parser_version`, and the derived `quality_pass` / `quality_reason` | cheap (one small JSON); never triggers a qtaim parse |
 
 **Census CLI reference:**
 
@@ -627,9 +627,16 @@ Three caveats:
 - fmax uses `force_max` (the `orca.engrad` per-atom norm) converted with
   `EH_BOHR_TO_EV_ANG`, so `--no-forces` grades everything `missing: forces`.
 - the HOMO-LUMO check sees only the spin channels `generator_metrics.json`
-  recorded. Until `qtaim_generator` reads the `SPIN DOWN ORBITALS` block that is
-  alpha alone, so a beta-only aufbau violation is missed (`homo_lumo_gap_beta`
-  is declared and stays null until that lands).
+  recorded, which depends on `orca_parser_version`. Version 2 reads both spin
+  blocks and supplies `homo_lumo_gap_eh_{alpha,beta}`. Version 1 (an unstamped
+  cache) read only `SPIN UP ORBITALS`, so its flat `homo_lumo_gap_eh` is the
+  alpha gap and a beta-only aufbau violation is invisible; census reads the flat
+  key only in that case and the running count says how many rows were graded
+  that way. Note the flat key changed meaning in version 2 -- it is the
+  spin-agnostic frontier (lowest virtual over both channels minus highest
+  occupied over both), not alpha -- so it must never be read as alpha on a
+  stamped cache. Refresh a version 1 job with
+  `parse_generator_data(recompute=True)`.
 - the energy/linref filter is not reproducible per job: it needs a fit over the
   whole set.
 

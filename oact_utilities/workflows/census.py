@@ -125,6 +125,12 @@ DEFAULT_NEIGHBOR_CUTOFF_ANG = 4.0
 # exporting it first. Thresholds and check order are kept identical on purpose.
 DEFAULT_FORCE_THRESH_EV_ANG = 50.0
 GENERATOR_CACHE_FILENAME = "generator_metrics.json"
+# qtaim_generator stamps orca_parser_version on every non-empty result; absent
+# means version 1. Version 2 reads both spin blocks, adds per-spin frontier
+# keys, and redefines the flat homo_lumo_gap_eh as the spin-agnostic frontier
+# (lowest virtual over both channels minus highest occupied over both), so the
+# flat key can only be read as the alpha gap on a version 1 cache.
+GENERATOR_PARSER_VERSION_PER_SPIN = 2
 
 # Elements whose open d/f shells warrant the stricter S^2 deviation cutoff.
 _HIGH_CONTAM_ELEMENTS = frozenset(
@@ -283,6 +289,7 @@ _FIELDS: tuple[tuple[str, str], ...] = (
     ("homo_lumo_gap_alpha", "float"),
     ("homo_lumo_gap_beta", "float"),
     ("exchange_deviation", "bool"),
+    ("orca_parser_version", "int"),
     ("quality_pass", "bool"),
     ("quality_reason", "str"),
 )
@@ -1066,13 +1073,20 @@ def scan_job(
     if with_quality:
         gen = read_generator_metrics(job_dir, names)
         if gen:
+            version = gen.get("orca_parser_version")
+            row["orca_parser_version"] = version if isinstance(version, int) else 1
             row["s_squared"] = _as_float(gen.get("s_squared"))
             row["n_alpha"] = _as_float(gen.get("n_alpha"))
             row["n_beta"] = _as_float(gen.get("n_beta"))
-            row["homo_lumo_gap_alpha"] = _as_float(gen.get("homo_lumo_gap_eh"))
-            # Populated once qtaim_generator reads the SPIN DOWN block; until
-            # then the beta channel is simply not in the cache.
-            row["homo_lumo_gap_beta"] = _as_float(gen.get("homo_lumo_gap_eh_beta"))
+            if row["orca_parser_version"] >= GENERATOR_PARSER_VERSION_PER_SPIN:
+                alpha = gen.get("homo_lumo_gap_eh_alpha")
+                beta = gen.get("homo_lumo_gap_eh_beta")
+            else:
+                # Version 1 read only the SPIN UP block, so its flat key is the
+                # alpha gap and the beta channel was never recorded.
+                alpha, beta = gen.get("homo_lumo_gap_eh"), None
+            row["homo_lumo_gap_alpha"] = _as_float(alpha)
+            row["homo_lumo_gap_beta"] = _as_float(beta)
             warns = gen.get("warnings")
             if isinstance(warns, list):
                 row["exchange_deviation"] = any(
@@ -1271,6 +1285,7 @@ class Summary:
         self.quality_fail = 0
         self.quality_reasons: Counter = Counter()
         self.quality_by_class: Counter = Counter()  # (metal_class, pass|fail)
+        self.quality_stale_parser = 0  # graded on a pre-per-spin generator cache
         # A job directory must appear exactly once. A repeat means the roots
         # overlapped (one nested in another) or a merge re-ingested a shard --
         # both silently double-count, so they are surfaced, not swallowed.
@@ -1320,6 +1335,10 @@ class Summary:
                 self.conv_normal[mclass] += 1
 
         verdict = row["quality_pass"]
+        version = row["orca_parser_version"]
+        if verdict is not None and version is not None:
+            if version < GENERATOR_PARSER_VERSION_PER_SPIN:
+                self.quality_stale_parser += 1
         if verdict is True:
             self.quality_pass += 1
             self.quality_by_class[(mclass, "pass")] += 1
@@ -1431,6 +1450,13 @@ def _print_report(summary: Summary, top: int = 15) -> None:
         print(f"  {'pass':<54}{summary.quality_pass:>9,}{pct:>7.1f}%")
         for reason, count in summary.quality_reasons.most_common():
             print(f"  {reason[:54]:<54}{count:>9,}{count / graded * 100:>7.1f}%")
+        if summary.quality_stale_parser:
+            print(
+                f"  note: {summary.quality_stale_parser:,} graded on "
+                f"orca_parser_version 1 -- the beta HOMO-LUMO channel was not "
+                f"checked. Re-run parse_generator_data(recompute=True) on those "
+                f"jobs."
+            )
         classes = sorted({c for c, _ in summary.quality_by_class})
         if len(classes) > 1:
             print("  pass rate by metal class:")

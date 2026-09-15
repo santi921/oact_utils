@@ -1151,3 +1151,109 @@ def test_run_census_no_forces_makes_the_fmax_check_unanswerable(tmp_path):
 
     rows = {r["job_name"]: r for r in csv.DictReader(open(out))}
     assert rows["job_1"]["quality_reason"] == "missing: forces"
+
+
+# ---------------------------------------------------------------------------
+# Generator parser versions
+# ---------------------------------------------------------------------------
+
+
+def _gen_job(root: Path, name: str, generator: dict) -> None:
+    """A completed AmO job carrying the given generator cache."""
+    _write_job(
+        root,
+        name,
+        inp=_INP_AMO,
+        out=_OUT_DONE,
+        engrad=_engrad(
+            -670.5,
+            [0.001, 0.0, 0.0, 0.0005, 0.0, 0.0],
+            [(95, 0.0, 0.0, 0.0), (8, 3.5, 0.0, 0.0)],
+        ),
+        extra={"generator_metrics.json": json.dumps(generator)},
+    )
+
+
+def test_generator_v2_per_spin_gaps_are_read_not_the_flat_key(tmp_path):
+    """Version 2 redefined the flat key as the spin-agnostic frontier.
+
+    The flat value here is negative while both per-spin gaps are positive, so
+    reading the flat key would fail the job for the wrong reason.
+    """
+    root = tmp_path / "jobs"
+    root.mkdir(parents=True)
+    _gen_job(
+        root,
+        "job_1",
+        {
+            "orca_parser_version": 2,
+            "s_squared": 15.76,
+            "n_alpha": 25.0,
+            "n_beta": 18.0,
+            "homo_lumo_gap_eh": -0.05,
+            "homo_lumo_gap_eh_alpha": 0.227034,
+            "homo_lumo_gap_eh_beta": 0.321290,
+            "warnings": [],
+        },
+    )
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([root], out, fmt="csv")
+
+    row = next(iter(csv.DictReader(open(out))))
+    assert row["orca_parser_version"] == "2"
+    assert float(row["homo_lumo_gap_alpha"]) == pytest.approx(0.227034)
+    assert float(row["homo_lumo_gap_beta"]) == pytest.approx(0.321290)
+    assert row["quality_pass"] == "True"
+    assert summary.quality_stale_parser == 0
+
+
+def test_generator_v1_flat_key_is_the_alpha_gap(tmp_path):
+    """An unstamped cache is version 1, where the flat key did mean alpha."""
+    root = tmp_path / "jobs"
+    root.mkdir(parents=True)
+    _gen_job(
+        root,
+        "job_1",
+        {
+            "s_squared": 15.76,
+            "n_alpha": 25.0,
+            "n_beta": 18.0,
+            "homo_lumo_gap_eh": 0.227034,
+            "warnings": [],
+        },
+    )
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([root], out, fmt="csv")
+
+    row = next(iter(csv.DictReader(open(out))))
+    assert row["orca_parser_version"] == "1"
+    assert float(row["homo_lumo_gap_alpha"]) == pytest.approx(0.227034)
+    assert row["homo_lumo_gap_beta"] == ""
+    assert row["quality_pass"] == "True"
+    # Surfaced, because the beta channel went unchecked.
+    assert summary.quality_stale_parser == 1
+
+
+def test_generator_v2_negative_beta_gap_is_caught(tmp_path):
+    """The case version 1 could not see at all."""
+    root = tmp_path / "jobs"
+    root.mkdir(parents=True)
+    _gen_job(
+        root,
+        "job_1",
+        {
+            "orca_parser_version": 2,
+            "s_squared": 15.76,
+            "n_alpha": 25.0,
+            "n_beta": 18.0,
+            "homo_lumo_gap_eh_alpha": 0.227034,
+            "homo_lumo_gap_eh_beta": -0.01,
+            "warnings": [],
+        },
+    )
+    out = tmp_path / "census.csv"
+    run_census([root], out, fmt="csv")
+
+    row = next(iter(csv.DictReader(open(out))))
+    assert row["quality_pass"] == "False"
+    assert row["quality_reason"] == "negative HOMO-LUMO gap"
