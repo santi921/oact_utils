@@ -15,7 +15,7 @@ job:
   device_type: CUDA
   debug: false
   run_dir: /pscratch/sd/i/ishan_a/open_actinides/runs
-  run_name: train_combined_3ds_v3_scrubbed_large
+  run_name: train_combined_3ds_v4
   scheduler:
     mode: SLURM
     ranks_per_node: 4

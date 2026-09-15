@@ -1,4 +1,4 @@
-normalizer_rmsd: 2.827193851077061
+normalizer_rmsd: 3.066657732752523
 regress_stress: false
 
 omol_train:
@@ -39,7 +39,7 @@ omol_val:
 act_train:
   splits:
     train:
-      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large_100/act/train
+      src: /global/u2/i/ishan_a/oact_utils/data/v4_data/act/train
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0
@@ -56,7 +56,7 @@ act_train:
 act_val:
   splits:
     val:
-      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large_100/act/val
+      src: /global/u2/i/ishan_a/oact_utils/data/v4_data/act/val
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0
@@ -73,7 +73,7 @@ act_val:
 nonact_train:
   splits:
     train:
-      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large_100/nonact/train
+      src: /global/u2/i/ishan_a/oact_utils/data/v4_data/nonact/train
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0
@@ -90,7 +90,7 @@ nonact_train:
 nonact_val:
   splits:
     val:
-      src: /global/u2/i/ishan_a/oact_utils/data/v3_data_scrubbed_large_100/nonact/val
+      src: /global/u2/i/ishan_a/oact_utils/data/v4_data/nonact/val
   format: ase_db
   a2g_args:
     molecule_cell_size: 120.0
