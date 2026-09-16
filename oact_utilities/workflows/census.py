@@ -717,6 +717,77 @@ def read_generator_metrics(job_dir: Path, names: list[str]) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def extract_quality_fields(gen: dict) -> dict:
+    """Pull the quality-filter inputs out of a generator cache dict.
+
+    Version 2 of the qtaim parser reads both spin blocks and supplies
+    ``homo_lumo_gap_eh_{alpha,beta}``. Version 1 (an unstamped cache) read only
+    ``SPIN UP ORBITALS``, so its flat ``homo_lumo_gap_eh`` is the alpha gap.
+    The flat key changed meaning in version 2 -- it became the spin-agnostic
+    frontier -- so it must never be read as alpha on a stamped cache.
+
+    Args:
+        gen: The parsed ``generator_metrics.json`` contents.
+
+    Returns:
+        A dict of the quality columns. Empty when ``gen`` is empty.
+    """
+    if not gen:
+        return {}
+
+    version = gen.get("orca_parser_version")
+    version = version if isinstance(version, int) else 1
+
+    if version >= GENERATOR_PARSER_VERSION_PER_SPIN:
+        alpha = gen.get("homo_lumo_gap_eh_alpha")
+        beta = gen.get("homo_lumo_gap_eh_beta")
+    else:
+        alpha, beta = gen.get("homo_lumo_gap_eh"), None
+
+    fields: dict = {
+        "orca_parser_version": version,
+        "s_squared": _as_float(gen.get("s_squared")),
+        "n_alpha": _as_float(gen.get("n_alpha")),
+        "n_beta": _as_float(gen.get("n_beta")),
+        "homo_lumo_gap_alpha": _as_float(alpha),
+        "homo_lumo_gap_beta": _as_float(beta),
+    }
+
+    warns = gen.get("warnings")
+    if isinstance(warns, list):
+        fields["exchange_deviation"] = any(
+            "final exchange deviates considerably" in str(w) for w in warns
+        )
+    return fields
+
+
+def spin_contamination(
+    s_squared: float | None,
+    spin: int | None,
+    elements: str | None,
+) -> tuple[float | None, float | None]:
+    """Deviation of <S^2> from the ideal S(S+1), and the cutoff that applies.
+
+    Args:
+        s_squared: Expectation value of <S^2> from the generator cache.
+        spin: Spin multiplicity (2S+1).
+        elements: Semicolon-separated element symbols.
+
+    Returns:
+        ``(deviation, cutoff)``, or ``(None, None)`` when either input is
+        missing. Open d/f shells get the stricter cutoff.
+    """
+    if s_squared is None or spin is None:
+        return None, None
+    spin_quantum = (spin - 1) / 2
+    cutoff = (
+        _S2_THRESH_HIGH_CONTAM
+        if _HIGH_CONTAM_ELEMENTS & set((elements or "").split(";"))
+        else _S2_THRESH_DEFAULT
+    )
+    return abs(s_squared - spin_quantum * (spin_quantum + 1)), cutoff
+
+
 def quality_filter(
     row: dict,
     force_thresh_ev_ang: float = DEFAULT_FORCE_THRESH_EV_ANG,
@@ -761,14 +832,8 @@ def quality_filter(
         return False, "missing: multiplicity"
     if s_squared is None:
         return False, "missing: s_squared"
-    spin_quantum = (spin - 1) / 2
-    elements = set((row["elements"] or "").split(";"))
-    thresh = (
-        _S2_THRESH_HIGH_CONTAM
-        if _HIGH_CONTAM_ELEMENTS & elements
-        else _S2_THRESH_DEFAULT
-    )
-    if abs(s_squared - spin_quantum * (spin_quantum + 1)) >= thresh:
+    deviation, cutoff = spin_contamination(s_squared, spin, row["elements"])
+    if deviation is not None and cutoff is not None and deviation >= cutoff:
         return False, "spin contamination"
 
     alpha, beta = row["n_alpha"], row["n_beta"]
@@ -1072,26 +1137,7 @@ def scan_job(
 
     if with_quality:
         gen = read_generator_metrics(job_dir, names)
-        if gen:
-            version = gen.get("orca_parser_version")
-            row["orca_parser_version"] = version if isinstance(version, int) else 1
-            row["s_squared"] = _as_float(gen.get("s_squared"))
-            row["n_alpha"] = _as_float(gen.get("n_alpha"))
-            row["n_beta"] = _as_float(gen.get("n_beta"))
-            if row["orca_parser_version"] >= GENERATOR_PARSER_VERSION_PER_SPIN:
-                alpha = gen.get("homo_lumo_gap_eh_alpha")
-                beta = gen.get("homo_lumo_gap_eh_beta")
-            else:
-                # Version 1 read only the SPIN UP block, so its flat key is the
-                # alpha gap and the beta channel was never recorded.
-                alpha, beta = gen.get("homo_lumo_gap_eh"), None
-            row["homo_lumo_gap_alpha"] = _as_float(alpha)
-            row["homo_lumo_gap_beta"] = _as_float(beta)
-            warns = gen.get("warnings")
-            if isinstance(warns, list):
-                row["exchange_deviation"] = any(
-                    "final exchange deviates considerably" in str(w) for w in warns
-                )
+        row.update(extract_quality_fields(gen))
         row["quality_pass"], row["quality_reason"] = quality_filter(
             row, force_thresh_ev_ang
         )

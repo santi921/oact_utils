@@ -255,6 +255,13 @@ SQLite table `structures` with WAL mode for concurrent access:
 | `wall_time`     | REAL       | Wall time in seconds                                                                              |
 | `n_cores`       | INTEGER    | CPU cores used                                                                                    |
 | `n_basis`       | INTEGER    | Basis-function count (derived from `elements` at insert; drives memory/worker sizing)             |
+| `force_max`     | REAL       | Largest per-atom gradient norm from `.engrad` (Eh/Bohr) -- the quantity the dataset filter thresholds |
+| `num_electrons_scf` | INTEGER | Exact SCF electron count from the `NEL` line (ECP-aware)                                       |
+| `s_squared`     | REAL       | `<S^2>` expectation value (from `generator_metrics.json`)                                         |
+| `n_alpha` / `n_beta` | REAL  | Grid-integrated alpha / beta electron densities                                                    |
+| `homo_lumo_gap_alpha` / `homo_lumo_gap_beta` | REAL | Per-spin HOMO-LUMO gaps (Eh)                                                 |
+| `exchange_deviation` | INTEGER | 1 when the output carried the exchange-deviation warning                                         |
+| `orca_parser_version` | INTEGER | qtaim parser version that produced the quality scalars (1 = alpha channel only)                 |
 | `error_message` | TEXT       | Error message if failed                                                                           |
 | `fail_count`    | INTEGER    | Retry counter (incremented on reset)                                                              |
 | `worker_id`     | TEXT       | Scheduler job ID owning this molecule (SLURM/Flux ID), used for crash recovery                    |
@@ -277,6 +284,23 @@ Inspect the distribution with `dashboard.py --show-basis` before choosing `--max
 `--non-actinide-basis` overridden, stores a count for the default basis, not the one it ran.
 For `--simple-input pm3` (semiempirical, no Gaussian basis) `n_basis` is meaningless -- that
 path bypasses `get_mem_estimate` and hardcodes `%maxcore 512` anyway.
+
+**Quality scalars (`force_max`, `s_squared`, ...)**: the DB stores the
+*measurements*, never the pass/fail verdict. The filter rules live in
+`census.quality_filter` and run at display time, so changing a threshold or a
+check regrades every historical row for free -- no migration, no backfill pass,
+and no rows left graded under rules nobody remembers. `dashboard.py
+--show-quality` prints the two live signals that matter during a campaign: the
+per-atom force distribution (mean / median / p95 / max, and the fraction at or
+above `--force-thresh`) and the spin-contamination deviation
+`|<S^2> - S(S+1)|` against its element-dependent cutoff, split by metal class.
+
+The scalars are promoted out of the `generator_data` JSON blob into columns at
+extraction time on purpose: the blob is ~3 KB for a small molecule and grows
+per atom, so re-parsing it on every dashboard call would mean a multi-GB scan at
+campaign scale. Rows written before these columns existed have `force_max IS
+NULL` and are re-extracted automatically on the next `--extract-metrics`;
+`s_squared` and friends additionally need `qtaim_generator` installed.
 
 ## Job Status Lifecycle
 
@@ -421,6 +445,8 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --show-running               # Currently running jobs
 --show-chronic-failures N    # Jobs failed N+ times
 --show-basis                 # Basis-function distribution (drives memory/worker sizing)
+--show-quality               # Per-atom force distribution + spin contamination (completed jobs)
+--force-thresh EV_ANG        # fmax cutoff for --show-quality (default: 50 eV/Angstrom)
 
 # Status updates
 --update <job_dir>           # Scan directory for completions

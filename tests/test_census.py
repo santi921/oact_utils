@@ -15,6 +15,7 @@ from oact_utilities.workflows.census import (
     CONV_NORMAL,
     EH_BOHR_TO_EV_ANG,
     _parse_orig_index,
+    extract_quality_fields,
     force_stats,
     hill_formula,
     metal_class,
@@ -24,6 +25,7 @@ from oact_utilities.workflows.census import (
     quality_filter,
     read_generator_metrics,
     run_census,
+    spin_contamination,
 )
 
 FILES = Path(__file__).parent / "files"
@@ -1257,3 +1259,55 @@ def test_generator_v2_negative_beta_gap_is_caught(tmp_path):
     row = next(iter(csv.DictReader(open(out))))
     assert row["quality_pass"] == "False"
     assert row["quality_reason"] == "negative HOMO-LUMO gap"
+
+
+def test_extract_quality_fields_empty_cache():
+    assert extract_quality_fields({}) == {}
+
+
+def test_extract_quality_fields_v2_keys():
+    fields = extract_quality_fields(
+        {
+            "orca_parser_version": 2,
+            "s_squared": 6.0,
+            "n_alpha": 32.0,
+            "n_beta": 28.0,
+            "homo_lumo_gap_eh": -0.05,
+            "homo_lumo_gap_eh_alpha": 0.278931,
+            "homo_lumo_gap_eh_beta": 0.428205,
+            "warnings": ["final exchange deviates considerably from the"],
+        }
+    )
+    assert fields["orca_parser_version"] == 2
+    assert fields["homo_lumo_gap_alpha"] == pytest.approx(0.278931)
+    assert fields["homo_lumo_gap_beta"] == pytest.approx(0.428205)
+    assert fields["exchange_deviation"] is True
+
+
+def test_extract_quality_fields_v1_defaults_to_flat_key():
+    fields = extract_quality_fields({"homo_lumo_gap_eh": 0.2, "s_squared": 6.0})
+    assert fields["orca_parser_version"] == 1
+    assert fields["homo_lumo_gap_alpha"] == pytest.approx(0.2)
+    assert fields["homo_lumo_gap_beta"] is None
+    # No warnings key at all, so the column stays unknown rather than False.
+    assert "exchange_deviation" not in fields
+
+
+@pytest.mark.parametrize(
+    "elements,expected_cutoff",
+    [("Am;O", 1.1), ("Fe;O", 0.5), ("Ce;O", 0.5), ("Np;F;F;F", 1.1)],
+)
+def test_spin_contamination_cutoff_depends_on_open_shells(elements, expected_cutoff):
+    _, cutoff = spin_contamination(15.8, 8, elements)
+    assert cutoff == expected_cutoff
+
+
+def test_spin_contamination_deviation():
+    # Multiplicity 8 -> S = 3.5 -> S(S+1) = 15.75.
+    deviation, _ = spin_contamination(15.80, 8, "Am;O")
+    assert deviation == pytest.approx(0.05)
+
+
+def test_spin_contamination_missing_inputs():
+    assert spin_contamination(None, 8, "Am;O") == (None, None)
+    assert spin_contamination(15.8, None, "Am;O") == (None, None)
