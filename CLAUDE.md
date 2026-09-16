@@ -298,9 +298,18 @@ above `--force-thresh`) and the spin-contamination deviation
 The scalars are promoted out of the `generator_data` JSON blob into columns at
 extraction time on purpose: the blob is ~3 KB for a small molecule and grows
 per atom, so re-parsing it on every dashboard call would mean a multi-GB scan at
-campaign scale. Rows written before these columns existed have `force_max IS
-NULL` and are re-extracted automatically on the next `--extract-metrics`;
-`s_squared` and friends additionally need `qtaim_generator` installed.
+campaign scale. Rows written before these columns existed have
+`orca_parser_version IS NULL` and are re-extracted automatically on the next
+`--extract-metrics`; `s_squared` and friends additionally need
+`qtaim_generator` installed.
+
+Parsl mode fills all of this **on the fly**: the completion loop in
+`submit_jobs.py` writes the scalars alongside `generator_data` as each job
+finishes, so `--show-quality` is live during a campaign with no extra pass.
+Traditional (per-job batch) mode extracts no metrics inline by design -- the
+dashboard does it afterward. Note `_write_job_update` merges metrics with an
+explicit column list; a new metric must be added there or it is silently
+dropped (which is what happened to `generator_data` before this).
 
 ## Job Status Lifecycle
 

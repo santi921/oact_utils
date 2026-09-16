@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import os
 import random
 import shlex
@@ -29,7 +30,13 @@ from ..utils.analysis import (
 )
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
-from .architector_workflow import ArchitectorWorkflow, JobRecord, JobStatus
+from .architector_workflow import (
+    _QUALITY_COLUMNS,
+    ArchitectorWorkflow,
+    JobRecord,
+    JobStatus,
+)
+from .census import extract_quality_fields
 from .clean import (
     MARKER_ERROR_MESSAGE,
     _process_job,
@@ -178,7 +185,8 @@ def _write_job_update(
         update: Dict with keys job_id (int), status (JobStatus),
             error_message (str | None), increment_fail_count (bool),
             metrics (dict | None -- keys: job_dir, max_forces, scf_steps,
-                     final_energy, wall_time, n_cores).
+                     final_energy, wall_time, n_cores, generator_data, and
+                     the quality scalars in _QUALITY_COLUMNS).
     """
     job_id = update["job_id"]
 
@@ -206,6 +214,8 @@ def _write_job_update(
             "final_energy",
             "wall_time",
             "n_cores",
+            "generator_data",
+            *_QUALITY_COLUMNS,
         ):
             if metrics.get(col) is not None:
                 set_clauses.append(f"{col} = ?")
@@ -2618,6 +2628,8 @@ def submit_batch_parsl(
                             metrics_dict = {
                                 "job_dir": job_dir,
                                 "max_forces": metrics.get("max_forces"),
+                                "force_max": metrics.get("force_max"),
+                                "num_electrons_scf": metrics.get("num_electrons_scf"),
                                 "scf_steps": metrics.get("scf_steps"),
                                 "final_energy": metrics.get("final_energy"),
                                 "wall_time": wall_time,
@@ -2628,6 +2640,9 @@ def submit_batch_parsl(
                                     gen_data = parse_generator_data(job_dir)
                                     if gen_data is not None:
                                         metrics_dict["generator_data"] = gen_data
+                                        metrics_dict.update(
+                                            extract_quality_fields(json.loads(gen_data))
+                                        )
                                 except Exception as e:
                                     print(
                                         f"  Warning: generator parsing failed for job {job_id}: {e}"
