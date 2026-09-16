@@ -8,13 +8,30 @@ to check job progress.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from collections import Counter
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from ..utils.basis import count_basis_functions
 from ..utils.status import check_job_termination, parse_failure_reason
-from .architector_workflow import ArchitectorWorkflow, JobStatus, StatusGroupUpdate
+from .architector_workflow import (
+    _QUALITY_COLUMNS,
+    ArchitectorWorkflow,
+    JobStatus,
+    StatusGroupUpdate,
+)
+from .census import (
+    _S2_THRESH_DEFAULT,
+    _S2_THRESH_HIGH_CONTAM,
+    DEFAULT_FORCE_THRESH_EV_ANG,
+    EH_BOHR_TO_EV_ANG,
+    _quantile,
+    metal_class,
+    pick_metal,
+    spin_contamination,
+)
 from .clean import MARKER_ERROR_MESSAGE, is_marker_blocked
 from .job_dir_patterns import (
     DEFAULT_JOB_DIR_PATTERN,
@@ -312,6 +329,124 @@ def print_metrics_summary(workflow: ArchitectorWorkflow):
         print()
 
 
+def print_quality_summary(
+    workflow: ArchitectorWorkflow,
+    force_thresh_ev_ang: float = DEFAULT_FORCE_THRESH_EV_ANG,
+):
+    """Print the live calculation-quality signals for completed jobs.
+
+    Two distributions, read straight from the stored quality scalars: the
+    per-atom force norm (what the dataset filter thresholds) and the spin
+    contamination deviation (the dominant failure mode in actinide runs).
+    Verdicts are computed here rather than stored, so changing a threshold
+    needs no regrade pass.
+
+    Args:
+        workflow: Open workflow database.
+        force_thresh_ev_ang: fmax cutoff in eV/Angstrom, matching the dataset
+            filter.
+    """
+    cur = workflow._execute_with_retry(
+        """
+        SELECT force_max, s_squared, spin, elements, orca_parser_version
+        FROM structures
+        WHERE status = 'completed'
+        """
+    )
+    rows = cur.fetchall()
+    if not rows:
+        print("\nNo completed jobs yet.")
+        return
+
+    forces: list[float] = []
+    n_over_force = 0
+    deviations: list[float] = []
+    over_cutoff_by_class: Counter = Counter()
+    graded_by_class: Counter = Counter()
+    worst_dev = 0.0
+    no_force = 0
+    no_s2 = 0
+    stale_parser = 0
+
+    for force_max, s_squared, spin, elements, parser_version in rows:
+        if force_max is None:
+            no_force += 1
+        else:
+            ev = force_max * EH_BOHR_TO_EV_ANG
+            forces.append(ev)
+            if ev >= force_thresh_ev_ang:
+                n_over_force += 1
+
+        deviation, cutoff = spin_contamination(s_squared, spin, elements)
+        if deviation is None or cutoff is None:
+            no_s2 += 1
+            continue
+        deviations.append(deviation)
+        worst_dev = max(worst_dev, deviation)
+        mclass = metal_class(pick_metal((elements or "").split(";"))) or "(no metal)"
+        graded_by_class[mclass] += 1
+        if deviation >= cutoff:
+            over_cutoff_by_class[mclass] += 1
+        if parser_version is not None and parser_version < 2:
+            stale_parser += 1
+
+    print_header(f"Calculation Quality (completed jobs: {len(rows):,})")
+
+    if forces:
+        ordered = sorted(forces)
+        over_pct = n_over_force / len(forces) * 100
+        print(f"\nMax force per atom (eV/A, .engrad norm; {len(forces):,} graded):")
+        print(f"  Mean:   {sum(forces) / len(forces):.4f}")
+        print(f"  Median: {_quantile(ordered, 0.5):.4f}")
+        print(f"  p95:    {_quantile(ordered, 0.95):.4f}")
+        print(f"  Max:    {ordered[-1]:.4f}")
+        print(
+            f"  Above {force_thresh_ev_ang:g} eV/A: {n_over_force:,} "
+            f"({over_pct:.2f}%)"
+        )
+    else:
+        print("\nMax force per atom: no force_max values stored yet.")
+
+    if deviations:
+        ordered_dev = sorted(deviations)
+        over_total = sum(over_cutoff_by_class.values())
+        over_pct = over_total / len(deviations) * 100
+        print(f"\nSpin contamination |<S^2> - S(S+1)| ({len(deviations):,} graded):")
+        print(f"  Mean:   {sum(deviations) / len(deviations):.4f}")
+        print(f"  Median: {_quantile(ordered_dev, 0.5):.4f}")
+        print(f"  p95:    {_quantile(ordered_dev, 0.95):.4f}")
+        print(f"  Worst:  {worst_dev:.4f}")
+        print(f"  Over cutoff: {over_total:,} ({over_pct:.2f}%)")
+        print(
+            f"    cutoff {_S2_THRESH_HIGH_CONTAM} for open d/f metals, "
+            f"{_S2_THRESH_DEFAULT} otherwise"
+        )
+        if len(graded_by_class) > 1:
+            for mclass in sorted(graded_by_class):
+                total = graded_by_class[mclass]
+                over = over_cutoff_by_class[mclass]
+                print(
+                    f"    {mclass:<14}{over:>8,} / {total:<8,}"
+                    f"({over / total * 100:5.2f}%)"
+                )
+    else:
+        print("\nSpin contamination: no s_squared values stored yet.")
+
+    if no_force or no_s2:
+        print(
+            f"\nUngraded: {no_force:,} without force_max, {no_s2:,} without s_squared"
+        )
+        print("  Refresh with: --update <job_dir> --extract-metrics")
+        print("  (s_squared also needs qtaim_generator installed)")
+    if stale_parser:
+        print(
+            f"\nNote: {stale_parser:,} rows carry orca_parser_version 1. Their "
+            "beta HOMO-LUMO channel was never parsed; re-run with "
+            "--recompute-metrics to refresh."
+        )
+    print()
+
+
 def print_progress_bar(
     completed: int, total: int, width: int = 50, label: str = "Progress"
 ):
@@ -417,6 +552,7 @@ def _extract_metrics_from_dir(
         parse_generator_data,
         parse_job_metrics,
     )
+    from .census import extract_quality_fields
 
     t0 = time.perf_counter()
 
@@ -429,8 +565,12 @@ def _extract_metrics_from_dir(
 
         cache_hit = metrics.pop("_cache_hit", False)
 
-        result = {
+        # Heterogeneous by construction: metrics, an error string, the
+        # generator JSON blob, and a nested profile dict.
+        result: dict[str, Any] = {
             "max_forces": metrics.get("max_forces"),
+            "force_max": metrics.get("force_max"),
+            "num_electrons_scf": metrics.get("num_electrons_scf"),
             "scf_steps": metrics.get("scf_steps"),
             "final_energy": metrics.get("final_energy"),
             "wall_time": metrics.get("wall_time"),
@@ -445,6 +585,17 @@ def _extract_metrics_from_dir(
             result["generator_data"] = parse_generator_data(
                 job_dir, recompute=recompute
             )
+            # Promote the quality scalars out of the JSON blob into columns.
+            # The blob is ~3 KB for a small molecule and grows per atom, so
+            # re-parsing it on every dashboard call would mean a multi-GB scan
+            # at campaign scale; parsing it once here costs nothing extra.
+            if result["generator_data"] is not None:
+                try:
+                    result.update(
+                        extract_quality_fields(json.loads(result["generator_data"]))
+                    )
+                except (TypeError, ValueError):
+                    pass
 
         if profile:
             result["_profile"] = {
@@ -547,6 +698,9 @@ def _parallel_extract_metrics(
                     "wall_time": result["wall_time"],
                     "n_cores": result["n_cores"],
                 }
+                for col in _QUALITY_COLUMNS:
+                    if result.get(col) is not None:
+                        metrics_entry[col] = result[col]
                 if result.get("generator_data") is not None:
                     metrics_entry["generator_data"] = result["generator_data"]
                 success_metrics.append(metrics_entry)
@@ -1056,10 +1210,15 @@ def backfill_metrics(
         )
     else:
         # Include jobs missing standard metrics OR (when available) missing qtaim data.
+        # force_max is NULL on every row written before the quality columns
+        # existed, so those rows are re-extracted once on the first run after
+        # the upgrade.
         if GENERATOR_AVAILABLE:
-            missing_clause = "max_forces IS NULL OR generator_data IS NULL"
+            missing_clause = (
+                "max_forces IS NULL OR generator_data IS NULL OR force_max IS NULL"
+            )
         else:
-            missing_clause = "max_forces IS NULL"
+            missing_clause = "max_forces IS NULL OR force_max IS NULL"
         cur = workflow._execute_with_retry(
             f"""
             SELECT id, orig_index, elements, charge, spin
@@ -2035,6 +2194,20 @@ def main():
         help="Show computational metrics (forces, SCF steps)",
     )
     parser.add_argument(
+        "--show-quality",
+        action="store_true",
+        help="Show calculation quality: per-atom force distribution and spin "
+        "contamination for completed jobs",
+    )
+    parser.add_argument(
+        "--force-thresh",
+        type=float,
+        default=DEFAULT_FORCE_THRESH_EV_ANG,
+        metavar="EV_ANG",
+        help=f"fmax cutoff in eV/Angstrom for --show-quality, matching the "
+        f"dataset filter (default: {DEFAULT_FORCE_THRESH_EV_ANG:g})",
+    )
+    parser.add_argument(
         "--show-size-breakdown",
         action="store_true",
         help="Show status counts broken down by molecular size (atom-count bins)",
@@ -2316,6 +2489,9 @@ def main():
     # Show metrics if requested
     if args.show_metrics:
         print_metrics_summary(workflow)
+
+    if args.show_quality:
+        print_quality_summary(workflow, force_thresh_ev_ang=args.force_thresh)
 
     # Show chronic failures if requested
     if args.show_chronic_failures:

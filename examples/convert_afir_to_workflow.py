@@ -21,6 +21,12 @@ Adaptations applied on the way in:
    ``ref_energy`` / ``ref_max_force`` so they are not confused with the ORCA
    results that ``final_energy`` / ``max_forces`` will hold.
 
+No pre-run screening here, deliberately. The ``filter_risk`` classifier keys heavily on
+short interatomic contacts (``min_cov_ratio`` is its single most important feature), but an
+AFIR trajectory is a reaction path: compressed bonds are the phenomenon being sampled, not a
+defect. Screening these frames would preferentially discard the transition-state-like
+geometries this corpus exists to collect. See ``oact_utilities/workflows/screening.py``.
+
 Usage:
     python -m examples.convert_afir_to_workflow            # use defaults
     python examples/convert_afir_to_workflow.py --help     # override paths

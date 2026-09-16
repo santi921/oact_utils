@@ -41,6 +41,13 @@ viz = [
 lmdb = [
     "lmdb",
 ]
+# Pre-run structure screening (workflows/screening.py, workflows/filter_model.py).
+# All guarded behind SCREENING_AVAILABLE; the converters run without them.
+classifier = [
+    "xgboost>=2.0",
+    "scikit-learn>=1.3",
+    "joblib>=1.3",
+]
 
 [tool.setuptools.packages.find]
 include = ["oact_utilities*"]

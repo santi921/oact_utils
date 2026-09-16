@@ -15,13 +15,17 @@ from oact_utilities.workflows.census import (
     CONV_NORMAL,
     EH_BOHR_TO_EV_ANG,
     _parse_orig_index,
+    extract_quality_fields,
     force_stats,
     hill_formula,
     metal_class,
     parse_engrad,
     parse_inp,
     pick_metal,
+    quality_filter,
+    read_generator_metrics,
     run_census,
+    spin_contamination,
 )
 
 FILES = Path(__file__).parent / "files"
@@ -924,3 +928,386 @@ def test_metrics_path_wall_time_is_not_clobbered(tmp_path):
     run_census([root], out, fmt="csv", recompute=True)
     row = next(iter(csv.DictReader(open(out))))
     assert float(row["wall_time"]) == pytest.approx(79.073)
+
+
+# ---------------------------------------------------------------------------
+# Quality filter
+# ---------------------------------------------------------------------------
+
+
+def _quality_row(**overrides) -> dict:
+    """A census row that passes the quality filter, before overrides.
+
+    AmO at multiplicity 8: S = 3.5, so S(S+1) = 15.75, and the integrated
+    densities sum to the 43 electrons left after the Am ECP.
+    """
+    row = dict.fromkeys(_FIELD_NAMES)
+    row.update(
+        status="completed",
+        elements="Am;O",
+        spin=8,
+        force_max=0.001,
+        num_electrons_scf=43,
+        s_squared=15.76,
+        n_alpha=25.0,
+        n_beta=18.0,
+        homo_lumo_gap_alpha=0.2,
+        exchange_deviation=False,
+    )
+    row.update(overrides)
+    return row
+
+
+def test_quality_filter_passes_a_clean_job():
+    assert quality_filter(_quality_row()) == (True, None)
+
+
+def test_quality_filter_ignores_jobs_that_did_not_complete():
+    """An unfinished job is not a quality failure."""
+    for status in ("running", "failed", "to_run", "timeout"):
+        assert quality_filter(_quality_row(status=status)) == (None, None)
+
+
+def test_quality_filter_fmax_threshold_is_ev_per_angstrom():
+    """force_max is Eh/Bohr; the threshold is eV/Angstrom."""
+    just_under = 49.0 / EH_BOHR_TO_EV_ANG
+    just_over = 51.0 / EH_BOHR_TO_EV_ANG
+
+    assert quality_filter(_quality_row(force_max=just_under))[0] is True
+    verdict, reason = quality_filter(_quality_row(force_max=just_over))
+    assert verdict is False
+    assert reason == "fmax >= 50 eV/A"
+
+
+def test_quality_filter_honours_force_thresh_argument():
+    row = _quality_row(force_max=10.0 / EH_BOHR_TO_EV_ANG)
+    assert quality_filter(row, force_thresh_ev_ang=5.0)[0] is False
+    assert quality_filter(row, force_thresh_ev_ang=20.0)[0] is True
+
+
+def test_quality_filter_spin_contamination():
+    verdict, reason = quality_filter(_quality_row(s_squared=17.0))
+    assert verdict is False
+    assert reason == "spin contamination"
+
+
+def test_quality_filter_open_d_f_shells_get_the_stricter_cutoff():
+    """0.6 deviation passes at 1.1 but fails the 0.5 cutoff Fe triggers."""
+    deviated = 15.75 + 0.6
+    assert quality_filter(_quality_row(s_squared=deviated))[0] is True
+    verdict, reason = quality_filter(_quality_row(s_squared=deviated, elements="Fe;O"))
+    assert verdict is False
+    assert reason == "spin contamination"
+
+
+def test_quality_filter_electron_count_mismatch():
+    verdict, reason = quality_filter(_quality_row(n_beta=18.5))
+    assert verdict is False
+    assert reason == "electron density inconsistent with SCF electron count"
+
+
+def test_quality_filter_electron_count_uses_numpy_isclose_tolerance():
+    """np.isclose is atol + rtol*|b|, which is 0.00143 at 43 electrons.
+
+    Both spins are shifted together so the sum moves while alpha - beta stays
+    at 7; otherwise the spin-density check fires first and masks the result.
+    """
+    near = _quality_row(n_alpha=25.0006, n_beta=18.0006)  # sum off by 0.0012
+    far = _quality_row(n_alpha=25.001, n_beta=18.001)  # sum off by 0.002
+    assert quality_filter(near)[0] is True
+    assert quality_filter(far) == (
+        False,
+        "electron density inconsistent with SCF electron count",
+    )
+
+
+def test_quality_filter_skips_electron_check_without_nel():
+    """build_dataset treats num_electrons_scf as optional; so do we."""
+    row = _quality_row(num_electrons_scf=None, n_alpha=30.0, n_beta=23.0)
+    assert quality_filter(row)[0] is True
+
+
+def test_quality_filter_spin_density_mismatch():
+    row = _quality_row(num_electrons_scf=None, n_alpha=25.5, n_beta=17.5)
+    verdict, reason = quality_filter(row)
+    assert verdict is False
+    assert reason == "spin density inconsistent with multiplicity"
+
+
+def test_quality_filter_negative_gap_in_either_spin_channel():
+    alpha_bad = quality_filter(_quality_row(homo_lumo_gap_alpha=-0.1))
+    assert alpha_bad == (False, "negative HOMO-LUMO gap")
+
+    # Only reachable once qtaim_generator reads the SPIN DOWN block.
+    beta_bad = quality_filter(_quality_row(homo_lumo_gap_beta=-0.1))
+    assert beta_bad == (False, "negative HOMO-LUMO gap")
+
+
+def test_quality_filter_exchange_deviation_warning():
+    verdict, reason = quality_filter(_quality_row(exchange_deviation=True))
+    assert verdict is False
+    assert reason == "exchange deviation warning"
+
+
+@pytest.mark.parametrize(
+    "missing,reason",
+    [
+        ({"force_max": None}, "missing: forces"),
+        ({"s_squared": None}, "missing: s_squared"),
+        ({"spin": None}, "missing: multiplicity"),
+        ({"n_alpha": None}, "missing: integrated densities"),
+        ({"homo_lumo_gap_alpha": None}, "missing: homo-lumo gap"),
+    ],
+)
+def test_quality_filter_reports_what_is_missing(missing, reason):
+    assert quality_filter(_quality_row(**missing)) == (False, reason)
+
+
+# ---------------------------------------------------------------------------
+# Generator cache
+# ---------------------------------------------------------------------------
+
+
+_GEN_OK = json.dumps(
+    {
+        "s_squared": 15.76,
+        "n_alpha": 25.0,
+        "n_beta": 18.0,
+        "homo_lumo_gap_eh": 0.2,
+        "warnings": ["Old DensityContainer found on disk"],
+    }
+)
+
+
+def test_read_generator_metrics_absent_is_empty(tmp_path):
+    job = _write_job(tmp_path, "job_1", inp=_INP_AMO)
+    assert read_generator_metrics(job, ["orca.inp"]) == {}
+
+
+def test_read_generator_metrics_corrupt_is_empty(tmp_path):
+    job = _write_job(tmp_path, "job_1", extra={"generator_metrics.json": "not json {{"})
+    assert read_generator_metrics(job, ["generator_metrics.json"]) == {}
+
+
+def _quality_corpus(tmp_path: Path) -> Path:
+    """job_1 has a generator cache and passes; job_2 has none."""
+    root = tmp_path / "jobs"
+    root.mkdir(parents=True)
+    grad = [0.001, 0.0, 0.0, 0.0005, 0.0, 0.0]
+    engrad = _engrad(-670.5, grad, [(95, 0.0, 0.0, 0.0), (8, 3.5, 0.0, 0.0)])
+    _write_job(
+        root,
+        "job_1",
+        inp=_INP_AMO,
+        out=_OUT_DONE,
+        engrad=engrad,
+        extra={"generator_metrics.json": _GEN_OK},
+    )
+    _write_job(root, "job_2", inp=_INP_AMO, out=_OUT_DONE, engrad=engrad)
+    return root
+
+
+def test_run_census_grades_quality_end_to_end(tmp_path):
+    root = _quality_corpus(tmp_path)
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([root], out, fmt="csv")
+
+    rows = {r["job_name"]: r for r in csv.DictReader(open(out))}
+
+    graded = rows["job_1"]
+    assert graded["quality_pass"] == "True"
+    assert graded["quality_reason"] == ""
+    assert float(graded["s_squared"]) == pytest.approx(15.76)
+    assert float(graded["n_alpha"]) == pytest.approx(25.0)
+    assert float(graded["n_beta"]) == pytest.approx(18.0)
+    assert float(graded["homo_lumo_gap_alpha"]) == pytest.approx(0.2)
+    assert graded["homo_lumo_gap_beta"] == ""
+    assert graded["exchange_deviation"] == "False"
+
+    # No generator cache, so nothing to grade against.
+    assert rows["job_2"]["quality_pass"] == "False"
+    assert rows["job_2"]["quality_reason"] == "missing: s_squared"
+
+    assert summary.quality_pass == 1
+    assert summary.quality_fail == 1
+    assert summary.quality_reasons["missing: s_squared"] == 1
+
+
+def test_run_census_no_quality_leaves_the_columns_empty(tmp_path):
+    root = _quality_corpus(tmp_path)
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([root], out, fmt="csv", with_quality=False)
+
+    rows = {r["job_name"]: r for r in csv.DictReader(open(out))}
+    assert rows["job_1"]["quality_pass"] == ""
+    assert rows["job_1"]["s_squared"] == ""
+    assert summary.quality_pass == 0
+    assert summary.quality_fail == 0
+
+
+def test_run_census_no_forces_makes_the_fmax_check_unanswerable(tmp_path):
+    """--no-forces means no engrad read at all, so fmax is unknown."""
+    root = _quality_corpus(tmp_path)
+    out = tmp_path / "census.csv"
+    run_census([root], out, fmt="csv", with_forces=False)
+
+    rows = {r["job_name"]: r for r in csv.DictReader(open(out))}
+    assert rows["job_1"]["quality_reason"] == "missing: forces"
+
+
+# ---------------------------------------------------------------------------
+# Generator parser versions
+# ---------------------------------------------------------------------------
+
+
+def _gen_job(root: Path, name: str, generator: dict) -> None:
+    """A completed AmO job carrying the given generator cache."""
+    _write_job(
+        root,
+        name,
+        inp=_INP_AMO,
+        out=_OUT_DONE,
+        engrad=_engrad(
+            -670.5,
+            [0.001, 0.0, 0.0, 0.0005, 0.0, 0.0],
+            [(95, 0.0, 0.0, 0.0), (8, 3.5, 0.0, 0.0)],
+        ),
+        extra={"generator_metrics.json": json.dumps(generator)},
+    )
+
+
+def test_generator_v2_per_spin_gaps_are_read_not_the_flat_key(tmp_path):
+    """Version 2 redefined the flat key as the spin-agnostic frontier.
+
+    The flat value here is negative while both per-spin gaps are positive, so
+    reading the flat key would fail the job for the wrong reason.
+    """
+    root = tmp_path / "jobs"
+    root.mkdir(parents=True)
+    _gen_job(
+        root,
+        "job_1",
+        {
+            "orca_parser_version": 2,
+            "s_squared": 15.76,
+            "n_alpha": 25.0,
+            "n_beta": 18.0,
+            "homo_lumo_gap_eh": -0.05,
+            "homo_lumo_gap_eh_alpha": 0.227034,
+            "homo_lumo_gap_eh_beta": 0.321290,
+            "warnings": [],
+        },
+    )
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([root], out, fmt="csv")
+
+    row = next(iter(csv.DictReader(open(out))))
+    assert row["orca_parser_version"] == "2"
+    assert float(row["homo_lumo_gap_alpha"]) == pytest.approx(0.227034)
+    assert float(row["homo_lumo_gap_beta"]) == pytest.approx(0.321290)
+    assert row["quality_pass"] == "True"
+    assert summary.quality_stale_parser == 0
+
+
+def test_generator_v1_flat_key_is_the_alpha_gap(tmp_path):
+    """An unstamped cache is version 1, where the flat key did mean alpha."""
+    root = tmp_path / "jobs"
+    root.mkdir(parents=True)
+    _gen_job(
+        root,
+        "job_1",
+        {
+            "s_squared": 15.76,
+            "n_alpha": 25.0,
+            "n_beta": 18.0,
+            "homo_lumo_gap_eh": 0.227034,
+            "warnings": [],
+        },
+    )
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([root], out, fmt="csv")
+
+    row = next(iter(csv.DictReader(open(out))))
+    assert row["orca_parser_version"] == "1"
+    assert float(row["homo_lumo_gap_alpha"]) == pytest.approx(0.227034)
+    assert row["homo_lumo_gap_beta"] == ""
+    assert row["quality_pass"] == "True"
+    # Surfaced, because the beta channel went unchecked.
+    assert summary.quality_stale_parser == 1
+
+
+def test_generator_v2_negative_beta_gap_is_caught(tmp_path):
+    """The case version 1 could not see at all."""
+    root = tmp_path / "jobs"
+    root.mkdir(parents=True)
+    _gen_job(
+        root,
+        "job_1",
+        {
+            "orca_parser_version": 2,
+            "s_squared": 15.76,
+            "n_alpha": 25.0,
+            "n_beta": 18.0,
+            "homo_lumo_gap_eh_alpha": 0.227034,
+            "homo_lumo_gap_eh_beta": -0.01,
+            "warnings": [],
+        },
+    )
+    out = tmp_path / "census.csv"
+    run_census([root], out, fmt="csv")
+
+    row = next(iter(csv.DictReader(open(out))))
+    assert row["quality_pass"] == "False"
+    assert row["quality_reason"] == "negative HOMO-LUMO gap"
+
+
+def test_extract_quality_fields_empty_cache():
+    assert extract_quality_fields({}) == {}
+
+
+def test_extract_quality_fields_v2_keys():
+    fields = extract_quality_fields(
+        {
+            "orca_parser_version": 2,
+            "s_squared": 6.0,
+            "n_alpha": 32.0,
+            "n_beta": 28.0,
+            "homo_lumo_gap_eh": -0.05,
+            "homo_lumo_gap_eh_alpha": 0.278931,
+            "homo_lumo_gap_eh_beta": 0.428205,
+            "warnings": ["final exchange deviates considerably from the"],
+        }
+    )
+    assert fields["orca_parser_version"] == 2
+    assert fields["homo_lumo_gap_alpha"] == pytest.approx(0.278931)
+    assert fields["homo_lumo_gap_beta"] == pytest.approx(0.428205)
+    assert fields["exchange_deviation"] is True
+
+
+def test_extract_quality_fields_v1_defaults_to_flat_key():
+    fields = extract_quality_fields({"homo_lumo_gap_eh": 0.2, "s_squared": 6.0})
+    assert fields["orca_parser_version"] == 1
+    assert fields["homo_lumo_gap_alpha"] == pytest.approx(0.2)
+    assert fields["homo_lumo_gap_beta"] is None
+    # No warnings key at all, so the column stays unknown rather than False.
+    assert "exchange_deviation" not in fields
+
+
+@pytest.mark.parametrize(
+    "elements,expected_cutoff",
+    [("Am;O", 1.1), ("Fe;O", 0.5), ("Ce;O", 0.5), ("Np;F;F;F", 1.1)],
+)
+def test_spin_contamination_cutoff_depends_on_open_shells(elements, expected_cutoff):
+    _, cutoff = spin_contamination(15.8, 8, elements)
+    assert cutoff == expected_cutoff
+
+
+def test_spin_contamination_deviation():
+    # Multiplicity 8 -> S = 3.5 -> S(S+1) = 15.75.
+    deviation, _ = spin_contamination(15.80, 8, "Am;O")
+    assert deviation == pytest.approx(0.05)
+
+
+def test_spin_contamination_missing_inputs():
+    assert spin_contamination(None, 8, "Am;O") == (None, None)
+    assert spin_contamination(15.8, None, "Am;O") == (None, None)

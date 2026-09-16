@@ -181,3 +181,50 @@ def test_parse_final_energy_missing_file():
     energy = parse_final_energy("/nonexistent/file.out")
 
     assert energy is None
+
+
+def test_num_electrons_scf_is_ecp_aware_direct(orca_direct_dir):
+    """NEL is parsed from the output, not derived from the geometry.
+
+    AmO sums to Z=103 but the Am ECP replaces 60 core electrons, so the SCF
+    runs with 43. Any geometry-derived count would be wrong by the ECP size.
+    """
+    if not (orca_direct_dir / "logs").exists():
+        pytest.skip("Test data directory not found")
+
+    metrics = parse_job_metrics(str(orca_direct_dir), recompute=True)
+    assert metrics["num_electrons_scf"] == 43
+
+
+def test_num_electrons_scf_is_ecp_aware_quacc(quacc_dir):
+    """NpF3 sums to Z=120; def-ECP on Np leaves 60 electrons in the SCF."""
+    if not (quacc_dir / "orca.out.gz").exists():
+        pytest.skip("Test data directory not found")
+
+    metrics = parse_job_metrics(str(quacc_dir), unzip=True, recompute=True)
+    assert metrics["num_electrons_scf"] == 60
+
+
+def test_force_max_is_per_atom_norm_not_component(quacc_dir):
+    """force_max (engrad per-atom norm) is a different quantity to max_forces.
+
+    max_forces here is ORCA's MAX gradient *component* from the output; the
+    norm is always >= the largest component.
+    """
+    if not (quacc_dir / "orca.engrad.gz").exists():
+        pytest.skip("Test data directory not found")
+
+    metrics = parse_job_metrics(str(quacc_dir), unzip=True, recompute=True)
+
+    assert metrics["force_max"] == pytest.approx(0.004533063634215315)
+    assert metrics["max_forces"] == pytest.approx(0.0045012181)
+    assert metrics["force_max"] > metrics["max_forces"]
+
+
+def test_force_max_found_with_prefixed_engrad(orca_direct_dir):
+    """Direct runs name the engrad after the input (AmO_orca.engrad)."""
+    if not (orca_direct_dir / "AmO_orca.engrad").exists():
+        pytest.skip("Test data directory not found")
+
+    metrics = parse_job_metrics(str(orca_direct_dir), recompute=True)
+    assert metrics["force_max"] == pytest.approx(0.00012826976843802347)

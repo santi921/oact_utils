@@ -255,6 +255,13 @@ SQLite table `structures` with WAL mode for concurrent access:
 | `wall_time`     | REAL       | Wall time in seconds                                                                              |
 | `n_cores`       | INTEGER    | CPU cores used                                                                                    |
 | `n_basis`       | INTEGER    | Basis-function count (derived from `elements` at insert; drives memory/worker sizing)             |
+| `force_max`     | REAL       | Largest per-atom gradient norm from `.engrad` (Eh/Bohr) -- the quantity the dataset filter thresholds |
+| `num_electrons_scf` | INTEGER | Exact SCF electron count from the `NEL` line (ECP-aware)                                       |
+| `s_squared`     | REAL       | `<S^2>` expectation value (from `generator_metrics.json`)                                         |
+| `n_alpha` / `n_beta` | REAL  | Grid-integrated alpha / beta electron densities                                                    |
+| `homo_lumo_gap_alpha` / `homo_lumo_gap_beta` | REAL | Per-spin HOMO-LUMO gaps (Eh)                                                 |
+| `exchange_deviation` | INTEGER | 1 when the output carried the exchange-deviation warning                                         |
+| `orca_parser_version` | INTEGER | qtaim parser version that produced the quality scalars (1 = alpha channel only)                 |
 | `error_message` | TEXT       | Error message if failed                                                                           |
 | `fail_count`    | INTEGER    | Retry counter (incremented on reset)                                                              |
 | `worker_id`     | TEXT       | Scheduler job ID owning this molecule (SLURM/Flux ID), used for crash recovery                    |
@@ -277,6 +284,23 @@ Inspect the distribution with `dashboard.py --show-basis` before choosing `--max
 `--non-actinide-basis` overridden, stores a count for the default basis, not the one it ran.
 For `--simple-input pm3` (semiempirical, no Gaussian basis) `n_basis` is meaningless -- that
 path bypasses `get_mem_estimate` and hardcodes `%maxcore 512` anyway.
+
+**Quality scalars (`force_max`, `s_squared`, ...)**: the DB stores the
+*measurements*, never the pass/fail verdict. The filter rules live in
+`census.quality_filter` and run at display time, so changing a threshold or a
+check regrades every historical row for free -- no migration, no backfill pass,
+and no rows left graded under rules nobody remembers. `dashboard.py
+--show-quality` prints the two live signals that matter during a campaign: the
+per-atom force distribution (mean / median / p95 / max, and the fraction at or
+above `--force-thresh`) and the spin-contamination deviation
+`|<S^2> - S(S+1)|` against its element-dependent cutoff, split by metal class.
+
+The scalars are promoted out of the `generator_data` JSON blob into columns at
+extraction time on purpose: the blob is ~3 KB for a small molecule and grows
+per atom, so re-parsing it on every dashboard call would mean a multi-GB scan at
+campaign scale. Rows written before these columns existed have `force_max IS
+NULL` and are re-extracted automatically on the next `--extract-metrics`;
+`s_squared` and friends additionally need `qtaim_generator` installed.
 
 ## Job Status Lifecycle
 
@@ -421,6 +445,8 @@ python -m oact_utilities.workflows.dashboard <db> [options]
 --show-running               # Currently running jobs
 --show-chronic-failures N    # Jobs failed N+ times
 --show-basis                 # Basis-function distribution (drives memory/worker sizing)
+--show-quality               # Per-atom force distribution + spin contamination (completed jobs)
+--force-thresh EV_ANG        # fmax cutoff for --show-quality (default: 50 eV/Angstrom)
 
 # Status updates
 --update <job_dir>           # Scan directory for completions
@@ -546,8 +572,9 @@ DB can supply (`id`, `fail_count`, `worker_id`, `generator_data`, `source_db`).
 | directory name | `orig_index` | free |
 | `orca.inp` (or `.inp.gz`) | `elements`, `formula`, `natoms`, `charge`, `spin`, `n_basis`, `metal`, `metal_class`, `ligand_elements`, `n_ligand_types`, `functional`, `simple_input`, `nprocs_requested` | free |
 | `.do_not_rerun.json` | `marker`, `purge_type`, and the `failure_reason` / `scf_steps` recorded before the purge | free |
-| `orca.out` (or `.out.gz`) | `status`, `termination_code`, `failure_reason`, `scf_steps`, `wall_time`, `n_cores`, `final_energy`, `max_forces`, `sella_steps`, `metal_{mulliken,loewdin}_{charge,spin}`, `charge_conserved`, `spin_conserved` | expensive; uses the `orca_metrics.json` cache |
+| `orca.out` (or `.out.gz`) | `status`, `termination_code`, `failure_reason`, `scf_steps`, `wall_time`, `n_cores`, `final_energy`, `max_forces`, `num_electrons_scf`, `sella_steps`, `metal_{mulliken,loewdin}_{charge,spin}`, `charge_conserved`, `spin_conserved` | expensive; uses the `orca_metrics.json` cache |
 | `orca.engrad` (or `.engrad.gz`) | `engrad_energy`, `force_{max,mean,median}`, `metal_force`, `ligand_force_{max,mean}`, `n_neighbors`, `neighbor_force_{max,mean}`, `frac_conv_{tight,normal,loose}` | cheap |
+| `generator_metrics.json` | `s_squared`, `n_alpha`, `n_beta`, `homo_lumo_gap_{alpha,beta}`, `exchange_deviation`, `orca_parser_version`, and the derived `quality_pass` / `quality_reason` | cheap (one small JSON); never triggers a qtaim parse |
 
 **Census CLI reference:**
 
@@ -562,9 +589,11 @@ python -m oact_utilities.workflows.census <root> [<root> ...] -o out.parquet [op
 --format {parquet,sqlite,csv}   # default parquet; falls back to sqlite without pyarrow
 --chunk-size N           # rows buffered before each flush (default: 20000)
 
-# What to extract (both tiers are ON by default)
+# What to extract (all three tiers are ON by default)
 --no-forces              # skip orca.engrad (no energies/forces/neighbor stats)
 --no-metrics             # skip the full orca.out read (no scf_steps/wall_time/n_cores/populations)
+--no-quality             # skip generator_metrics.json and the dataset quality filter
+--force-thresh EV_ANG    # quality filter fmax cutoff (default: 50 eV/Angstrom)
 --recompute              # bypass each job's orca_metrics.json cache
 --neighbor-cutoff ANG    # metal coordination radius (default: 4.0)
 
@@ -612,6 +641,35 @@ a merge that re-ingested a shard -- notably `--merge <dir>` on a directory that
 already holds a previous merge output. Keep merge outputs outside the shard
 directory. The `root` column survives a merge, so a combined table can still be
 grouped per source root.
+
+**Dataset quality filter.** `census.quality_filter()` mirrors `quality_filter`
+in `data/v4_model_dev/build_dataset.py` (same checks, same order, same
+thresholds), so a census predicts how much of a corpus survives into a training
+set without exporting it first. Per completed job it records `quality_pass` and,
+on a failure, the `quality_reason` the dataset build would attribute; the
+running count prints pass rate, reason breakdown, and pass rate per metal class.
+Three caveats:
+
+- fmax uses `force_max` (the `orca.engrad` per-atom norm) converted with
+  `EH_BOHR_TO_EV_ANG`, so `--no-forces` grades everything `missing: forces`.
+- the HOMO-LUMO check sees only the spin channels `generator_metrics.json`
+  recorded, which depends on `orca_parser_version`. Version 2 reads both spin
+  blocks and supplies `homo_lumo_gap_eh_{alpha,beta}`. Version 1 (an unstamped
+  cache) read only `SPIN UP ORBITALS`, so its flat `homo_lumo_gap_eh` is the
+  alpha gap and a beta-only aufbau violation is invisible; census reads the flat
+  key only in that case and the running count says how many rows were graded
+  that way. Note the flat key changed meaning in version 2 -- it is the
+  spin-agnostic frontier (lowest virtual over both channels minus highest
+  occupied over both), not alpha -- so it must never be read as alpha on a
+  stamped cache. Refresh a version 1 job with
+  `parse_generator_data(recompute=True)`.
+- the energy/linref filter is not reproducible per job: it needs a fit over the
+  whole set.
+
+A corpus whose campaign ran without `qtaim_generator` installed has no
+`generator_metrics.json` files and grades as `missing: s_squared`. Census only
+reads that cache, it never creates it -- generating one is a second full read of
+`orca.out` per job, via `analysis.parse_generator_data`.
 
 **Purged jobs are `failed`, not `to_run`.** When a job carries a
 `.do_not_rerun.json` marker (written by `clean.py --purge-failed` or

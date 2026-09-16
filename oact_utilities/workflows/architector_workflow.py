@@ -50,6 +50,23 @@ class StatusGroupUpdate(TypedDict, total=False):
     only_if_status: JobStatus
 
 
+# Per-job quality scalars extracted from the ORCA output and the qtaim
+# generator cache. Measurements only: the pass/fail rules live in
+# census.quality_filter and run at display time, so changing a threshold never
+# leaves stale verdicts in the table.
+_QUALITY_COLUMNS = (
+    "force_max",
+    "num_electrons_scf",
+    "s_squared",
+    "n_alpha",
+    "n_beta",
+    "homo_lumo_gap_alpha",
+    "homo_lumo_gap_beta",
+    "exchange_deviation",
+    "orca_parser_version",
+)
+
+
 @dataclass
 class JobRecord:
     """Represents a single job in the workflow."""
@@ -219,6 +236,18 @@ class ArchitectorWorkflow:
             "worker_id": "ALTER TABLE structures ADD COLUMN worker_id TEXT DEFAULT NULL",
             "generator_data": "ALTER TABLE structures ADD COLUMN generator_data TEXT DEFAULT NULL",
             "n_basis": "ALTER TABLE structures ADD COLUMN n_basis INTEGER DEFAULT NULL",
+            # Quality scalars. Measurements, not verdicts: the pass/fail rules
+            # live in census.quality_filter and are applied at display time, so
+            # a rule change never leaves stale judgements in the table.
+            "force_max": "ALTER TABLE structures ADD COLUMN force_max REAL DEFAULT NULL",
+            "num_electrons_scf": "ALTER TABLE structures ADD COLUMN num_electrons_scf INTEGER DEFAULT NULL",
+            "s_squared": "ALTER TABLE structures ADD COLUMN s_squared REAL DEFAULT NULL",
+            "n_alpha": "ALTER TABLE structures ADD COLUMN n_alpha REAL DEFAULT NULL",
+            "n_beta": "ALTER TABLE structures ADD COLUMN n_beta REAL DEFAULT NULL",
+            "homo_lumo_gap_alpha": "ALTER TABLE structures ADD COLUMN homo_lumo_gap_alpha REAL DEFAULT NULL",
+            "homo_lumo_gap_beta": "ALTER TABLE structures ADD COLUMN homo_lumo_gap_beta REAL DEFAULT NULL",
+            "exchange_deviation": "ALTER TABLE structures ADD COLUMN exchange_deviation INTEGER DEFAULT NULL",
+            "orca_parser_version": "ALTER TABLE structures ADD COLUMN orca_parser_version INTEGER DEFAULT NULL",
         }
         for col_name, alter_sql in migrations.items():
             if col_name not in existing_cols:
@@ -517,6 +546,7 @@ class ArchitectorWorkflow:
         n_cores: int | None = None,
         generator_data: str | None = None,
         n_basis: int | None = None,
+        **quality: float | int | bool | None,
     ):
         """Update job metrics (forces, SCF steps, etc).
 
@@ -531,7 +561,14 @@ class ArchitectorWorkflow:
             n_cores: Number of CPU cores used.
             generator_data: JSON string from qtaim_generator parse_orca_output.
             n_basis: Number of basis functions for the structure.
+            **quality: Any column in ``_QUALITY_COLUMNS``. An unknown keyword
+                raises, so a typo cannot silently drop a metric.
         """
+        unknown = set(quality) - set(_QUALITY_COLUMNS)
+        if unknown:
+            raise TypeError(
+                f"update_job_metrics got unexpected keyword(s): {sorted(unknown)}"
+            )
         updates: list[str] = []
         # Mixed str/int/float column values bound as SQL parameters.
         values: list[object] = []
@@ -563,6 +600,10 @@ class ArchitectorWorkflow:
         if n_basis is not None:
             updates.append("n_basis = ?")
             values.append(n_basis)
+        for col in _QUALITY_COLUMNS:
+            if quality.get(col) is not None:
+                updates.append(f"{col} = ?")
+                values.append(quality[col])
 
         if updates:
             updates.append("updated_at = CURRENT_TIMESTAMP")
@@ -576,7 +617,8 @@ class ArchitectorWorkflow:
 
         Each dict in metrics_list must have a 'job_id' key and may have:
         job_dir, max_forces, scf_steps, final_energy, error_message,
-        wall_time, n_cores, generator_data, n_basis.
+        wall_time, n_cores, generator_data, n_basis, and any of the quality
+        scalars in ``_QUALITY_COLUMNS``.
 
         Every write also stamps ``updated_at``. To set derived metadata on
         finished jobs without disturbing their completion timestamps, use a
@@ -603,6 +645,7 @@ class ArchitectorWorkflow:
                 "n_cores",
                 "generator_data",
                 "n_basis",
+                *_QUALITY_COLUMNS,
             ):
                 if metrics.get(col) is not None:
                     updates.append(f"{col} = ?")

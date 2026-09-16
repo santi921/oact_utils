@@ -31,11 +31,25 @@ Adaptations applied before building the DB:
 4. ``info["charge"]`` is copied to a ``charge`` column.
 5. The remaining ``info`` keys are carried through as extra DB columns.
 
+Optional pre-run screening: ``--screen-with filter_risk`` scores each structure with the
+v4 filter classifier before it is written, recording the probability that the filter would
+discard the result. ``--screen-mode filter`` also drops the rejects. This corpus is squarely
+inside that model's training domain (architector-style actinide complexes), which is why
+screening is wired here and not into every converter.
+
 Usage:
     python examples/convert_lmdb_to_workflow.py                      # single DB
     python examples/convert_lmdb_to_workflow.py --split-names a b c  # sharded DBs
     python examples/convert_lmdb_to_workflow.py --max-atoms 120      # size cut
     python examples/convert_lmdb_to_workflow.py --help               # override paths
+
+    # score every structure, drop nothing
+    python examples/convert_lmdb_to_workflow.py \\
+        --screen-with filter_risk --screen-bundle data/v4_model_dev
+
+    # also drop the structures the model rejects
+    python examples/convert_lmdb_to_workflow.py \\
+        --screen-with filter_risk --screen-bundle data/v4_model_dev --screen-mode filter
 """
 
 from __future__ import annotations
@@ -50,6 +64,11 @@ from ase import Atoms
 
 from oact_utilities.utils.architector import create_workflow_db, parse_xyz_elements
 from oact_utilities.workflows import ArchitectorWorkflow, JobStatus
+from oact_utilities.workflows.screening import (
+    add_screening_args,
+    apply_screening,
+    screening_extra_columns,
+)
 
 # Default paths for this campaign. Override on the CLI if needed.
 DEFAULT_LMDB = Path(
@@ -278,7 +297,10 @@ def filter_by_natoms(df: pd.DataFrame, max_atoms: int | None) -> pd.DataFrame:
 
 
 def build_workflow(
-    lmdb_path: Path, db_path: Path, max_atoms: int | None = None
+    lmdb_path: Path,
+    db_path: Path,
+    max_atoms: int | None = None,
+    screen_args: argparse.Namespace | None = None,
 ) -> Path:
     """Read the LMDB, adapt its schema, and create one workflow DB.
 
@@ -286,11 +308,21 @@ def build_workflow(
         lmdb_path: Path to the LMDB of pickled ASE Atoms.
         db_path: Output SQLite database path.
         max_atoms: Keep only structures with ``natoms <= max_atoms``.
+        screen_args: Parsed CLI namespace carrying the ``--screen-*`` options. ``None``
+            or a namespace without ``--screen-with`` means no screening.
 
     Returns:
         Path to the created database.
     """
     df = filter_by_natoms(prepare_dataframe(lmdb_to_dataframe(lmdb_path)), max_atoms)
+    df, _ = apply_screening(
+        df,
+        screen_args,
+        geometry_column=GEOMETRY_COLUMN,
+        charge_column=CHARGE_COLUMN,
+        spin_column=SPIN_COLUMN,
+        metal_column="metal",
+    )
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -300,7 +332,7 @@ def build_workflow(
         geometry_column=GEOMETRY_COLUMN,
         charge_column=CHARGE_COLUMN,
         spin_column=SPIN_COLUMN,
-        extra_columns=EXTRA_COLUMNS,
+        extra_columns={**EXTRA_COLUMNS, **screening_extra_columns(screen_args)},
     )
 
     workflow = ArchitectorWorkflow(db_path)
@@ -328,6 +360,7 @@ def build_split_workflows(
     fractions: list[float] | None = None,
     seed: int = 42,
     max_atoms: int | None = None,
+    screen_args: argparse.Namespace | None = None,
 ) -> list[Path]:
     """Split the LMDB across several independent workflow DBs.
 
@@ -370,6 +403,16 @@ def build_split_workflows(
         raise ValueError(f"fractions must sum to 1.0, got {total_frac:.6f}.")
 
     df = filter_by_natoms(prepare_dataframe(lmdb_to_dataframe(lmdb_path)), max_atoms)
+    # Screen before sharding so every shard carries the same annotation, and a filtered
+    # run drops the same structures it would have dropped in single-DB mode.
+    df, _ = apply_screening(
+        df,
+        screen_args,
+        geometry_column=GEOMETRY_COLUMN,
+        charge_column=CHARGE_COLUMN,
+        spin_column=SPIN_COLUMN,
+        metal_column="metal",
+    )
     n = len(df)
 
     counts = [int(round(f * n)) for f in fractions]
@@ -446,7 +489,11 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help="Keep only structures with natoms <= N. Applied before sharding.",
     )
-    return parser.parse_args()
+    add_screening_args(parser)
+    args = parser.parse_args()
+    if args.screen_with and args.screen_bundle is None:
+        parser.error("--screen-with requires --screen-bundle PATH")
+    return args
 
 
 if __name__ == "__main__":
@@ -460,6 +507,7 @@ if __name__ == "__main__":
             fractions=args.split_fractions,
             seed=args.seed,
             max_atoms=args.max_atoms,
+            screen_args=args,
         )
     else:
-        build_workflow(args.lmdb, args.db, max_atoms=args.max_atoms)
+        build_workflow(args.lmdb, args.db, max_atoms=args.max_atoms, screen_args=args)

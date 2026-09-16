@@ -120,6 +120,67 @@ CONV_LOOSE = 3e-3
 # neighbor_cutoff recorded in the force_baselines DBs.
 DEFAULT_NEIGHBOR_CUTOFF_ANG = 4.0
 
+# Quality filter. Mirrors quality_filter() in data/v4_model_dev/build_dataset.py
+# so a census predicts how much of a corpus survives into a training set without
+# exporting it first. Thresholds and check order are kept identical on purpose.
+DEFAULT_FORCE_THRESH_EV_ANG = 50.0
+GENERATOR_CACHE_FILENAME = "generator_metrics.json"
+# qtaim_generator stamps orca_parser_version on every non-empty result; absent
+# means version 1. Version 2 reads both spin blocks, adds per-spin frontier
+# keys, and redefines the flat homo_lumo_gap_eh as the spin-agnostic frontier
+# (lowest virtual over both channels minus highest occupied over both), so the
+# flat key can only be read as the alpha gap on a version 1 cache.
+GENERATOR_PARSER_VERSION_PER_SPIN = 2
+
+# Elements whose open d/f shells warrant the stricter S^2 deviation cutoff.
+_HIGH_CONTAM_ELEMENTS = frozenset(
+    {
+        # Group 4-11 transition metals
+        "Ti",
+        "V",
+        "Cr",
+        "Mn",
+        "Fe",
+        "Co",
+        "Ni",
+        "Cu",
+        "Zr",
+        "Nb",
+        "Mo",
+        "Tc",
+        "Ru",
+        "Rh",
+        "Pd",
+        "Ag",
+        "Hf",
+        "Ta",
+        "W",
+        "Re",
+        "Os",
+        "Ir",
+        "Pt",
+        "Au",
+        # Lanthanides with partially-filled f shells
+        "Ce",
+        "Pr",
+        "Nd",
+        "Pm",
+        "Sm",
+        "Eu",
+        "Ho",
+        "Er",
+        "Tm",
+        "Yb",
+    }
+)
+_S2_THRESH_HIGH_CONTAM = 0.5
+_S2_THRESH_DEFAULT = 1.1
+# np.isclose defaults, since build_dataset compares with np.isclose(atol=0.001):
+# the tolerance is atol + rtol * |b|, which is looser than atol alone at 60
+# electrons (0.0016) and matters for the electron-count check.
+_ISCLOSE_RTOL = 1e-5
+_ISCLOSE_ATOL = 1e-3
+
 _ACTINIDES = frozenset(ACTINIDE_LIST)
 
 # Metal centre picking is tiered rather than a plain highest-Z scan so that a
@@ -219,6 +280,18 @@ _FIELDS: tuple[tuple[str, str], ...] = (
     ("frac_conv_tight", "float"),
     ("frac_conv_normal", "float"),
     ("frac_conv_loose", "float"),
+    # electronic-structure quality. num_electrons_scf comes from orca.out via
+    # the metrics tier; the rest from the generator_metrics.json cache.
+    ("num_electrons_scf", "int"),
+    ("s_squared", "float"),
+    ("n_alpha", "float"),
+    ("n_beta", "float"),
+    ("homo_lumo_gap_alpha", "float"),
+    ("homo_lumo_gap_beta", "float"),
+    ("exchange_deviation", "bool"),
+    ("orca_parser_version", "int"),
+    ("quality_pass", "bool"),
+    ("quality_reason", "str"),
 )
 _FIELD_NAMES = tuple(name for name, _ in _FIELDS)
 
@@ -602,6 +675,192 @@ def _metal_population(
     return out
 
 
+def _as_float(value: object) -> float | None:
+    """Coerce a JSON value to float, or None when it is not a number."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _isclose(a: float, b: float) -> bool:
+    """``numpy.isclose(a, b)`` with its default tolerances, without numpy."""
+    return abs(a - b) <= _ISCLOSE_ATOL + _ISCLOSE_RTOL * abs(b)
+
+
+def read_generator_metrics(job_dir: Path, names: list[str]) -> dict:
+    """Read the qtaim generator cache from a job directory, if it is there.
+
+    Only reads ``generator_metrics.json`` when it already exists; it never
+    triggers a fresh qtaim parse. That parse is a second full read of
+    ``orca.out`` per job, which would multiply the cost of a cold scan. A
+    corpus whose campaign ran without qtaim_generator installed simply has no
+    quality columns.
+
+    Args:
+        job_dir: The job directory.
+        names: ``os.listdir(job_dir)``, already taken by the caller.
+
+    Returns:
+        The parsed dict, or an empty dict when absent or unreadable.
+    """
+    if GENERATOR_CACHE_FILENAME not in names:
+        return {}
+    try:
+        with open(job_dir / GENERATOR_CACHE_FILENAME, errors="replace") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def extract_quality_fields(gen: dict) -> dict:
+    """Pull the quality-filter inputs out of a generator cache dict.
+
+    Version 2 of the qtaim parser reads both spin blocks and supplies
+    ``homo_lumo_gap_eh_{alpha,beta}``. Version 1 (an unstamped cache) read only
+    ``SPIN UP ORBITALS``, so its flat ``homo_lumo_gap_eh`` is the alpha gap.
+    The flat key changed meaning in version 2 -- it became the spin-agnostic
+    frontier -- so it must never be read as alpha on a stamped cache.
+
+    Args:
+        gen: The parsed ``generator_metrics.json`` contents.
+
+    Returns:
+        A dict of the quality columns. Empty when ``gen`` is empty.
+    """
+    if not gen:
+        return {}
+
+    version = gen.get("orca_parser_version")
+    version = version if isinstance(version, int) else 1
+
+    if version >= GENERATOR_PARSER_VERSION_PER_SPIN:
+        alpha = gen.get("homo_lumo_gap_eh_alpha")
+        beta = gen.get("homo_lumo_gap_eh_beta")
+    else:
+        alpha, beta = gen.get("homo_lumo_gap_eh"), None
+
+    fields: dict = {
+        "orca_parser_version": version,
+        "s_squared": _as_float(gen.get("s_squared")),
+        "n_alpha": _as_float(gen.get("n_alpha")),
+        "n_beta": _as_float(gen.get("n_beta")),
+        "homo_lumo_gap_alpha": _as_float(alpha),
+        "homo_lumo_gap_beta": _as_float(beta),
+    }
+
+    warns = gen.get("warnings")
+    if isinstance(warns, list):
+        fields["exchange_deviation"] = any(
+            "final exchange deviates considerably" in str(w) for w in warns
+        )
+    return fields
+
+
+def spin_contamination(
+    s_squared: float | None,
+    spin: int | None,
+    elements: str | None,
+) -> tuple[float | None, float | None]:
+    """Deviation of <S^2> from the ideal S(S+1), and the cutoff that applies.
+
+    Args:
+        s_squared: Expectation value of <S^2> from the generator cache.
+        spin: Spin multiplicity (2S+1).
+        elements: Semicolon-separated element symbols.
+
+    Returns:
+        ``(deviation, cutoff)``, or ``(None, None)`` when either input is
+        missing. Open d/f shells get the stricter cutoff.
+    """
+    if s_squared is None or spin is None:
+        return None, None
+    spin_quantum = (spin - 1) / 2
+    cutoff = (
+        _S2_THRESH_HIGH_CONTAM
+        if _HIGH_CONTAM_ELEMENTS & set((elements or "").split(";"))
+        else _S2_THRESH_DEFAULT
+    )
+    return abs(s_squared - spin_quantum * (spin_quantum + 1)), cutoff
+
+
+def quality_filter(
+    row: dict,
+    force_thresh_ev_ang: float = DEFAULT_FORCE_THRESH_EV_ANG,
+) -> tuple[bool | None, str | None]:
+    """Decide whether one census row would survive the dataset quality filter.
+
+    Mirrors ``quality_filter`` in ``data/v4_model_dev/build_dataset.py``,
+    including the order of the checks, so the reason attributed to a row is the
+    one the dataset build would attribute. Two differences are unavoidable:
+
+    - fmax is ``force_max`` (the per-atom gradient norm from ``orca.engrad``,
+      Eh/Bohr) converted to eV/Angstrom, rather than a value carried in an
+      extxyz ``info`` dict.
+    - the HOMO-LUMO check sees only the spin channels the generator cache
+      recorded. Until qtaim_generator reads the SPIN DOWN block, that is alpha
+      alone, so a beta-only aufbau violation is not caught here.
+
+    The energy/linref filter is not reproducible per job: it needs a fit over
+    the whole set.
+
+    Args:
+        row: A census row, populated at least through the forces and quality
+            columns.
+        force_thresh_ev_ang: Drop the structure at or above this fmax.
+
+    Returns:
+        ``(True, None)`` on pass, ``(False, reason)`` on fail, and
+        ``(None, None)`` for a job that did not complete -- an unfinished job
+        is not a quality failure.
+    """
+    if row["status"] != _STATUS_COMPLETED:
+        return None, None
+
+    force_max = row["force_max"]
+    if force_max is None:
+        return False, "missing: forces"
+    if force_max * EH_BOHR_TO_EV_ANG >= force_thresh_ev_ang:
+        return False, f"fmax >= {force_thresh_ev_ang:g} eV/A"
+
+    spin, s_squared = row["spin"], row["s_squared"]
+    if spin is None:
+        return False, "missing: multiplicity"
+    if s_squared is None:
+        return False, "missing: s_squared"
+    deviation, cutoff = spin_contamination(s_squared, spin, row["elements"])
+    if deviation is not None and cutoff is not None and deviation >= cutoff:
+        return False, "spin contamination"
+
+    alpha, beta = row["n_alpha"], row["n_beta"]
+    if alpha is None or beta is None:
+        return False, "missing: integrated densities"
+    n_electrons = row["num_electrons_scf"]
+    if n_electrons is not None and not _isclose(alpha + beta, n_electrons):
+        return False, "electron density inconsistent with SCF electron count"
+    if not _isclose(alpha - beta, spin - 1):
+        return False, "spin density inconsistent with multiplicity"
+
+    gaps = [
+        g
+        for g in (row["homo_lumo_gap_alpha"], row["homo_lumo_gap_beta"])
+        if g is not None
+    ]
+    if not gaps:
+        return False, "missing: homo-lumo gap"
+    if not all(g > 0 for g in gaps):
+        return False, "negative HOMO-LUMO gap"
+
+    if row["exchange_deviation"]:
+        return False, "exchange deviation warning"
+
+    return True, None
+
+
 def read_purge_marker(job_dir: Path) -> dict:
     """Read a ``.do_not_rerun.json`` purge marker, or return {} if absent.
 
@@ -674,9 +933,11 @@ def scan_job(
     root: Path,
     with_metrics: bool = True,
     with_forces: bool = True,
+    with_quality: bool = True,
     hours_cutoff: int = 24,
     neighbor_cutoff: float = DEFAULT_NEIGHBOR_CUTOFF_ANG,
     recompute: bool = False,
+    force_thresh_ev_ang: float = DEFAULT_FORCE_THRESH_EV_ANG,
 ) -> dict:
     """Build one census row from a single job directory.
 
@@ -694,10 +955,16 @@ def scan_job(
             final_energy / populations. This is the expensive tier; it uses the
             ``orca_metrics.json`` cache when that cache is fresh.
         with_forces: Read ``orca.engrad`` for energies and force statistics.
+        with_quality: Read the ``generator_metrics.json`` cache and apply the
+            dataset quality filter. Cheap (one small JSON per job) and never
+            triggers a qtaim parse. Needs ``with_forces`` for its fmax check:
+            under ``--no-forces`` every completed job grades as
+            ``missing: forces``.
         hours_cutoff: Hours of inactivity before a job with no termination
             signal is classified as timed out rather than running.
         neighbor_cutoff: Metal coordination radius in Angstrom.
         recompute: Bypass the ``orca_metrics.json`` cache and re-read the output.
+        force_thresh_ev_ang: fmax cutoff for the quality filter.
 
     Returns:
         A dict keyed by ``_FIELD_NAMES``. Unavailable columns are None.
@@ -795,6 +1062,11 @@ def scan_job(
             unzip=unzip,
             hours_cutoff=hours_cutoff,
             recompute=recompute,
+            # Census never wants parse_job_metrics to open the .engrad: with
+            # the force tier on it parses that file itself (a second open per
+            # job is what costs on a latency-bound filesystem), and with
+            # --no-forces the caller asked for no engrad read at all.
+            with_engrad=False,
         )
         row["final_energy"] = metrics.get("final_energy")
         row["scf_steps"] = metrics.get("scf_steps")
@@ -802,6 +1074,7 @@ def scan_job(
         row["n_cores"] = metrics.get("nprocs")
         row["sella_steps"] = metrics.get("sella_steps")
         row["max_forces"] = metrics.get("max_forces")
+        row["num_electrons_scf"] = metrics.get("num_electrons_scf")
         row.update(_metal_population(metrics.get("mulliken_population"), metal))
 
         # parse_job_metrics already determined termination (and cached it), so
@@ -861,6 +1134,13 @@ def scan_job(
         row["max_forces"] = row["force_max"]
     if row["final_energy"] is None:
         row["final_energy"] = row["engrad_energy"]
+
+    if with_quality:
+        gen = read_generator_metrics(job_dir, names)
+        row.update(extract_quality_fields(gen))
+        row["quality_pass"], row["quality_reason"] = quality_filter(
+            row, force_thresh_ev_ang
+        )
 
     return row
 
@@ -1047,6 +1327,11 @@ class Summary:
         self.max_forces: dict[str, array.array] = {}
         self.conv_normal: Counter = Counter()  # metal_class -> jobs at/below 1e-3
         self.conv_total: Counter = Counter()
+        self.quality_pass = 0
+        self.quality_fail = 0
+        self.quality_reasons: Counter = Counter()
+        self.quality_by_class: Counter = Counter()  # (metal_class, pass|fail)
+        self.quality_stale_parser = 0  # graded on a pre-per-spin generator cache
         # A job directory must appear exactly once. A repeat means the roots
         # overlapped (one nested in another) or a merge re-ingested a shard --
         # both silently double-count, so they are surfaced, not swallowed.
@@ -1094,6 +1379,19 @@ class Summary:
             self.conv_total[mclass] += 1
             if mf <= CONV_NORMAL:
                 self.conv_normal[mclass] += 1
+
+        verdict = row["quality_pass"]
+        version = row["orca_parser_version"]
+        if verdict is not None and version is not None:
+            if version < GENERATOR_PARSER_VERSION_PER_SPIN:
+                self.quality_stale_parser += 1
+        if verdict is True:
+            self.quality_pass += 1
+            self.quality_by_class[(mclass, "pass")] += 1
+        elif verdict is False:
+            self.quality_fail += 1
+            self.quality_by_class[(mclass, "fail")] += 1
+            self.quality_reasons[row["quality_reason"] or "unknown"] += 1
 
 
 def _quantile(values: list[float], q: float) -> float:
@@ -1191,6 +1489,32 @@ def _print_report(summary: Summary, top: int = 15) -> None:
                 f"({good / total * 100:5.1f}%)"
             )
 
+    graded = summary.quality_pass + summary.quality_fail
+    if graded:
+        print(f"\n=== Dataset quality filter (completed jobs graded: {graded:,}) ===")
+        pct = summary.quality_pass / graded * 100
+        print(f"  {'pass':<54}{summary.quality_pass:>9,}{pct:>7.1f}%")
+        for reason, count in summary.quality_reasons.most_common():
+            print(f"  {reason[:54]:<54}{count:>9,}{count / graded * 100:>7.1f}%")
+        if summary.quality_stale_parser:
+            print(
+                f"  note: {summary.quality_stale_parser:,} graded on "
+                f"orca_parser_version 1 -- the beta HOMO-LUMO channel was not "
+                f"checked. Re-run parse_generator_data(recompute=True) on those "
+                f"jobs."
+            )
+        classes = sorted({c for c, _ in summary.quality_by_class})
+        if len(classes) > 1:
+            print("  pass rate by metal class:")
+            for mclass in classes:
+                passed = summary.quality_by_class[(mclass, "pass")]
+                total = passed + summary.quality_by_class[(mclass, "fail")]
+                if total:
+                    print(
+                        f"    {mclass:<16}{passed:>9,} / {total:<9,}"
+                        f"({passed / total * 100:5.1f}%)"
+                    )
+
     if summary.duplicate_job_dirs:
         unique = summary.total - summary.duplicate_job_dirs
         print()
@@ -1224,12 +1548,14 @@ def run_census(
     fmt: str = "parquet",
     with_metrics: bool = True,
     with_forces: bool = True,
+    with_quality: bool = True,
     workers: int = 8,
     hours_cutoff: int = 24,
     neighbor_cutoff: float = DEFAULT_NEIGHBOR_CUTOFF_ANG,
     recompute: bool = False,
     limit: int | None = None,
     chunk_size: int = 20000,
+    force_thresh_ev_ang: float = DEFAULT_FORCE_THRESH_EV_ANG,
 ) -> tuple[Summary, Path]:
     """Scan every job directory under ``roots`` and stream one table to disk.
 
@@ -1243,6 +1569,8 @@ def run_census(
         with_metrics: Read ``orca.out`` (scf_steps, wall_time, n_cores,
             populations). The expensive tier.
         with_forces: Read ``orca.engrad`` (energies and force statistics).
+        with_quality: Read ``generator_metrics.json`` and grade each completed
+            job against the dataset quality filter.
         workers: Parallel scan threads.
         hours_cutoff: Running-vs-timeout threshold in hours.
         neighbor_cutoff: Metal coordination radius in Angstrom.
@@ -1265,9 +1593,11 @@ def run_census(
             root,
             with_metrics=with_metrics,
             with_forces=with_forces,
+            with_quality=with_quality,
             hours_cutoff=hours_cutoff,
             neighbor_cutoff=neighbor_cutoff,
             recompute=recompute,
+            force_thresh_ev_ang=force_thresh_ev_ang,
         )
 
     progress = (
@@ -1575,6 +1905,25 @@ def main() -> None:
         "which costs a full decompress that the cache would have avoided.",
     )
     tiers.add_argument(
+        "--no-quality",
+        action="store_true",
+        help="Skip the generator_metrics.json read and the dataset quality "
+        "filter: no s_squared / integrated densities / HOMO-LUMO / quality_pass "
+        "columns. The quality tier is on by default and costs one small JSON "
+        "read per job; it never triggers a qtaim parse, so a corpus whose "
+        "campaign ran without qtaim_generator installed just grades as "
+        "'missing:' reasons. The fmax check needs the force tier, so "
+        "--no-forces grades every job 'missing: forces'.",
+    )
+    tiers.add_argument(
+        "--force-thresh",
+        type=float,
+        default=DEFAULT_FORCE_THRESH_EV_ANG,
+        metavar="EV_ANG",
+        help=f"Quality filter fmax cutoff in eV/Angstrom; a structure at or "
+        f"above this is dropped (default: {DEFAULT_FORCE_THRESH_EV_ANG:g})",
+    )
+    tiers.add_argument(
         "--recompute",
         action="store_true",
         help="Bypass each job's orca_metrics.json cache and re-read orca.out",
@@ -1673,12 +2022,14 @@ def main() -> None:
         fmt=args.format,
         with_metrics=not args.no_metrics,
         with_forces=not args.no_forces,
+        with_quality=not args.no_quality,
         workers=args.workers,
         hours_cutoff=args.hours_cutoff,
         neighbor_cutoff=args.neighbor_cutoff,
         recompute=args.recompute,
         limit=args.debug,
         chunk_size=args.chunk_size,
+        force_thresh_ev_ang=args.force_thresh,
     )
     _print_report(summary, top=args.top)
 
