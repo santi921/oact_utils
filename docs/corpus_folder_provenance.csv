@@ -1,15 +1,38 @@
-host,folder,n_jobs,job_dir_pattern,job_prefix,source_db,match_key,matched,runner_up,notes
-barfoot,20260722-actinide-push,13564,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk01.db,idx+charge+spin+formula,13564,0,
-barfoot,20260812-actinide-push,13447,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk13.db,idx+charge+spin+formula,13447,0,
-barfoot,20260828-actinide-push,13360,{hostname}_{prefix}_{formula}_q{charge}_m{spin}_idx{orig_index},20260820,data/downselect_results/optimized_batch_2/optimized_b2_actinides_max110_chunk01.db,idx+charge+spin+formula,13360,0,carries --job-prefix
-barfoot,wave1,36122,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,examples/4_06/actinides_dod_47106_chunk1.db,idx+charge+spin+formula,36122,1,source DB has dropped-metal bug
-carpenter,08052026-nonactinide-push,5804,{hostname}_job_{orig_index},,data/oact_dbs/pull_04_27_26/ritwik_2026-02-21_09-49-34_actinides_dod.db,idx+charge+spin,5804,170,MISLABELED: 100% actinide; source DB has dropped-metal bug
-carpenter,08122026-nonactinide-push,14414,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_non_actinides_max100_chunk01.db,idx+charge+spin+formula,14414,0,
-carpenter,20260708-actinide-push,0,,,UNRESOLVED,,,,not in corpus; jobs still tarred under archives/jobs and deferred during the merge
-carpenter,20260722-actinide-transfer,13554,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk11.db,idx+charge+spin+formula,13554,0,
-carpenter,20260828-actinide-push,3713,{hostname}_{prefix}_{formula}_q{charge}_m{spin}_idx{orig_index},20260821,data/downselect_results/optimized_batch_2/optimized_b2_actinides_max110_chunk02.db,idx+charge+spin+formula,3713,0,carries --job-prefix
-carpenter,wave1_carpenter_act,31400,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,examples/4_06/actinides_dod_47106_chunk0.db,idx+charge+spin+formula,31400,1,source DB has dropped-metal bug
-raider,20260722-actinide-push,12019,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk03.db,idx+charge+spin+formula,12019,0,
-raider,20260724-actinide-push,3593,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk17.db,idx+charge+spin+formula,3593,0,
-raider,20260812-nonactinide-push,14345,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_non_actinides_max100_chunk03.db,idx+charge+spin+formula,14345,0,
-raider,20260828-actinide-push,12055,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/optimized_batch_2/optimized_b2_actinides_max110_chunk00.db,idx+charge+spin+formula,12055,0,
+label,provenance_class,folder,subroot,n_jobs,source_db,matched,runner_up,job_path_parent
+4_06_dod_chunk1_act,act,wave1,barfoot,36122,examples/4_06/actinides_dod_47106_chunk1.db,36122,611,/lus/eagle/projects/BLASTNet/barfoot/wave1
+4_06_dod_chunk0_act,act,wave1_carpenter_act,carpenter,31400,examples/4_06/actinides_dod_47106_chunk0.db,31400,602,/lus/eagle/projects/BLASTNet/carpenter/wave1_carpenter_act
+4_06_tuo_nonact,nonact,nonact_4_06,nonact_4_06,29458,examples/4_06/non_actinides_tuo_33744.db,29458,29458,/lus/eagle/projects/BLASTNet/nonact_4_06/jobs_parsl
+4_06_tuo_chunk1_act,act,act_4_06,act_4_06_chunk_1,23629,examples/4_06/actinides_tuo_39829_chunk1.db,23629,23629,/lus/eagle/projects/oact/4_06/act_4_06_chunk_1/jobs_parsl_backup
+2_21_dod_act [ritwik_226],act,ritwik_226,ritwik_226,18988,examples/santi_results_compiled_2026-02-21_09-49-34_actinides_dod.db,18988,18988,/lus/eagle/projects/oact/226/ritwik_226/jobs_parsl
+2_26_santi_act,act,act_226_santi,act_226_santi,18669,examples/new_2026-02-26_actinides_tuo_santi.db,18669,18669,/lus/eagle/projects/BLASTNet/act_226_santi/jobs_parsl
+2_26_michael_act,act,act_226_michael,act_226_michael,17368,examples/new_2026-02-26_actinides_tuo_michael.db,17368,17368,/lus/eagle/projects/oact/226/act_226_michael/jobs_parsl
+5_31_chunk01_nonact,nonact,08122026-nonactinide-push,carpenter,14414,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_non_actinides_max100_chunk01.db,14414,99,/lus/eagle/projects/BLASTNet/carpenter/08122026-nonactinide-push
+5_31_chunk03_nonact,nonact,20260812-nonactinide-push,raider,14345,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_non_actinides_max100_chunk03.db,14345,79,/lus/eagle/projects/BLASTNet/raider/20260812-nonactinide-push
+4_06_tuo_chunk0_act,act,act_4_06,act_4_06_chunk_0,14193,examples/4_06/actinides_tuo_39829_chunk0.db,14193,14193,/lus/eagle/projects/BLASTNet/act_4_06_chunk_0/jobs_parsl
+5_31_chunk01_act,act,20260722-actinide-push,barfoot,13564,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk01.db,13564,396,/lus/eagle/projects/BLASTNet/barfoot/20260722-actinide-push
+5_31_chunk11_act,act,20260722-actinide-transfer,carpenter,13554,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk11.db,13554,44,/lus/eagle/projects/BLASTNet/carpenter/20260722-actinide-transfer
+5_31_chunk13_act,act,20260812-actinide-push,barfoot,13447,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk13.db,13447,50,/lus/eagle/projects/BLASTNet/barfoot/20260812-actinide-push
+20260828_push_barfoot,act,20260828-actinide-push,barfoot,13360,data/downselect_results/optimized_batch_2/optimized_b2_actinides_max110_chunk01.db,13360,306,/lus/eagle/projects/BLASTNet/barfoot/20260828-actinide-push
+5_31_chunk05_nonact,nonact,nonact_531,nonact_531_chunk05,12176,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_non_actinides_max100_chunk05.db,12176,100,/lus/eagle/projects/oact/531/nonact_531_chunk05/jobs_parsl
+20260828_push_raider,act,20260828-actinide-push,raider,12055,data/downselect_results/optimized_batch_2/optimized_b2_actinides_max110_chunk00.db,12055,302,/lus/eagle/projects/BLASTNet/raider/20260828-actinide-push
+5_31_chunk03_act,act,20260722-actinide-push,raider,12019,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk03.db,12019,57,/lus/eagle/projects/BLASTNet/raider/20260722-actinide-push
+5_31_chunk00_nonact,nonact,nonact_531,nonact_531_chunk0,11815,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_non_actinides_max100_chunk00.db,11815,405,/lus/eagle/projects/BLASTNet/sandia/nonact_531_chunk0/jobs_parsl
+4_06_dod_chunk4_act,act,act_406,act_406_chunk4,11434,examples/4_06/actinides_dod_47106_chunk4.db,11434,11434,/lus/eagle/projects/BLASTNet/sandia/act_406_chunk4/jobs_parsl
+afir_v1_chunk02,act,afir_v1,afir_v1_02,11373,data/afir_v1/afir_v1_chunk02.db,11373,11373,/lus/eagle/projects/oact/sandia/afir_v1/afir_v1_02
+5_31_chunk02_act,act,act_531,act_531_chunk02,10889,data/oact_dbs/0623_pull/selected_v2_actinides_max100_chunk02.db,10889,10889,/lus/eagle/projects/BLASTNet/sandia/act_531_chunk02/jobs_parsl
+5_31_chunk07_act,act,act_531,act_531_chunk07,10620,data/oact_dbs/0623_pull/selected_v2_actinides_max100_chunk07.db,10620,10620,/lus/eagle/projects/BLASTNet/sandia/act_531_chunk07/jobs_parsl
+5_31_chunk12_act,act,act_531,act_531_chunk12,10516,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk12.db,10516,40,/lus/eagle/projects/oact/531/act_531_chunk12/jobs_parsl
+5_31_chunk15_act,act,act_531,act_531_chunk15,10102,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk15.db,10102,191,/lus/eagle/projects/oact/531/act_531_chunk15/jobs_parsl
+5_31_chunk16_act,act,act_531,act_531_chunk16,10021,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk16.db,10021,317,/lus/eagle/projects/oact/531/act_531_chunk16/jobs_parsl
+2_21_tuo_act,act,act_222_santi,act_222_santi,9841,examples/santi_results_compiled_2026-02-21_09-49-34_actinides_tuo.db,9841,9841,/lus/eagle/projects/BLASTNet/act_222_santi/jobs_parsl
+entropy_0804_chunk0,mixed,entropy_grad,entropy_grad_0,9085,data/oact_dbs/optimized_structures_entropy_0804_ishan_chunk0.db,9085,9085,/lus/eagle/projects/oact/sandia/entropy_grad/entropy_grad_0
+5_31_chunk14_act,act,act_531,act_531_chunk14,9045,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk14.db,9045,35,/lus/eagle/projects/oact/531/act_531_chunk14/jobs_parsl
+2_21_tuo_nonact,nonact,nonact_222_santi,nonact_222_santi,7811,examples/santi_results_compiled_2026-02-21_09-49-34_non_actinides_tuo.db,7811,7811,/lus/eagle/projects/BLASTNet/nonact_222_santi/jobs_parsl
+entropy_0804_chunk1,mixed,entropy_grad,entropy_grad_1,7435,data/oact_dbs/optimized_structures_entropy_0804_ishan_chunk1.db,7435,7435,/lus/eagle/projects/oact/sandia/entropy_grad/entropy_grad_1
+5_31_chunk06_nonact,nonact,nonact_531,nonact_531_chunk06,7357,data/oact_dbs/0623_pull/selected_v2_non_actinides_max100_chunk06.db,7357,7357,/lus/eagle/projects/oact/531/nonact_531_chunk06/jobs_parsl
+5_31_chunk10_act,act,act_531,act_531_chunk10,6203,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk10.db,6203,21,/lus/eagle/projects/oact/531/act_531_chunk10/jobs_parsl
+2_21_dod_act [carpenter],act,08052026-nonactinide-push,carpenter,5804,examples/santi_results_compiled_2026-02-21_09-49-34_actinides_dod.db,5804,5804,/lus/eagle/projects/BLASTNet/carpenter/08052026-nonactinide-push
+20260828_push_carpenter,act,20260828-actinide-push,carpenter,3713,data/downselect_results/optimized_batch_2/optimized_b2_actinides_max110_chunk02.db,3713,86,/lus/eagle/projects/BLASTNet/carpenter/20260828-actinide-push
+5_31_chunk17_act,act,20260724-actinide-push,raider,3593,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk17.db,3593,109,/lus/eagle/projects/BLASTNet/raider/20260724-actinide-push
+2_26_michael_nonact,nonact,nonact_226_michael,nonact_226_michael,495,examples/new_2026-02-26_non_actinides_tuo_michael.db,495,495,/lus/eagle/projects/BLASTNet/nonact_226_michael/jobs_parsl
+2_26_santi_nonact,nonact,nonact_226_santi,nonact_226_santi,58,examples/new_2026-02-26_non_actinides_tuo_santi.db,58,58,/lus/eagle/projects/BLASTNet/nonact_226_santi/jobs_parsl
