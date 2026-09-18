@@ -1,0 +1,15 @@
+host,folder,n_jobs,job_dir_pattern,job_prefix,source_db,match_key,matched,runner_up,notes
+barfoot,20260722-actinide-push,13564,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk01.db,idx+charge+spin+formula,13564,0,
+barfoot,20260812-actinide-push,13447,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk13.db,idx+charge+spin+formula,13447,0,
+barfoot,20260828-actinide-push,13360,{hostname}_{prefix}_{formula}_q{charge}_m{spin}_idx{orig_index},20260820,data/downselect_results/optimized_batch_2/optimized_b2_actinides_max110_chunk01.db,idx+charge+spin+formula,13360,0,carries --job-prefix
+barfoot,wave1,36122,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,examples/4_06/actinides_dod_47106_chunk1.db,idx+charge+spin+formula,36122,1,source DB has dropped-metal bug
+carpenter,08052026-nonactinide-push,5804,{hostname}_job_{orig_index},,data/oact_dbs/pull_04_27_26/ritwik_2026-02-21_09-49-34_actinides_dod.db,idx+charge+spin,5804,170,MISLABELED: 100% actinide; source DB has dropped-metal bug
+carpenter,08122026-nonactinide-push,14414,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_non_actinides_max100_chunk01.db,idx+charge+spin+formula,14414,0,
+carpenter,20260708-actinide-push,0,,,UNRESOLVED,,,,not in corpus; jobs still tarred under archives/jobs and deferred during the merge
+carpenter,20260722-actinide-transfer,13554,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk11.db,idx+charge+spin+formula,13554,0,
+carpenter,20260828-actinide-push,3713,{hostname}_{prefix}_{formula}_q{charge}_m{spin}_idx{orig_index},20260821,data/downselect_results/optimized_batch_2/optimized_b2_actinides_max110_chunk02.db,idx+charge+spin+formula,3713,0,carries --job-prefix
+carpenter,wave1_carpenter_act,31400,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,examples/4_06/actinides_dod_47106_chunk0.db,idx+charge+spin+formula,31400,1,source DB has dropped-metal bug
+raider,20260722-actinide-push,12019,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk03.db,idx+charge+spin+formula,12019,0,
+raider,20260724-actinide-push,3593,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_actinides_max100_chunk17.db,idx+charge+spin+formula,3593,0,
+raider,20260812-nonactinide-push,14345,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/chunked_dbs/v2_downselect/selected_v2_non_actinides_max100_chunk03.db,idx+charge+spin+formula,14345,0,
+raider,20260828-actinide-push,12055,{hostname}_{formula}_q{charge}_m{spin}_idx{orig_index},,data/downselect_results/optimized_batch_2/optimized_b2_actinides_max110_chunk00.db,idx+charge+spin+formula,12055,0,
