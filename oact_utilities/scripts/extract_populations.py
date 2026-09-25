@@ -13,7 +13,8 @@ spin populations that ``parse_job_metrics`` already caches in each job's
     One row per atom: coordinates in Angstrom plus ``mulliken_charge``,
     ``mulliken_spin``, ``loewdin_charge``, ``loewdin_spin``.
 
-The source workflow database is never written to. Coordinates come from
+The source workflow database is opened read-only and never written to, not
+even to migrate its schema. Coordinates come from
 ``orca.engrad`` (the geometry the populations were computed at); a job with no
 engrad still gets its populations, with NULL coordinates and
 ``geometry_source = 'none'``.
@@ -61,12 +62,9 @@ import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 
 from oact_utilities.utils.analysis import parse_job_metrics
-from oact_utilities.workflows.architector_workflow import (
-    ArchitectorWorkflow,
-    JobStatus,
-)
 from oact_utilities.workflows.census import (
     BOHR_TO_ANG,
     DEFAULT_FORCE_THRESH_EV_ANG,
@@ -196,6 +194,62 @@ def resolve_job_dir(job_dir: str | None, root_dir: str | Path | None) -> Path | 
     if root_dir is not None:
         return Path(root_dir) / path.name
     return path
+
+
+class JobRow(NamedTuple):
+    """The workflow DB columns this script needs, read without migrating it.
+
+    ``ArchitectorWorkflow`` would be the natural reader, but opening a database
+    through it runs ``_ensure_schema``, which ALTERs in missing columns and
+    rewrites legacy ``ready`` statuses. This script promises not to touch the
+    source, and a read-only mount must not fail it, so it reads the base
+    columns directly instead. They all predate every migration.
+    """
+
+    id: int
+    orig_index: int | None
+    elements: str | None
+    natoms: int | None
+    charge: int | None
+    spin: int | None
+    job_dir: str | None
+    final_energy: float | None
+    max_forces: float | None
+
+
+_JOB_COLUMNS = (
+    "id",
+    "orig_index",
+    "elements",
+    "natoms",
+    "charge",
+    "spin",
+    "job_dir",
+    "final_energy",
+    "max_forces",
+)
+
+_STATUS_COMPLETED = "completed"
+
+
+def read_completed_jobs(db_path: str | Path) -> list[JobRow]:
+    """Read the completed jobs from a workflow DB without writing to it.
+
+    Args:
+        db_path: Path to the workflow SQLite database.
+
+    Returns:
+        One ``JobRow`` per completed job.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            f"SELECT {', '.join(_JOB_COLUMNS)} FROM structures WHERE status = ?",
+            (_STATUS_COMPLETED,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [JobRow(*row) for row in rows]
 
 
 # The quality scalars this script screens on, in the workflow DB and in the
@@ -398,7 +452,10 @@ def extract_job(
         unzip=unzip or any(job_dir.glob("*.out.gz")),
         hours_cutoff=hours_cutoff,
         recompute=recompute,
-        with_engrad=False,
+        # with_engrad=True so the .engrad supplies force_max: passing False
+        # makes parse_job_metrics cache force_max as null, degrading the very
+        # cache the force screen reads on the next run.
+        with_engrad=True,
     )
     if force_max is None:
         parsed_force = metrics.get("force_max")
@@ -471,12 +528,17 @@ _WAVEFUNCTION_SUFFIXES = (".gbw", ".wfn", ".wfx", ".molden.input", ".nbo")
 
 
 def _has_wavefunction(path: Path) -> bool:
-    """True when a copied job directory holds a wavefunction file."""
-    try:
-        names = os.listdir(path)
-    except OSError:
-        return False
-    return any(name.endswith(_WAVEFUNCTION_SUFFIXES) for name in names)
+    """True when a copied job directory holds a wavefunction file.
+
+    Walks subdirectories and looks through a ``.gz`` suffix, since a quacc
+    corpus stores ``orca.gbw.gz`` rather than ``orca.gbw``.
+    """
+    for _root, _dirs, files in os.walk(path):
+        for name in files:
+            stem = name[:-3] if name.endswith(".gz") else name
+            if stem.endswith(_WAVEFUNCTION_SUFFIXES):
+                return True
+    return False
 
 
 def _dir_size(path: Path) -> int:
@@ -762,6 +824,53 @@ def select_jobs(
     return random.Random(seed).sample(pool, n_samples)
 
 
+def _fill_scalar_gaps(
+    jobs: list,
+    scalars: dict[int, dict[str, float | None]],
+    job_dirs: dict[int, Path | None],
+    workers: int,
+    logger: logging.Logger,
+) -> None:
+    """Fill missing ``s_squared`` / ``force_max`` from the per-job caches.
+
+    Mutates ``scalars`` in place. Jobs already carrying both values are
+    skipped, so calling this twice costs nothing the second time.
+
+    Args:
+        jobs: The jobs to fill.
+        scalars: ``{job_id: {"s_squared": ..., "force_max": ...}}``.
+        job_dirs: Resolved directory per job id.
+        workers: Parallel workers for the cache reads.
+        logger: Logger for the progress line.
+    """
+    gaps = [
+        job
+        for job in jobs
+        if scalars[job.id]["s_squared"] is None or scalars[job.id]["force_max"] is None
+    ]
+    if not gaps:
+        return
+
+    logger.info(
+        "Reading per-job caches for %d jobs whose s_squared or force_max is "
+        "missing from the workflow DB...",
+        len(gaps),
+    )
+
+    def _fill(job) -> tuple[float | None, float | None]:
+        job_dir = job_dirs[job.id]
+        return (
+            job_s_squared(job_dir, scalars[job.id]["s_squared"]),
+            job_force_max(job_dir, scalars[job.id]["force_max"]),
+        )
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        filled = list(pool.map(_fill, gaps))
+    for job, (s2, fmax) in zip(gaps, filled):
+        scalars[job.id]["s_squared"] = s2
+        scalars[job.id]["force_max"] = fmax
+
+
 def _prepare_output(
     conn: sqlite3.Connection,
     output_path: str | Path,
@@ -857,7 +966,8 @@ def extract_populations(
     """Sample completed jobs and write their populations to a new database.
 
     Args:
-        db_path: Path to the source workflow SQLite database (read only).
+        db_path: Path to the source workflow SQLite database. Opened
+            read-only; no schema migration is applied to it.
         output_path: Path for the output SQLite database.
         root_dir: Resolve each job to ``<root_dir>/<basename>`` instead of its
             stored ``job_dir``. Use when the corpus has been moved.
@@ -891,8 +1001,7 @@ def extract_populations(
     if logger is None:
         logger = _setup_logger("populations")
 
-    with ArchitectorWorkflow(db_path) as wf:
-        completed = wf.get_jobs_by_status(JobStatus.COMPLETED, include_geometry=False)
+    completed = read_completed_jobs(db_path)
 
     if not completed:
         logger.warning("No completed jobs found in database.")
@@ -919,31 +1028,8 @@ def extract_populations(
         or min_force_ev_ang is not None
     )
     if needs_grading:
-        gaps = [
-            job
-            for job in completed
-            if scalars[job.id]["s_squared"] is None
-            or scalars[job.id]["force_max"] is None
-        ]
-        if gaps:
-            logger.info(
-                "Reading per-job caches for %d jobs whose s_squared or "
-                "force_max is missing from the workflow DB...",
-                len(gaps),
-            )
-
-            def _fill(job) -> tuple[float | None, float | None]:
-                job_dir = job_dirs[job.id]
-                return (
-                    job_s_squared(job_dir, scalars[job.id]["s_squared"]),
-                    job_force_max(job_dir, scalars[job.id]["force_max"]),
-                )
-
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                filled = list(pool.map(_fill, gaps))
-            for job, (s2, fmax) in zip(gaps, filled):
-                scalars[job.id]["s_squared"] = s2
-                scalars[job.id]["force_max"] = fmax
+        # Every candidate has to be graded before the filters can run.
+        _fill_scalar_gaps(completed, scalars, job_dirs, workers, logger)
 
     selected = select_jobs(
         completed,
@@ -962,6 +1048,12 @@ def extract_populations(
     if not selected:
         logger.warning("No jobs left after selection.")
         return 0
+
+    # The pre-selection pass only runs when a filter needs grading, so an
+    # unfiltered sample would otherwise write NULL scalars for jobs whose
+    # values live in the per-job caches rather than the DB columns. Filling
+    # here costs one cache read per *selected* job, not per candidate.
+    _fill_scalar_gaps(selected, scalars, job_dirs, workers, logger)
 
     logger.info(
         "Extracting populations for %d jobs (%d workers)...", len(selected), workers
