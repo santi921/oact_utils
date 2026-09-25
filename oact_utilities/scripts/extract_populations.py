@@ -31,13 +31,32 @@ Usage:
     python -m oact_utilities.scripts.extract_populations workflow.db \\
         -o contaminated.db --root-dir /path/to/jobs --n-samples 100 \\
         --select worst-contamination --summary
+
+    # the 100 worst spin-contaminated jobs that fail the contamination filter
+    python -m oact_utilities.scripts.extract_populations workflow.db \\
+        -o bad_spin.db --root-dir /path/to/jobs -n 100 \\
+        --failing-quality spin --select worst-contamination
+
+    # every completed job that fails the force or spin-contamination filter,
+    # with its whole job directory copied alongside
+    python -m oact_utilities.scripts.extract_populations workflow.db \\
+        -o bad_quality.db --root-dir /path/to/jobs --all \\
+        --failing-quality --copy-jobs /path/to/bad_jobs
+
+    # also copy the sampled job directories somewhere portable
+    python -m oact_utilities.scripts.extract_populations workflow.db \\
+        -o populations.db --root-dir /path/to/jobs --n-samples 100 \\
+        --copy-jobs /path/to/sample_jobs --copy-skip-scratch
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import random
+import shutil
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -50,6 +69,8 @@ from oact_utilities.workflows.architector_workflow import (
 )
 from oact_utilities.workflows.census import (
     BOHR_TO_ANG,
+    DEFAULT_FORCE_THRESH_EV_ANG,
+    EH_BOHR_TO_EV_ANG,
     GENERATOR_CACHE_FILENAME,
     extract_quality_fields,
     metal_class,
@@ -57,6 +78,14 @@ from oact_utilities.workflows.census import (
     pick_metal,
     read_generator_metrics,
     spin_contamination,
+)
+
+# Private, but reusing them keeps --copy-skip-scratch in step with clean.py
+# rather than growing a second copy of the scratch patterns.
+from oact_utilities.workflows.clean import (
+    _BAS_FILE_PATTERNS,
+    _ORCA_TMP_DIR_RE,
+    _TMP_FILE_PATTERNS,
 )
 
 try:
@@ -79,12 +108,14 @@ CREATE TABLE IF NOT EXISTS structures (
     final_energy        REAL,
     max_forces          REAL,
     s_squared           REAL,
+    force_max           REAL,
     spin_contamination  REAL,
     contamination_cutoff REAL,
     n_population_atoms  INTEGER,
     geometry_source     TEXT,
     xyz                 TEXT,
-    parse_note          TEXT
+    parse_note          TEXT,
+    copied_to           TEXT
 )
 """
 
@@ -107,10 +138,10 @@ CREATE TABLE IF NOT EXISTS atoms (
 _INSERT_STRUCTURE = """
 INSERT OR REPLACE INTO structures (
     job_id, orig_index, job_name, job_dir, elements, natoms, charge, spin,
-    metal, metal_class, final_energy, max_forces, s_squared,
+    metal, metal_class, final_energy, max_forces, s_squared, force_max,
     spin_contamination, contamination_cutoff, n_population_atoms,
     geometry_source, xyz, parse_note
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _INSERT_ATOM = """
@@ -167,21 +198,28 @@ def resolve_job_dir(job_dir: str | None, root_dir: str | Path | None) -> Path | 
     return path
 
 
-def read_s_squared_column(db_path: str | Path) -> dict[int, float]:
-    """Read the workflow DB's ``s_squared`` column, keyed by job id.
+# The quality scalars this script screens on, in the workflow DB and in the
+# per-job caches. JobRecord carries neither, so both are raw reads.
+_SCALAR_COLUMNS = ("s_squared", "force_max")
 
-    ``JobRecord`` does not carry the quality scalars, so this is a raw read.
+
+def read_scalar_column(db_path: str | Path, column: str) -> dict[int, float]:
+    """Read one quality scalar from the workflow DB, keyed by job id.
 
     Args:
         db_path: Path to the workflow SQLite database.
+        column: One of ``_SCALAR_COLUMNS``.
 
     Returns:
-        Mapping of job id to ``<S^2>`` for rows where it is not NULL.
+        Mapping of job id to value, for rows where it is not NULL. Empty on a
+        database predating that column.
     """
+    if column not in _SCALAR_COLUMNS:
+        raise ValueError(f"unknown scalar column: {column}")
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = conn.execute(
-            "SELECT id, s_squared FROM structures WHERE s_squared IS NOT NULL"
+            f"SELECT id, {column} FROM structures WHERE {column} IS NOT NULL"
         ).fetchall()
     except sqlite3.OperationalError:
         return {}  # pre-quality-scalar database
@@ -209,6 +247,33 @@ def job_s_squared(job_dir: Path | None, fallback: float | None) -> float | None:
         return None
     gen = read_generator_metrics(job_dir, [GENERATOR_CACHE_FILENAME])
     return extract_quality_fields(gen).get("s_squared")
+
+
+def job_force_max(job_dir: Path | None, fallback: float | None) -> float | None:
+    """Get the per-atom max gradient norm (Eh/Bohr), DB value first.
+
+    Falls back to the job's ``orca_metrics.json``, read plainly rather than
+    through ``read_orca_cache``: this is a selection screen, and re-statting
+    every output to validate a cache would cost more than it saves. The
+    extraction pass that follows uses the real cache logic.
+
+    Args:
+        job_dir: Resolved job directory, or None.
+        fallback: The workflow DB's ``force_max`` for this job, if any.
+
+    Returns:
+        ``force_max`` in Eh/Bohr, or None.
+    """
+    if fallback is not None:
+        return fallback
+    if job_dir is None:
+        return None
+    cache = job_dir / "orca_metrics.json"
+    try:
+        value = json.loads(cache.read_text()).get("force_max")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def _find_engrad(job_dir: Path) -> Path | None:
@@ -269,6 +334,7 @@ def extract_job(
     job,
     job_dir: Path | None,
     s_squared: float | None,
+    force_max: float | None,
     unzip: bool,
     hours_cutoff: float,
     recompute: bool = False,
@@ -279,6 +345,7 @@ def extract_job(
         job: ``JobRecord`` from the workflow DB.
         job_dir: Resolved job directory, or None when the DB has no path.
         s_squared: ``<S^2>`` for this job, or None.
+        force_max: Per-atom max gradient norm (Eh/Bohr) for this job, or None.
         unzip: Force the gzipped-quacc read path. A directory holding a
             ``*.out.gz`` takes it regardless, so a mixed corpus needs no flag.
         hours_cutoff: Timeout threshold handed to ``parse_job_metrics``.
@@ -312,6 +379,7 @@ def extract_job(
             job.final_energy,
             job.max_forces,
             s_squared,
+            force_max,
             deviation,
             cutoff,
             len(population_symbols),
@@ -332,6 +400,10 @@ def extract_job(
         recompute=recompute,
         with_engrad=False,
     )
+    if force_max is None:
+        parsed_force = metrics.get("force_max")
+        force_max = parsed_force if isinstance(parsed_force, float) else None
+
     # parse_job_metrics is annotated as returning scalars, but
     # mulliken_population is the parse_mulliken_population dict.
     population = metrics.get("mulliken_population")
@@ -382,81 +454,381 @@ def extract_job(
     return _row(elements, geometry_source, xyz, note), atom_rows
 
 
+def _scratch_ignore(src: str, names: list[str]) -> list[str]:
+    """``copytree`` ignore callback dropping ORCA scratch files and dirs."""
+    patterns = _TMP_FILE_PATTERNS + _BAS_FILE_PATTERNS
+    return [
+        name
+        for name in names
+        if _ORCA_TMP_DIR_RE.match(name) or any(p.search(name) for p in patterns)
+    ]
+
+
+# Wavefunction files legacy visualizers (Multiwfn, VMD, Chimera) open. Copies
+# are checked for one of these so a missing .gbw is reported, not discovered
+# later in front of the viewer.
+_WAVEFUNCTION_SUFFIXES = (".gbw", ".wfn", ".wfx", ".molden.input", ".nbo")
+
+
+def _has_wavefunction(path: Path) -> bool:
+    """True when a copied job directory holds a wavefunction file."""
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return False
+    return any(name.endswith(_WAVEFUNCTION_SUFFIXES) for name in names)
+
+
+def _dir_size(path: Path) -> int:
+    """Total bytes of a directory tree, ignoring unreadable entries."""
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def copy_job_dirs(
+    pairs: list[tuple[int, Path]],
+    dest_root: str | Path,
+    skip_scratch: bool = False,
+    overwrite: bool = False,
+    workers: int = 8,
+    logger: logging.Logger | None = None,
+) -> dict[int, str]:
+    """Copy whole job directories to ``dest_root/<job_name>``.
+
+    Args:
+        pairs: ``(job_id, source_dir)`` for the jobs to copy.
+        dest_root: Directory to copy into; created if missing.
+        skip_scratch: Drop ORCA scratch (``.tmp``, ``core``, ``.bas*``,
+            ``orca_tmp_*/``) using clean.py's patterns.
+        overwrite: Copy over an existing destination directory instead of
+            leaving it alone.
+        workers: Parallel copy workers.
+        logger: Logger for the per-copy warnings and the total.
+
+    Returns:
+        Mapping of job id to destination path, for every job whose data is at
+        that destination (freshly copied or already there).
+    """
+    if logger is None:
+        logger = _setup_logger("populations")
+
+    dest_root = Path(dest_root)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    ignore = _scratch_ignore if skip_scratch else None
+
+    def _copy(pair: tuple[int, Path]) -> tuple[int, str | None, str, int]:
+        job_id, src = pair
+        dest = dest_root / src.name
+        if dest.exists() and not overwrite:
+            return job_id, str(dest), "existing", 0
+        outcome = "copied"
+        try:
+            # symlinks are dereferenced: a .gbw symlinked into node-local
+            # scratch must arrive as data, not as a dangling link.
+            shutil.copytree(src, dest, ignore=ignore, dirs_exist_ok=True)
+        except shutil.Error as exc:
+            # copytree collects per-file failures (broken symlinks, unreadable
+            # scratch) and raises at the end; the rest of the tree is there.
+            logger.warning("partial copy for %s: %s", src, exc)
+            outcome = "partial"
+        except OSError as exc:
+            logger.warning("copy failed for %s: %s", src, exc)
+            return job_id, None, "failed", 0
+        return job_id, str(dest), outcome, _dir_size(dest)
+
+    logger.info("Copying %d job directories to %s ...", len(pairs), dest_root)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        iterator = pool.map(_copy, pairs)
+        if tqdm is not None:
+            iterator = tqdm(iterator, total=len(pairs), unit="dir")
+        results = list(iterator)
+
+    counts: dict[str, int] = {}
+    total_bytes = 0
+    destinations: dict[int, str] = {}
+    for job_id, dest, outcome, size in results:
+        counts[outcome] = counts.get(outcome, 0) + 1
+        total_bytes += size
+        if dest is not None:
+            destinations[job_id] = dest
+
+    logger.info(
+        "Copied %d dirs (%.2f GB), %d partial, %d already present, %d failed",
+        counts.get("copied", 0),
+        total_bytes / 1e9,
+        counts.get("partial", 0),
+        counts.get("existing", 0),
+        counts.get("failed", 0),
+    )
+
+    no_wavefunction = [
+        d for d in destinations.values() if not _has_wavefunction(Path(d))
+    ]
+    if no_wavefunction:
+        logger.warning(
+            "%d of %d copies hold no %s file (legacy visualization needs one)",
+            len(no_wavefunction),
+            len(destinations),
+            "/".join(_WAVEFUNCTION_SUFFIXES),
+        )
+    return destinations
+
+
+def _grade_job(
+    job,
+    scalars: dict[int, dict[str, float | None]],
+    force_thresh_ev_ang: float,
+) -> tuple[float | None, float | None, bool | None, bool | None]:
+    """Score one job against the force and spin-contamination filters.
+
+    Args:
+        job: ``JobRecord``.
+        scalars: ``{job_id: {"s_squared": ..., "force_max": ...}}``.
+        force_thresh_ev_ang: fmax cutoff in eV/Angstrom.
+
+    Returns:
+        ``(deviation, fmax_ev_ang, spin_fails, force_fails)``. Either verdict
+        is None when the scalar behind it is missing. The comparisons are
+        ``>=``, matching ``census.quality_filter``.
+    """
+    values = scalars.get(job.id, {})
+    deviation, cutoff = spin_contamination(
+        values.get("s_squared"), job.spin, job.elements
+    )
+    spin_fails = None if (deviation is None or cutoff is None) else deviation >= cutoff
+
+    force_max = values.get("force_max")
+    fmax_ev = None if force_max is None else force_max * EH_BOHR_TO_EV_ANG
+    force_fails = None if fmax_ev is None else fmax_ev >= force_thresh_ev_ang
+
+    return deviation, fmax_ev, spin_fails, force_fails
+
+
 def select_jobs(
     jobs: list,
-    s_squared_by_id: dict[int, float],
+    scalars: dict[int, dict[str, float | None]],
     n_samples: int | None,
     select: str,
     seed: int,
     min_contamination: float | None,
     max_contamination: float | None,
     over_cutoff: bool,
+    failing_quality: str | None,
+    min_force_ev_ang: float | None,
+    force_thresh_ev_ang: float,
     logger: logging.Logger,
 ) -> list:
     """Filter and sample the candidate jobs.
 
+    ``failing_quality`` picks which filter a job has to fail: ``"any"`` keeps a
+    job failing either one, ``"force"`` only the fmax check, ``"spin"`` only
+    the contamination check. A job failing the named check is kept whatever the
+    other check says. Every other filter is an AND that narrows further.
+
     Args:
         jobs: Candidate ``JobRecord`` list (completed jobs).
-        s_squared_by_id: ``<S^2>`` per job id, already resolved.
+        scalars: ``{job_id: {"s_squared": ..., "force_max": ...}}``.
         n_samples: Number to keep, or None for all.
-        select: ``random``, ``worst-contamination``, or ``best-contamination``.
-        seed: RNG seed for ``random`` selection.
+        select: ``random``, ``worst-contamination``, ``best-contamination``,
+            ``worst-force``, or ``best-force``.
+        seed: RNG seed for random selection.
         min_contamination: Drop jobs with deviation below this.
         max_contamination: Drop jobs with deviation above this.
-        over_cutoff: Keep only jobs above the element-dependent cutoff.
+        over_cutoff: Keep only jobs at or above the contamination cutoff.
+        failing_quality: ``"any"``, ``"force"``, ``"spin"``, or None to skip
+            this filter.
+        min_force_ev_ang: Drop jobs with fmax below this (eV/Angstrom).
+        force_thresh_ev_ang: fmax cutoff used by ``failing_quality``.
         logger: Logger for the filter breakdown.
 
     Returns:
         The selected jobs.
     """
-    by_contamination = select != "random"
-    needs_contamination = (
-        by_contamination
+    sort_key = {
+        "worst-contamination": "contamination",
+        "best-contamination": "contamination",
+        "worst-force": "force",
+        "best-force": "force",
+    }.get(select)
+
+    needs_grading = (
+        sort_key is not None
+        or failing_quality
         or over_cutoff
         or min_contamination is not None
         or max_contamination is not None
+        or min_force_ev_ang is not None
     )
 
-    if not needs_contamination:
+    if not needs_grading:
         if n_samples is None or n_samples >= len(jobs):
             return jobs
         return random.Random(seed).sample(jobs, n_samples)
 
-    scored: list[tuple[float, object]] = []
-    n_missing = 0
+    kept: list[tuple[float, object]] = []
+    n_ungraded = 0
+    reasons = {"force only": 0, "spin only": 0, "both": 0}
+
     for job in jobs:
-        deviation, cutoff = spin_contamination(
-            s_squared_by_id.get(job.id), job.spin, job.elements
+        deviation, fmax_ev, spin_fails, force_fails = _grade_job(
+            job, scalars, force_thresh_ev_ang
         )
-        if deviation is None:
-            n_missing += 1
-            continue
-        if min_contamination is not None and deviation < min_contamination:
-            continue
-        if max_contamination is not None and deviation > max_contamination:
-            continue
-        if over_cutoff and (cutoff is None or deviation <= cutoff):
-            continue
-        scored.append((deviation, job))
 
-    if n_missing:
+        if failing_quality == "spin":
+            if spin_fails is None:
+                n_ungraded += 1
+                continue
+            if not spin_fails:
+                continue
+        elif failing_quality == "force":
+            if force_fails is None:
+                n_ungraded += 1
+                continue
+            if not force_fails:
+                continue
+        elif failing_quality == "any":
+            if spin_fails is None and force_fails is None:
+                n_ungraded += 1
+                continue
+            if not (spin_fails or force_fails):
+                continue
+
+        if min_contamination is not None and (
+            deviation is None or deviation < min_contamination
+        ):
+            continue
+        if max_contamination is not None and (
+            deviation is None or deviation > max_contamination
+        ):
+            continue
+        if over_cutoff and not spin_fails:
+            continue
+        if min_force_ev_ang is not None and (
+            fmax_ev is None or fmax_ev < min_force_ev_ang
+        ):
+            continue
+
+        if sort_key == "contamination":
+            if deviation is None:
+                n_ungraded += 1
+                continue
+            rank = deviation
+        elif sort_key == "force":
+            if fmax_ev is None:
+                n_ungraded += 1
+                continue
+            rank = fmax_ev
+        else:
+            rank = 0.0
+
+        if failing_quality:
+            if spin_fails and force_fails:
+                reasons["both"] += 1
+            elif force_fails:
+                reasons["force only"] += 1
+            else:
+                reasons["spin only"] += 1
+
+        kept.append((rank, job))
+
+    if n_ungraded:
         logger.info(
-            "%d completed jobs have no <S^2> and were skipped by the "
-            "contamination selection (needs the s_squared column or "
-            "generator_metrics.json)",
-            n_missing,
+            "%d jobs skipped for want of a scalar to grade them on (needs "
+            "s_squared / force_max in the workflow DB, or the per-job caches)",
+            n_ungraded,
         )
-    logger.info("%d jobs pass the contamination filter", len(scored))
+    logger.info("%d jobs pass the selection filters", len(kept))
+    if failing_quality:
+        logger.info(
+            "Failure mode: %s (fmax cutoff %g eV/A)",
+            ", ".join(f"{k}={v}" for k, v in reasons.items()),
+            force_thresh_ev_ang,
+        )
 
-    if by_contamination:
-        scored.sort(key=lambda pair: pair[0], reverse=select == "worst-contamination")
-        selected = [job for _, job in scored]
-        return selected if n_samples is None else selected[:n_samples]
+    if sort_key is not None:
+        kept.sort(key=lambda pair: pair[0], reverse=select.startswith("worst"))
+        ordered = [job for _, job in kept]
+        return ordered if n_samples is None else ordered[:n_samples]
 
-    pool = [job for _, job in scored]
+    pool = [job for _, job in kept]
     if n_samples is None or n_samples >= len(pool):
         return pool
     return random.Random(seed).sample(pool, n_samples)
+
+
+def _prepare_output(
+    conn: sqlite3.Connection,
+    output_path: str | Path,
+    append: bool,
+    logger: logging.Logger,
+) -> None:
+    """Create the output tables, clearing anything already there.
+
+    A rerun with different filters must not leave the previous run's rows
+    behind, so an existing table is emptied unless ``append`` is set. A table
+    written by an older version of this script has a different column set and
+    is rebuilt rather than inserted into.
+
+    Args:
+        conn: Open connection to the output database.
+        output_path: Path, for the log line only.
+        append: Keep existing rows and merge into them.
+        logger: Logger for the replace/merge notice.
+
+    Raises:
+        ValueError: On ``append`` into a table with a stale column set.
+    """
+    existing_tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND "
+            "name IN ('structures', 'atoms')"
+        )
+    }
+
+    if existing_tables:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(structures)")}
+        expected = {
+            line.split()[0]
+            for line in _CREATE_STRUCTURES.split("(", 1)[1].rsplit(")", 1)[0].split(",")
+            if line.strip()
+        }
+        if columns != expected:
+            if append:
+                raise ValueError(
+                    f"{output_path} was written by an older version of this "
+                    "script (different columns); --append cannot merge into it"
+                )
+            logger.info("Rebuilding %s: its schema predates this version", output_path)
+            conn.execute("DROP TABLE IF EXISTS structures")
+            conn.execute("DROP TABLE IF EXISTS atoms")
+            existing_tables = set()
+
+    conn.execute(_CREATE_STRUCTURES)
+    conn.execute(_CREATE_ATOMS)
+
+    if not existing_tables:
+        return
+
+    n_existing = conn.execute("SELECT COUNT(*) FROM structures").fetchone()[0]
+    if not n_existing:
+        return
+    if append:
+        logger.info("Merging into %d rows already in %s", n_existing, output_path)
+    else:
+        logger.info(
+            "Replacing %d rows already in %s (pass --append to keep them)",
+            n_existing,
+            output_path,
+        )
+        conn.execute("DELETE FROM structures")
+        conn.execute("DELETE FROM atoms")
 
 
 def extract_populations(
@@ -469,10 +841,17 @@ def extract_populations(
     min_contamination: float | None = None,
     max_contamination: float | None = None,
     over_cutoff: bool = False,
+    failing_quality: str | None = None,
+    min_force_ev_ang: float | None = None,
+    force_thresh_ev_ang: float = DEFAULT_FORCE_THRESH_EV_ANG,
     workers: int = 8,
     unzip: bool = False,
     hours_cutoff: float = 24.0,
     recompute: bool = False,
+    append: bool = False,
+    copy_jobs: str | Path | None = None,
+    copy_skip_scratch: bool = False,
+    copy_overwrite: bool = False,
     logger: logging.Logger | None = None,
 ) -> int:
     """Sample completed jobs and write their populations to a new database.
@@ -487,12 +866,23 @@ def extract_populations(
         seed: RNG seed for random selection.
         min_contamination: Keep only jobs with deviation at or above this.
         max_contamination: Keep only jobs with deviation at or below this.
-        over_cutoff: Keep only jobs above the element-dependent cutoff.
+        over_cutoff: Keep only jobs at or above the contamination cutoff.
+        failing_quality: Keep only completed jobs failing a quality filter:
+            ``"any"`` (either), ``"force"``, or ``"spin"``.
+        min_force_ev_ang: Keep only jobs with fmax at or above this
+            (eV/Angstrom).
+        force_thresh_ev_ang: fmax cutoff for ``failing_quality``.
         workers: Parallel workers for the per-job reads.
         unzip: Force the gzipped-quacc read path. Auto-detected per job dir,
             so this is only needed for an output named unusually.
         hours_cutoff: Timeout threshold handed to ``parse_job_metrics``.
         recompute: Bypass each job's ``orca_metrics.json`` cache.
+        append: Merge into an existing output database instead of replacing
+            its rows.
+        copy_jobs: Copy each sampled job directory into this directory and
+            record the destination in the ``copied_to`` column.
+        copy_skip_scratch: Drop ORCA scratch from the copies.
+        copy_overwrite: Overwrite an existing destination directory.
         logger: Logger instance.
 
     Returns:
@@ -512,38 +902,61 @@ def extract_populations(
 
     job_dirs = {job.id: resolve_job_dir(job.job_dir, root_dir) for job in completed}
 
-    s_squared_by_id = read_s_squared_column(db_path)
-    needs_contamination = (
+    scalars: dict[int, dict[str, float | None]] = {
+        job.id: {"s_squared": None, "force_max": None} for job in completed
+    }
+    for column in _SCALAR_COLUMNS:
+        for job_id, value in read_scalar_column(db_path, column).items():
+            if job_id in scalars:
+                scalars[job_id][column] = value
+
+    needs_grading = (
         select != "random"
+        or failing_quality is not None
         or over_cutoff
         or min_contamination is not None
         or max_contamination is not None
+        or min_force_ev_ang is not None
     )
-    if needs_contamination:
-        missing = [job for job in completed if job.id not in s_squared_by_id]
-        if missing:
+    if needs_grading:
+        gaps = [
+            job
+            for job in completed
+            if scalars[job.id]["s_squared"] is None
+            or scalars[job.id]["force_max"] is None
+        ]
+        if gaps:
             logger.info(
-                "Reading generator_metrics.json for %d jobs with no s_squared "
-                "in the workflow DB...",
-                len(missing),
+                "Reading per-job caches for %d jobs whose s_squared or "
+                "force_max is missing from the workflow DB...",
+                len(gaps),
             )
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                values = list(
-                    pool.map(lambda job: job_s_squared(job_dirs[job.id], None), missing)
+
+            def _fill(job) -> tuple[float | None, float | None]:
+                job_dir = job_dirs[job.id]
+                return (
+                    job_s_squared(job_dir, scalars[job.id]["s_squared"]),
+                    job_force_max(job_dir, scalars[job.id]["force_max"]),
                 )
-            for job, value in zip(missing, values):
-                if value is not None:
-                    s_squared_by_id[job.id] = value
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                filled = list(pool.map(_fill, gaps))
+            for job, (s2, fmax) in zip(gaps, filled):
+                scalars[job.id]["s_squared"] = s2
+                scalars[job.id]["force_max"] = fmax
 
     selected = select_jobs(
         completed,
-        s_squared_by_id,
+        scalars,
         n_samples,
         select,
         seed,
         min_contamination,
         max_contamination,
         over_cutoff,
+        failing_quality,
+        min_force_ev_ang,
+        force_thresh_ev_ang,
         logger,
     )
     if not selected:
@@ -558,7 +971,8 @@ def extract_populations(
         return extract_job(
             job,
             job_dirs[job.id],
-            s_squared_by_id.get(job.id),
+            scalars[job.id]["s_squared"],
+            scalars[job.id]["force_max"],
             unzip,
             hours_cutoff,
             recompute,
@@ -574,11 +988,31 @@ def extract_populations(
     atom_rows = [atom for _, atoms in results for atom in atoms]
 
     out_conn = sqlite3.connect(str(output_path))
-    out_conn.execute(_CREATE_STRUCTURES)
-    out_conn.execute(_CREATE_ATOMS)
+    _prepare_output(out_conn, output_path, append, logger)
     out_conn.executemany(_INSERT_STRUCTURE, structure_rows)
     out_conn.executemany(_INSERT_ATOM, atom_rows)
     out_conn.commit()
+
+    if copy_jobs is not None:
+        pairs: list[tuple[int, Path]] = []
+        for job in selected:
+            source = job_dirs[job.id]
+            if source is not None and source.is_dir():
+                pairs.append((job.id, source))
+        destinations = copy_job_dirs(
+            pairs,
+            copy_jobs,
+            skip_scratch=copy_skip_scratch,
+            overwrite=copy_overwrite,
+            workers=workers,
+            logger=logger,
+        )
+        out_conn.executemany(
+            "UPDATE structures SET copied_to = ? WHERE job_id = ?",
+            [(dest, job_id) for job_id, dest in destinations.items()],
+        )
+        out_conn.commit()
+
     out_conn.close()
 
     note_counts: dict[str | None, int] = {}
@@ -643,6 +1077,18 @@ def print_summary(db_path: str | Path) -> None:
         ).fetchone()[0]
         print(f"  over element-dependent cutoff: {over}")
 
+    force_row = conn.execute(
+        "SELECT COUNT(*), MIN(force_max), AVG(force_max), MAX(force_max) "
+        "FROM structures WHERE force_max IS NOT NULL"
+    ).fetchone()
+    if force_row[0]:
+        scale = EH_BOHR_TO_EV_ANG
+        print(
+            f"\nMax force per atom (eV/A) -- {force_row[0]} jobs\n"
+            f"  min: {force_row[1] * scale:.4f}  avg: {force_row[2] * scale:.4f}  "
+            f"max: {force_row[3] * scale:.4f}"
+        )
+
     classes = conn.execute(
         "SELECT metal_class, COUNT(*) FROM structures GROUP BY metal_class "
         "ORDER BY COUNT(*) DESC"
@@ -663,6 +1109,12 @@ def print_summary(db_path: str | Path) -> None:
         "SELECT COUNT(*) FROM atoms WHERE loewdin_charge IS NOT NULL"
     ).fetchone()[0]
     print(f"Atoms with Loewdin charges: {loewdin_atoms}")
+
+    copied = conn.execute(
+        "SELECT COUNT(*) FROM structures WHERE copied_to IS NOT NULL"
+    ).fetchone()[0]
+    if copied:
+        print(f"Job directories copied: {copied}")
 
     conn.close()
 
@@ -700,9 +1152,42 @@ def main() -> None:
     )
     parser.add_argument(
         "--select",
-        choices=("random", "worst-contamination", "best-contamination"),
+        choices=(
+            "random",
+            "worst-contamination",
+            "best-contamination",
+            "worst-force",
+            "best-force",
+        ),
         default="random",
         help="How to pick the sample (default: random).",
+    )
+    parser.add_argument(
+        "--failing-quality",
+        nargs="?",
+        const="any",
+        choices=("any", "force", "spin"),
+        default=None,
+        metavar="MODE",
+        help="Keep only completed jobs that FAIL a quality filter. "
+        "'any' (the default when the flag is bare) keeps a job failing either "
+        "check; 'force' keeps fmax >= --force-thresh; 'spin' keeps "
+        "|<S^2> - S(S+1)| >= the element-dependent cutoff.",
+    )
+    parser.add_argument(
+        "--force-thresh",
+        type=float,
+        default=DEFAULT_FORCE_THRESH_EV_ANG,
+        help=f"fmax cutoff in eV/Angstrom for --failing-quality "
+        f"(default: {DEFAULT_FORCE_THRESH_EV_ANG:g}, matching the dataset "
+        "build and dashboard --show-quality).",
+    )
+    parser.add_argument(
+        "--min-force",
+        type=float,
+        default=None,
+        metavar="EV_ANG",
+        help="Keep only jobs with fmax at or above this, in eV/Angstrom.",
     )
     parser.add_argument(
         "--seed",
@@ -725,8 +1210,9 @@ def main() -> None:
     parser.add_argument(
         "--over-cutoff",
         action="store_true",
-        help="Keep only jobs above the element-dependent contamination cutoff "
-        "(0.5 for open d/f metals, 1.1 otherwise).",
+        help="Keep only jobs at or above the element-dependent contamination "
+        "cutoff (0.5 for open d/f metals, 1.1 otherwise). Same filter as "
+        "--failing-quality spin.",
     )
     parser.add_argument(
         "--workers", type=int, default=8, help="Parallel workers (default: 8)."
@@ -742,6 +1228,31 @@ def main() -> None:
         type=float,
         default=24.0,
         help="Timeout threshold in hours for status checks (default: 24).",
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Merge into an existing output database. Without it, a rerun "
+        "replaces the rows already in the output file.",
+    )
+    parser.add_argument(
+        "--copy-jobs",
+        default=None,
+        metavar="DIR",
+        help="Also copy each sampled job directory to DIR/<job_name>. The "
+        "destination is recorded in the copied_to column.",
+    )
+    parser.add_argument(
+        "--copy-skip-scratch",
+        action="store_true",
+        help="With --copy-jobs, skip ORCA scratch (.tmp, core, .bas*, "
+        "orca_tmp_*/) so the copies hold only the result files.",
+    )
+    parser.add_argument(
+        "--copy-overwrite",
+        action="store_true",
+        help="With --copy-jobs, copy over an existing destination directory "
+        "(default: leave it alone).",
     )
     parser.add_argument(
         "--recompute",
@@ -769,10 +1280,17 @@ def main() -> None:
         min_contamination=args.min_contamination,
         max_contamination=args.max_contamination,
         over_cutoff=args.over_cutoff,
+        failing_quality=args.failing_quality,
+        min_force_ev_ang=args.min_force,
+        force_thresh_ev_ang=args.force_thresh,
         workers=args.workers,
         unzip=args.unzip,
         hours_cutoff=args.hours_cutoff,
         recompute=args.recompute,
+        append=args.append,
+        copy_jobs=args.copy_jobs,
+        copy_skip_scratch=args.copy_skip_scratch,
+        copy_overwrite=args.copy_overwrite,
         logger=logger,
     )
 
