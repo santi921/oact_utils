@@ -309,7 +309,15 @@ def get_orca_blocks(
     error_code: int = 0,
     ks_method: str | None = None,
     mem_per_job_mb: int | None = None,
+    trah: bool = False,
 ) -> tuple[str, list[str]]:
+    """Build the ORCA simple-input line and %-blocks for ``atoms``.
+
+    ``trah=True`` removes the ``NoTRAH`` and ``NOSOSCF`` keywords that every
+    template carries, so ORCA falls back to its second-order TRAH solver when
+    DIIS stalls. Use it for SCFs that oscillate from the PModel guess (open-shell
+    4f/5f systems); it costs nothing when DIIS converges on its own.
+    """
 
     if opt:
         if opt_level not in _OPT_LEVEL_KEYWORDS:
@@ -396,6 +404,10 @@ def get_orca_blocks(
     # Replace DIIS with KDIIS in the simple input line if requested
     if diis_option == "KDIIS" and "DIIS" in simple:
         simple[simple.index("DIIS")] = "KDIIS"
+
+    # Let ORCA auto-switch to the TRAH second-order solver when DIIS stalls
+    if trah:
+        simple = [kw for kw in simple if kw not in ("NoTRAH", "NOSOSCF")]
 
     if basis is not None:
         orcasimpleinput = " ".join([functional] + [basis] + simple)
@@ -518,6 +530,7 @@ def write_orca_inputs(
     error_code: int = 0,
     ks_method: str | None = None,
     mem_per_job_mb: int | None = None,
+    trah: bool = False,
 ) -> tuple[str, list[str]]:
     """
     One-off method to be used if you wanted to write inputs for an arbitrary
@@ -556,6 +569,7 @@ def write_orca_inputs(
         diis_option=diis_option,
         ks_method=ks_method,
         mem_per_job_mb=mem_per_job_mb,
+        trah=trah,
     )
 
     # print(orcablocks)

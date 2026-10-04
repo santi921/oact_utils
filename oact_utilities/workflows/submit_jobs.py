@@ -105,6 +105,7 @@ class OrcaConfig(TypedDict, total=False):
     diis_option: str | None
     ks_method: str | None
     mem_per_job_mb: int | None
+    trah: bool
 
 
 DEFAULT_ORCA_CONFIG: OrcaConfig = {
@@ -123,6 +124,7 @@ DEFAULT_ORCA_CONFIG: OrcaConfig = {
     "save_all_steps": False,
     "diis_option": None,
     "ks_method": None,
+    "trah": False,
 }
 
 DEFAULT_ORCA_PATHS = {
@@ -397,6 +399,7 @@ def prepare_job_directory(
             nbo=config.get("nbo", False),
             mbis=config.get("mbis", False),
             diis_option=config.get("diis_option"),
+            trah=config.get("trah", False),
             cores=n_cores,
             opt=use_orca_opt,
             opt_level=config.get("opt_level", "normal"),
@@ -3419,6 +3422,14 @@ def main():
         help="Enable KDIIS SCF convergence acceleration",
     )
     orca_group.add_argument(
+        "--trah",
+        action="store_true",
+        help=(
+            "Drop NoTRAH/NOSOSCF from the simple input so ORCA falls back to the "
+            "TRAH second-order SCF solver when DIIS stalls (open-shell 4f/5f SCFs)"
+        ),
+    )
+    orca_group.add_argument(
         "--optimizer",
         choices=["orca", "sella"],
         default=None,
@@ -3570,6 +3581,7 @@ def main():
         "max_opt_steps": args.max_opt_steps,
         "save_all_steps": args.save_all_steps,
         "diis_option": "KDIIS" if args.kdiis else None,
+        "trah": args.trah,
         "ks_method": args.ks_method,
         "mem_per_job_mb": args.mem_per_job,
     }
