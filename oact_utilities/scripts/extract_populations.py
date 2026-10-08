@@ -11,12 +11,14 @@ spin populations that ``parse_job_metrics`` already caches in each job's
 
 ``atoms``
     One row per atom: coordinates in Angstrom plus ``mulliken_charge``,
-    ``mulliken_spin``, ``loewdin_charge``, ``loewdin_spin``.
+    ``mulliken_spin``, ``loewdin_charge``, ``loewdin_spin``, and the
+    energy gradient ``grad_x``, ``grad_y``, ``grad_z`` in Eh/Bohr straight
+    from ``orca.engrad`` (the force is its negative).
 
 The source workflow database is opened read-only and never written to, not
 even to migrate its schema. Coordinates come from
 ``orca.engrad`` (the geometry the populations were computed at); a job with no
-engrad still gets its populations, with NULL coordinates and
+engrad still gets its populations, with NULL coordinates and gradients and
 ``geometry_source = 'none'``.
 
 Selection is a seeded random sample by default. ``--select`` and the
@@ -129,6 +131,9 @@ CREATE TABLE IF NOT EXISTS atoms (
     mulliken_spin   REAL,
     loewdin_charge  REAL,
     loewdin_spin    REAL,
+    grad_x          REAL,
+    grad_y          REAL,
+    grad_z          REAL,
     PRIMARY KEY (job_id, atom_index)
 )
 """
@@ -145,8 +150,9 @@ INSERT OR REPLACE INTO structures (
 _INSERT_ATOM = """
 INSERT OR REPLACE INTO atoms (
     job_id, atom_index, element, x, y, z,
-    mulliken_charge, mulliken_spin, loewdin_charge, loewdin_spin
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    mulliken_charge, mulliken_spin, loewdin_charge, loewdin_spin,
+    grad_x, grad_y, grad_z
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -343,23 +349,30 @@ def _find_engrad(job_dir: Path) -> Path | None:
     return None
 
 
-def read_geometry(job_dir: Path) -> tuple[list[str], list[tuple[float, float, float]]]:
-    """Read the computed geometry from a job's engrad file, in Angstrom.
+def read_geometry(
+    job_dir: Path,
+) -> tuple[
+    list[str], list[tuple[float, float, float]], list[tuple[float, float, float]]
+]:
+    """Read the computed geometry and gradient from a job's engrad file.
 
     Args:
         job_dir: Resolved job directory.
 
     Returns:
-        ``(symbols, coords)``. Both empty when there is no readable engrad.
+        ``(symbols, coords, gradient)``: coordinates in Angstrom, gradient in
+        Eh/Bohr, one triple per atom. All empty when there is no readable
+        engrad; ``gradient`` alone is empty when the file holds coordinates
+        but no gradient block of matching length.
     """
     engrad = _find_engrad(job_dir)
     if engrad is None:
-        return [], []
+        return [], [], []
     data = parse_engrad(engrad)
     symbols = data.get("symbols") or []
     flat = data.get("coords_bohr") or []
     if not symbols or len(flat) != 3 * len(symbols):
-        return [], []
+        return [], [], []
     coords = [
         (
             flat[3 * i] * BOHR_TO_ANG,
@@ -368,7 +381,16 @@ def read_geometry(job_dir: Path) -> tuple[list[str], list[tuple[float, float, fl
         )
         for i in range(len(symbols))
     ]
-    return symbols, coords
+    grad_flat = data.get("gradient") or []
+    gradient = (
+        [
+            (grad_flat[3 * i], grad_flat[3 * i + 1], grad_flat[3 * i + 2])
+            for i in range(len(symbols))
+        ]
+        if len(grad_flat) == 3 * len(symbols)
+        else []
+    )
+    return symbols, coords, gradient
 
 
 def xyz_text(
@@ -476,7 +498,7 @@ def extract_job(
     loewdin_charges = population.get("loewdin_charges") or []
     loewdin_spins = population.get("loewdin_spins") or []
 
-    geom_symbols, coords = read_geometry(job_dir)
+    geom_symbols, coords, gradient = read_geometry(job_dir)
     note = None
     if not geom_symbols:
         geometry_source = "none"
@@ -484,9 +506,12 @@ def extract_job(
     elif geom_symbols != elements:
         geometry_source = "none"
         coords = []
+        gradient = []
         note = "geometry_mismatch"
     else:
         geometry_source = "engrad"
+        if not gradient:
+            note = "no_gradient"
 
     def _at(values: list, i: int):
         return values[i] if i < len(values) else None
@@ -503,6 +528,9 @@ def extract_job(
             _at(mulliken_spins, i),
             _at(loewdin_charges, i),
             _at(loewdin_spins, i),
+            gradient[i][0] if i < len(gradient) else None,
+            gradient[i][1] if i < len(gradient) else None,
+            gradient[i][2] if i < len(gradient) else None,
         )
         for i, element in enumerate(elements)
     ]
@@ -901,14 +929,23 @@ def _prepare_output(
         )
     }
 
-    if existing_tables:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(structures)")}
-        expected = {
+    def _declared(create_sql: str) -> set[str]:
+        # One column per line; the table-level PRIMARY KEY line is not a column.
+        body = create_sql.split("(", 1)[1].rsplit(")", 1)[0]
+        return {
             line.split()[0]
-            for line in _CREATE_STRUCTURES.split("(", 1)[1].rsplit(")", 1)[0].split(",")
-            if line.strip()
+            for line in body.splitlines()
+            if line.strip() and not line.strip().startswith("PRIMARY KEY")
         }
-        if columns != expected:
+
+    def _stale(table: str, create_sql: str) -> bool:
+        if table not in existing_tables:
+            return False
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        return columns != _declared(create_sql)
+
+    if existing_tables:
+        if _stale("structures", _CREATE_STRUCTURES) or _stale("atoms", _CREATE_ATOMS):
             if append:
                 raise ValueError(
                     f"{output_path} was written by an older version of this "
@@ -1141,9 +1178,13 @@ def print_summary(db_path: str | Path) -> None:
     n_coords = conn.execute(
         "SELECT COUNT(*) FROM atoms WHERE x IS NOT NULL"
     ).fetchone()[0]
+    n_grad = conn.execute(
+        "SELECT COUNT(*) FROM atoms WHERE grad_x IS NOT NULL"
+    ).fetchone()[0]
     print("\n--- Populations Summary ---")
     print(
-        f"Structures: {n_struct}  |  atoms: {n_atoms}  |  with coordinates: {n_coords}"
+        f"Structures: {n_struct}  |  atoms: {n_atoms}  |  with coordinates: "
+        f"{n_coords}  |  with gradient: {n_grad}"
     )
 
     notes = conn.execute(
