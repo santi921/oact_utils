@@ -242,3 +242,43 @@ def test_print_quality_summary_splits_by_metal_class(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "actinide" in out
     assert "non_actinide" in out
+
+
+def test_backfill_selects_rows_missing_quality_scalars(tmp_path, monkeypatch):
+    """A row with metrics but no orca_parser_version still needs extraction.
+
+    The old selector keyed on generator_data, which the Parsl writer now fills,
+    so a row could carry the blob and still have no scalars.
+    """
+    from oact_utilities.utils import analysis
+    from oact_utilities.workflows import dashboard as dash
+
+    workflow = _quality_db(
+        tmp_path,
+        [
+            # Fully extracted: nothing to do.
+            ("Am;O", 8, {"force_max": 0.001, "orca_parser_version": 2}),
+            # Has forces, never had the scalars extracted.
+            ("Am;O", 8, {"force_max": 0.001}),
+        ],
+    )
+    workflow.update_job_metrics(1, max_forces=0.001)
+    workflow.update_job_metrics(2, max_forces=0.001)
+
+    root = tmp_path / "jobs"
+    for name in ("job_0", "job_1"):
+        (root / name).mkdir(parents=True)
+
+    captured: dict[str, object] = {}
+
+    def fake_parallel(workflow, work_items, **kwargs):
+        captured["job_ids"] = [job_id for job_id, _ in work_items]
+        return len(work_items), 0
+
+    monkeypatch.setattr(analysis, "GENERATOR_AVAILABLE", True)
+    monkeypatch.setattr(dash, "_parallel_extract_metrics", fake_parallel)
+
+    dash.backfill_metrics(workflow, root)
+    workflow.close()
+
+    assert captured["job_ids"] == [2]

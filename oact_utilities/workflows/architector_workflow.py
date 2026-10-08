@@ -66,6 +66,23 @@ _QUALITY_COLUMNS = (
     "orca_parser_version",
 )
 
+# Every column a job-metrics writer may set. update_job_metrics_bulk and
+# submit_jobs._write_job_update both iterate this one tuple, so a column added
+# here reaches both writers; two hand-kept lists is how generator_data was once
+# silently dropped from Parsl-mode writes.
+_METRIC_COLUMNS = (
+    "job_dir",
+    "max_forces",
+    "scf_steps",
+    "final_energy",
+    "error_message",
+    "wall_time",
+    "n_cores",
+    "generator_data",
+    "n_basis",
+    *_QUALITY_COLUMNS,
+)
+
 
 @dataclass
 class JobRecord:
@@ -635,18 +652,7 @@ class ArchitectorWorkflow:
             values = []
             job_id = metrics["job_id"]
 
-            for col in (
-                "job_dir",
-                "max_forces",
-                "scf_steps",
-                "final_energy",
-                "error_message",
-                "wall_time",
-                "n_cores",
-                "generator_data",
-                "n_basis",
-                *_QUALITY_COLUMNS,
-            ):
+            for col in _METRIC_COLUMNS:
                 if metrics.get(col) is not None:
                     updates.append(f"{col} = ?")
                     values.append(metrics[col])

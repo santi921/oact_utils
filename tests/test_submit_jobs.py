@@ -1828,6 +1828,45 @@ class TestWriteJobUpdate:
             assert completed[0].scf_steps == 10
             assert completed[0].worker_id is None
 
+    def test_writes_every_shared_metric_column(self, workflow_db):
+        """Every _METRIC_COLUMNS entry reaches the DB, n_basis included.
+
+        Guards the old drift where this writer kept its own column list and
+        silently dropped columns update_job_metrics_bulk wrote.
+        """
+        import sqlite3
+
+        from oact_utilities.workflows.architector_workflow import _METRIC_COLUMNS
+
+        text_cols = {"job_dir", "generator_data", "error_message"}
+        metrics = {
+            col: (f"{col}-value" if col in text_cols else float(i + 1))
+            for i, col in enumerate(_METRIC_COLUMNS)
+        }
+        with ArchitectorWorkflow(workflow_db) as wf:
+            _write_job_update(
+                wf,
+                {
+                    "job_id": 3,
+                    "status": JobStatus.FAILED,
+                    "error_message": "from the update",
+                    "metrics": metrics,
+                },
+            )
+
+        conn = sqlite3.connect(workflow_db)
+        row = conn.execute(
+            f"SELECT {', '.join(_METRIC_COLUMNS)} FROM structures WHERE id = 3"
+        ).fetchone()
+        conn.close()
+        stored = dict(zip(_METRIC_COLUMNS, row))
+        for col in _METRIC_COLUMNS:
+            if col == "error_message":
+                # The update's own message wins over a stray metrics key.
+                assert stored[col] == "from the update"
+            else:
+                assert stored[col] == metrics[col], col
+
     def test_completed_job_partial_metrics(self, workflow_db):
         """Completed job with only some metrics populated."""
         with ArchitectorWorkflow(workflow_db) as wf:
@@ -2849,3 +2888,85 @@ class TestMinAtomsCLI:
         )
         with pytest.raises(SystemExit):
             mod.main()
+
+
+class TestWriteJobUpdateQualityColumns:
+    """The writer must not drop generator_data or the quality scalars.
+
+    Both were computed in the Parsl completion loop and then silently dropped
+    by the writer's column list, so Parsl campaigns stored neither.
+    """
+
+    def test_generator_data_is_written(self, workflow_db):
+        with ArchitectorWorkflow(workflow_db) as wf:
+            _write_job_update(
+                wf,
+                {
+                    "job_id": 1,
+                    "status": JobStatus.COMPLETED,
+                    "metrics": {
+                        "job_dir": "/path/to/job_0",
+                        "generator_data": '{"s_squared": 6.0}',
+                    },
+                },
+            )
+            cur = wf._execute_with_retry(
+                "SELECT generator_data FROM structures WHERE id = 1"
+            )
+            assert cur.fetchone()[0] == '{"s_squared": 6.0}'
+
+    def test_quality_scalars_are_written(self, workflow_db):
+        with ArchitectorWorkflow(workflow_db) as wf:
+            _write_job_update(
+                wf,
+                {
+                    "job_id": 1,
+                    "status": JobStatus.COMPLETED,
+                    "metrics": {
+                        "job_dir": "/path/to/job_0",
+                        "max_forces": 0.001,
+                        "force_max": 0.0011,
+                        "num_electrons_scf": 60,
+                        "s_squared": 6.00583,
+                        "n_alpha": 32.0,
+                        "n_beta": 28.0,
+                        "homo_lumo_gap_alpha": 0.278931,
+                        "homo_lumo_gap_beta": 0.428205,
+                        "exchange_deviation": False,
+                        "orca_parser_version": 2,
+                    },
+                },
+            )
+            cur = wf._execute_with_retry(
+                "SELECT force_max, num_electrons_scf, s_squared, n_alpha, n_beta, "
+                "homo_lumo_gap_alpha, homo_lumo_gap_beta, orca_parser_version "
+                "FROM structures WHERE id = 1"
+            )
+            row = tuple(cur.fetchone())
+
+        assert row == (
+            0.0011,
+            60,
+            6.00583,
+            32.0,
+            28.0,
+            0.278931,
+            0.428205,
+            2,
+        )
+
+    def test_quality_scalars_are_optional(self, workflow_db):
+        """A job with no generator cache still writes its ordinary metrics."""
+        with ArchitectorWorkflow(workflow_db) as wf:
+            _write_job_update(
+                wf,
+                {
+                    "job_id": 1,
+                    "status": JobStatus.COMPLETED,
+                    "metrics": {"job_dir": "/path/to/job_0", "max_forces": 0.001},
+                },
+            )
+            cur = wf._execute_with_retry(
+                "SELECT max_forces, force_max, s_squared FROM structures WHERE id = 1"
+            )
+            assert tuple(cur.fetchone()) == (0.001, None, None)

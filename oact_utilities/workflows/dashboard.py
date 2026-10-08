@@ -1214,8 +1214,11 @@ def backfill_metrics(
         # existed, so those rows are re-extracted once on the first run after
         # the upgrade.
         if GENERATOR_AVAILABLE:
+            # orca_parser_version, not generator_data: it is the column that
+            # records whether the quality scalars were ever extracted.
             missing_clause = (
-                "max_forces IS NULL OR generator_data IS NULL OR force_max IS NULL"
+                "max_forces IS NULL OR force_max IS NULL "
+                "OR orca_parser_version IS NULL"
             )
         else:
             missing_clause = "max_forces IS NULL OR force_max IS NULL"

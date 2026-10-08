@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import os
 import random
 import shlex
@@ -29,7 +30,13 @@ from ..utils.analysis import (
 )
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
-from .architector_workflow import ArchitectorWorkflow, JobRecord, JobStatus
+from .architector_workflow import (
+    _METRIC_COLUMNS,
+    ArchitectorWorkflow,
+    JobRecord,
+    JobStatus,
+)
+from .census import extract_quality_fields
 from .clean import (
     MARKER_ERROR_MESSAGE,
     _process_job,
@@ -179,8 +186,9 @@ def _write_job_update(
     Args:
         update: Dict with keys job_id (int), status (JobStatus),
             error_message (str | None), increment_fail_count (bool),
-            metrics (dict | None -- keys: job_dir, max_forces, scf_steps,
-                     final_energy, wall_time, n_cores).
+            metrics (dict | None -- any of the columns in
+                     architector_workflow._METRIC_COLUMNS, the same list
+                     update_job_metrics_bulk writes).
     """
     job_id = update["job_id"]
 
@@ -201,14 +209,11 @@ def _write_job_update(
     # Merge metrics into the same UPDATE to use a single statement+commit.
     metrics = update.get("metrics")
     if metrics:
-        for col in (
-            "job_dir",
-            "max_forces",
-            "scf_steps",
-            "final_energy",
-            "wall_time",
-            "n_cores",
-        ):
+        for col in _METRIC_COLUMNS:
+            # error_message is set above from the update itself; a second
+            # assignment in the same UPDATE would shadow it.
+            if col == "error_message":
+                continue
             if metrics.get(col) is not None:
                 set_clauses.append(f"{col} = ?")
                 params.append(metrics[col])
@@ -2621,6 +2626,8 @@ def submit_batch_parsl(
                             metrics_dict = {
                                 "job_dir": job_dir,
                                 "max_forces": metrics.get("max_forces"),
+                                "force_max": metrics.get("force_max"),
+                                "num_electrons_scf": metrics.get("num_electrons_scf"),
                                 "scf_steps": metrics.get("scf_steps"),
                                 "final_energy": metrics.get("final_energy"),
                                 "wall_time": wall_time,
@@ -2631,6 +2638,9 @@ def submit_batch_parsl(
                                     gen_data = parse_generator_data(job_dir)
                                     if gen_data is not None:
                                         metrics_dict["generator_data"] = gen_data
+                                        metrics_dict.update(
+                                            extract_quality_fields(json.loads(gen_data))
+                                        )
                                 except Exception as e:
                                     print(
                                         f"  Warning: generator parsing failed for job {job_id}: {e}"
