@@ -80,13 +80,9 @@ from oact_utilities.workflows.census import (
     spin_contamination,
 )
 
-# Private, but reusing them keeps --copy-skip-scratch in step with clean.py
-# rather than growing a second copy of the scratch patterns.
-from oact_utilities.workflows.clean import (
-    _BAS_FILE_PATTERNS,
-    _ORCA_TMP_DIR_RE,
-    _TMP_FILE_PATTERNS,
-)
+# Private, but reusing it keeps --copy-skip-scratch identical to what
+# clean.py --clean-all would delete, file/dir distinction and exclusions included.
+from oact_utilities.workflows.clean import _match_cleanup_patterns
 
 try:
     from tqdm import tqdm
@@ -138,14 +134,37 @@ CREATE TABLE IF NOT EXISTS atoms (
 )
 """
 
-_INSERT_STRUCTURE = """
-INSERT OR REPLACE INTO structures (
-    job_id, orig_index, job_name, job_dir, elements, natoms, charge, spin,
-    metal, metal_class, final_energy, max_forces, s_squared, force_max,
-    spin_contamination, contamination_cutoff, n_population_atoms,
-    geometry_source, xyz, parse_note
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
+_STRUCTURE_FIELDS = (
+    "job_id",
+    "orig_index",
+    "job_name",
+    "job_dir",
+    "elements",
+    "natoms",
+    "charge",
+    "spin",
+    "metal",
+    "metal_class",
+    "final_energy",
+    "max_forces",
+    "s_squared",
+    "force_max",
+    "spin_contamination",
+    "contamination_cutoff",
+    "n_population_atoms",
+    "geometry_source",
+    "xyz",
+    "parse_note",
+)
+
+# An upsert rather than INSERT OR REPLACE: REPLACE deletes the old row, which
+# would wipe copied_to from an earlier --copy-jobs run on every --append.
+_INSERT_STRUCTURE = (
+    f"INSERT INTO structures ({', '.join(_STRUCTURE_FIELDS)}) "
+    f"VALUES ({', '.join('?' for _ in _STRUCTURE_FIELDS)}) "
+    "ON CONFLICT(job_id) DO UPDATE SET "
+    + ", ".join(f"{col} = excluded.{col}" for col in _STRUCTURE_FIELDS[1:])
+)
 
 _INSERT_ATOM = """
 INSERT OR REPLACE INTO atoms (
@@ -249,8 +268,10 @@ def read_completed_jobs(db_path: str | Path) -> list[JobRow]:
     """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
+        # ORDER BY so a seeded sample does not depend on the query plan.
         rows = conn.execute(
-            f"SELECT {', '.join(_JOB_COLUMNS)} FROM structures WHERE status = ?",
+            f"SELECT {', '.join(_JOB_COLUMNS)} FROM structures WHERE status = ? "
+            "ORDER BY id",
             (_STATUS_COMPLETED,),
         ).fetchall()
     finally:
@@ -259,7 +280,7 @@ def read_completed_jobs(db_path: str | Path) -> list[JobRow]:
 
 
 # The quality scalars this script screens on, in the workflow DB and in the
-# per-job caches. JobRecord carries neither, so both are raw reads.
+# per-job caches. JobRow carries neither, so both are raw reads.
 _SCALAR_COLUMNS = ("s_squared", "force_max")
 
 
@@ -407,7 +428,7 @@ def xyz_text(
 
 
 def extract_job(
-    job,
+    job: JobRow,
     job_dir: Path | None,
     s_squared: float | None,
     force_max: float | None,
@@ -418,7 +439,7 @@ def extract_job(
     """Build the structures row and atoms rows for one job.
 
     Args:
-        job: ``JobRecord`` from the workflow DB.
+        job: ``JobRow`` from the workflow DB.
         job_dir: Resolved job directory, or None when the DB has no path.
         s_squared: ``<S^2>`` for this job, or None.
         force_max: Per-atom max gradient norm (Eh/Bohr) for this job, or None.
@@ -540,12 +561,13 @@ def extract_job(
 
 
 def _scratch_ignore(src: str, names: list[str]) -> list[str]:
-    """``copytree`` ignore callback dropping ORCA scratch files and dirs."""
-    patterns = _TMP_FILE_PATTERNS + _BAS_FILE_PATTERNS
+    """``copytree`` ignore callback dropping what ``clean.py --clean-all`` deletes."""
     return [
         name
         for name in names
-        if _ORCA_TMP_DIR_RE.match(name) or any(p.search(name) for p in patterns)
+        if _match_cleanup_patterns(
+            name, os.path.isdir(os.path.join(src, name)), {"tmp", "bas"}
+        )
     ]
 
 
@@ -554,31 +576,39 @@ def _scratch_ignore(src: str, names: list[str]) -> list[str]:
 # later in front of the viewer.
 _WAVEFUNCTION_SUFFIXES = (".gbw", ".wfn", ".wfx", ".molden.input", ".nbo")
 
+# Written into every copy, holding the source path, so a later run can tell
+# its own earlier copy from a different job that happens to share the name.
+_SOURCE_MARKER = ".extract_populations_source"
 
-def _has_wavefunction(path: Path) -> bool:
-    """True when a copied job directory holds a wavefunction file.
 
-    Walks subdirectories and looks through a ``.gz`` suffix, since a quacc
-    corpus stores ``orca.gbw.gz`` rather than ``orca.gbw``.
+def _tree_stats(path: Path) -> tuple[int, bool]:
+    """Total bytes and wavefunction presence of a copied tree, in one walk.
+
+    Looks through a ``.gz`` suffix, since a quacc corpus stores
+    ``orca.gbw.gz`` rather than ``orca.gbw``. Unreadable entries are skipped.
     """
-    for _root, _dirs, files in os.walk(path):
-        for name in files:
-            stem = name[:-3] if name.endswith(".gz") else name
-            if stem.endswith(_WAVEFUNCTION_SUFFIXES):
-                return True
-    return False
-
-
-def _dir_size(path: Path) -> int:
-    """Total bytes of a directory tree, ignoring unreadable entries."""
-    total = 0
+    total, has_wavefunction = 0, False
     for root, _, files in os.walk(path):
         for name in files:
+            stem = name[:-3] if name.endswith(".gz") else name
+            has_wavefunction = has_wavefunction or stem.endswith(_WAVEFUNCTION_SUFFIXES)
             try:
                 total += os.path.getsize(os.path.join(root, name))
             except OSError:
                 pass
-    return total
+    return total, has_wavefunction
+
+
+def _copied_from_elsewhere(dest: Path, src: Path) -> bool:
+    """True when ``dest`` is a marked copy of some directory other than ``src``.
+
+    A destination without a marker (written before markers existed) cannot be
+    attributed, so it is taken to be this job's copy, as before.
+    """
+    try:
+        return (dest / _SOURCE_MARKER).read_text().strip() != str(src)
+    except OSError:
+        return False
 
 
 def copy_job_dirs(
@@ -591,13 +621,20 @@ def copy_job_dirs(
 ) -> dict[int, str]:
     """Copy whole job directories to ``dest_root/<job_name>``.
 
+    Two sources sharing a directory name (``chunk00/job_12`` and
+    ``chunk01/job_12``) would otherwise be copied into one destination and
+    mixed. A name that occurs more than once in ``pairs``, or whose existing
+    destination is marked as another source's copy, is written to
+    ``<job_name>__id<job_id>`` instead. Every copy carries a
+    ``.extract_populations_source`` file naming its source.
+
     Args:
         pairs: ``(job_id, source_dir)`` for the jobs to copy.
         dest_root: Directory to copy into; created if missing.
-        skip_scratch: Drop ORCA scratch (``.tmp``, ``core``, ``.bas*``,
-            ``orca_tmp_*/``) using clean.py's patterns.
-        overwrite: Copy over an existing destination directory instead of
-            leaving it alone.
+        skip_scratch: Drop ORCA scratch using clean.py's own matcher, i.e.
+            exactly what ``clean.py --clean-all`` would delete.
+        overwrite: Delete an existing destination and copy afresh, instead of
+            leaving it alone. Never applied to another source's copy.
         workers: Parallel copy workers.
         logger: Logger for the per-copy warnings and the total.
 
@@ -612,16 +649,35 @@ def copy_job_dirs(
     dest_root.mkdir(parents=True, exist_ok=True)
     ignore = _scratch_ignore if skip_scratch else None
 
-    def _copy(pair: tuple[int, Path]) -> tuple[int, str | None, str, int]:
+    name_counts: dict[str, int] = {}
+    for _, src in pairs:
+        name_counts[src.name] = name_counts.get(src.name, 0) + 1
+    shared = sum(1 for _, src in pairs if name_counts[src.name] > 1)
+    if shared:
+        logger.warning(
+            "%d jobs share a directory name with another selected job; their "
+            "copies are suffixed __id<job_id> to keep them apart",
+            shared,
+        )
+
+    def _copy(pair: tuple[int, Path]) -> tuple[int, str | None, str, int, bool]:
         job_id, src = pair
         dest = dest_root / src.name
-        if dest.exists() and not overwrite:
-            return job_id, str(dest), "existing", 0
+        if name_counts[src.name] > 1 or (
+            dest.exists() and _copied_from_elsewhere(dest, src)
+        ):
+            dest = dest_root / f"{src.name}__id{job_id}"
+        if dest.exists():
+            if not overwrite:
+                return job_id, str(dest), "existing", 0, _tree_stats(dest)[1]
+            # copytree into an existing tree merges, which would keep files
+            # the fresh copy skips or no longer has; start from nothing.
+            shutil.rmtree(dest)
         outcome = "copied"
         try:
             # symlinks are dereferenced: a .gbw symlinked into node-local
             # scratch must arrive as data, not as a dangling link.
-            shutil.copytree(src, dest, ignore=ignore, dirs_exist_ok=True)
+            shutil.copytree(src, dest, ignore=ignore)
         except shutil.Error as exc:
             # copytree collects per-file failures (broken symlinks, unreadable
             # scratch) and raises at the end; the rest of the tree is there.
@@ -629,8 +685,10 @@ def copy_job_dirs(
             outcome = "partial"
         except OSError as exc:
             logger.warning("copy failed for %s: %s", src, exc)
-            return job_id, None, "failed", 0
-        return job_id, str(dest), outcome, _dir_size(dest)
+            return job_id, None, "failed", 0, False
+        (dest / _SOURCE_MARKER).write_text(f"{src}\n")
+        size, has_wavefunction = _tree_stats(dest)
+        return job_id, str(dest), outcome, size, has_wavefunction
 
     logger.info("Copying %d job directories to %s ...", len(pairs), dest_root)
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -642,11 +700,13 @@ def copy_job_dirs(
     counts: dict[str, int] = {}
     total_bytes = 0
     destinations: dict[int, str] = {}
-    for job_id, dest, outcome, size in results:
+    no_wavefunction = 0
+    for job_id, dest, outcome, size, has_wavefunction in results:
         counts[outcome] = counts.get(outcome, 0) + 1
         total_bytes += size
         if dest is not None:
             destinations[job_id] = dest
+            no_wavefunction += not has_wavefunction
 
     logger.info(
         "Copied %d dirs (%.2f GB), %d partial, %d already present, %d failed",
@@ -656,14 +716,10 @@ def copy_job_dirs(
         counts.get("existing", 0),
         counts.get("failed", 0),
     )
-
-    no_wavefunction = [
-        d for d in destinations.values() if not _has_wavefunction(Path(d))
-    ]
     if no_wavefunction:
         logger.warning(
             "%d of %d copies hold no %s file (legacy visualization needs one)",
-            len(no_wavefunction),
+            no_wavefunction,
             len(destinations),
             "/".join(_WAVEFUNCTION_SUFFIXES),
         )
@@ -671,14 +727,14 @@ def copy_job_dirs(
 
 
 def _grade_job(
-    job,
+    job: JobRow,
     scalars: dict[int, dict[str, float | None]],
     force_thresh_ev_ang: float,
 ) -> tuple[float | None, float | None, bool | None, bool | None]:
     """Score one job against the force and spin-contamination filters.
 
     Args:
-        job: ``JobRecord``.
+        job: ``JobRow`` from the workflow DB.
         scalars: ``{job_id: {"s_squared": ..., "force_max": ...}}``.
         force_thresh_ev_ang: fmax cutoff in eV/Angstrom.
 
@@ -701,7 +757,7 @@ def _grade_job(
 
 
 def select_jobs(
-    jobs: list,
+    jobs: list[JobRow],
     scalars: dict[int, dict[str, float | None]],
     n_samples: int | None,
     select: str,
@@ -713,7 +769,7 @@ def select_jobs(
     min_force_ev_ang: float | None,
     force_thresh_ev_ang: float,
     logger: logging.Logger,
-) -> list:
+) -> list[JobRow]:
     """Filter and sample the candidate jobs.
 
     ``failing_quality`` picks which filter a job has to fail: ``"any"`` keeps a
@@ -722,7 +778,7 @@ def select_jobs(
     other check says. Every other filter is an AND that narrows further.
 
     Args:
-        jobs: Candidate ``JobRecord`` list (completed jobs).
+        jobs: Candidate ``JobRow`` list (completed jobs).
         scalars: ``{job_id: {"s_squared": ..., "force_max": ...}}``.
         n_samples: Number to keep, or None for all.
         select: ``random``, ``worst-contamination``, ``best-contamination``,
@@ -761,7 +817,7 @@ def select_jobs(
             return jobs
         return random.Random(seed).sample(jobs, n_samples)
 
-    kept: list[tuple[float, object]] = []
+    kept: list[tuple[float, JobRow]] = []
     n_ungraded = 0
     reasons = {"force only": 0, "spin only": 0, "both": 0}
 
@@ -789,20 +845,28 @@ def select_jobs(
             if not (spin_fails or force_fails):
                 continue
 
-        if min_contamination is not None and (
-            deviation is None or deviation < min_contamination
-        ):
-            continue
-        if max_contamination is not None and (
-            deviation is None or deviation > max_contamination
-        ):
-            continue
-        if over_cutoff and not spin_fails:
-            continue
-        if min_force_ev_ang is not None and (
-            fmax_ev is None or fmax_ev < min_force_ev_ang
-        ):
-            continue
+        # A filter that needs a missing scalar cannot pass or fail the job, so
+        # it is counted as ungraded rather than read as "not contaminated".
+        if min_contamination is not None or max_contamination is not None:
+            if deviation is None:
+                n_ungraded += 1
+                continue
+            if min_contamination is not None and deviation < min_contamination:
+                continue
+            if max_contamination is not None and deviation > max_contamination:
+                continue
+        if over_cutoff:
+            if spin_fails is None:
+                n_ungraded += 1
+                continue
+            if not spin_fails:
+                continue
+        if min_force_ev_ang is not None:
+            if fmax_ev is None:
+                n_ungraded += 1
+                continue
+            if fmax_ev < min_force_ev_ang:
+                continue
 
         if sort_key == "contamination":
             if deviation is None:
@@ -853,7 +917,7 @@ def select_jobs(
 
 
 def _fill_scalar_gaps(
-    jobs: list,
+    jobs: list[JobRow],
     scalars: dict[int, dict[str, float | None]],
     job_dirs: dict[int, Path | None],
     workers: int,
@@ -885,7 +949,7 @@ def _fill_scalar_gaps(
         len(gaps),
     )
 
-    def _fill(job) -> tuple[float | None, float | None]:
+    def _fill(job: JobRow) -> tuple[float | None, float | None]:
         job_dir = job_dirs[job.id]
         return (
             job_s_squared(job_dir, scalars[job.id]["s_squared"]),
@@ -1096,7 +1160,7 @@ def extract_populations(
         "Extracting populations for %d jobs (%d workers)...", len(selected), workers
     )
 
-    def _process(job):
+    def _process(job: JobRow) -> tuple[tuple, list[tuple]]:
         return extract_job(
             job,
             job_dirs[job.id],
@@ -1118,6 +1182,11 @@ def extract_populations(
 
     out_conn = sqlite3.connect(str(output_path))
     _prepare_output(out_conn, output_path, append, logger)
+    # On --append a re-extracted job may now yield fewer (or no) atoms than
+    # before; clear its old atom rows so none outlive the new structures row.
+    out_conn.executemany(
+        "DELETE FROM atoms WHERE job_id = ?", [(row[0],) for row in structure_rows]
+    )
     out_conn.executemany(_INSERT_STRUCTURE, structure_rows)
     out_conn.executemany(_INSERT_ATOM, atom_rows)
     out_conn.commit()
@@ -1206,9 +1275,10 @@ def print_summary(db_path: str | Path) -> None:
         over = conn.execute(
             "SELECT COUNT(*) FROM structures WHERE spin_contamination IS NOT NULL "
             "AND contamination_cutoff IS NOT NULL "
-            "AND spin_contamination > contamination_cutoff"
+            "AND spin_contamination >= contamination_cutoff"
         ).fetchone()[0]
-        print(f"  over element-dependent cutoff: {over}")
+        # >= to match _grade_job and census.quality_filter.
+        print(f"  at or over element-dependent cutoff: {over}")
 
     force_row = conn.execute(
         "SELECT COUNT(*), MIN(force_max), AVG(force_max), MAX(force_max) "
@@ -1253,6 +1323,10 @@ def print_summary(db_path: str | Path) -> None:
 
 
 def main() -> None:
+    """Command-line entry point: parse arguments, extract, optionally summarise.
+
+    Exits with status 1 when no structures were written.
+    """
     parser = argparse.ArgumentParser(
         description="Extract per-atom Mulliken/Loewdin populations from "
         "completed ORCA jobs into a standalone database."

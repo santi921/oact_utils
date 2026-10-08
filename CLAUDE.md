@@ -307,9 +307,10 @@ Parsl mode fills all of this **on the fly**: the completion loop in
 `submit_jobs.py` writes the scalars alongside `generator_data` as each job
 finishes, so `--show-quality` is live during a campaign with no extra pass.
 Traditional (per-job batch) mode extracts no metrics inline by design -- the
-dashboard does it afterward. Note `_write_job_update` merges metrics with an
-explicit column list; a new metric must be added there or it is silently
-dropped (which is what happened to `generator_data` before this).
+dashboard does it afterward. Both metric writers (`_write_job_update` in Parsl
+mode and `update_job_metrics_bulk`) iterate one tuple, `_METRIC_COLUMNS` in
+`architector_workflow.py`; add a new metric there and both pick it up. Two
+hand-kept lists is how `generator_data` was once silently dropped.
 
 ## Job Status Lifecycle
 

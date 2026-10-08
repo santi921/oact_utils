@@ -31,7 +31,7 @@ from ..utils.analysis import (
 from ..utils.architector import xyz_string_to_atoms
 from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
 from .architector_workflow import (
-    _QUALITY_COLUMNS,
+    _METRIC_COLUMNS,
     ArchitectorWorkflow,
     JobRecord,
     JobStatus,
@@ -184,9 +184,9 @@ def _write_job_update(
     Args:
         update: Dict with keys job_id (int), status (JobStatus),
             error_message (str | None), increment_fail_count (bool),
-            metrics (dict | None -- keys: job_dir, max_forces, scf_steps,
-                     final_energy, wall_time, n_cores, generator_data, and
-                     the quality scalars in _QUALITY_COLUMNS).
+            metrics (dict | None -- any of the columns in
+                     architector_workflow._METRIC_COLUMNS, the same list
+                     update_job_metrics_bulk writes).
     """
     job_id = update["job_id"]
 
@@ -207,16 +207,11 @@ def _write_job_update(
     # Merge metrics into the same UPDATE to use a single statement+commit.
     metrics = update.get("metrics")
     if metrics:
-        for col in (
-            "job_dir",
-            "max_forces",
-            "scf_steps",
-            "final_energy",
-            "wall_time",
-            "n_cores",
-            "generator_data",
-            *_QUALITY_COLUMNS,
-        ):
+        for col in _METRIC_COLUMNS:
+            # error_message is set above from the update itself; a second
+            # assignment in the same UPDATE would shadow it.
+            if col == "error_message":
+                continue
             if metrics.get(col) is not None:
                 set_clauses.append(f"{col} = ?")
                 params.append(metrics[col])

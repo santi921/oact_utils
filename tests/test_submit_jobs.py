@@ -1828,6 +1828,45 @@ class TestWriteJobUpdate:
             assert completed[0].scf_steps == 10
             assert completed[0].worker_id is None
 
+    def test_writes_every_shared_metric_column(self, workflow_db):
+        """Every _METRIC_COLUMNS entry reaches the DB, n_basis included.
+
+        Guards the old drift where this writer kept its own column list and
+        silently dropped columns update_job_metrics_bulk wrote.
+        """
+        import sqlite3
+
+        from oact_utilities.workflows.architector_workflow import _METRIC_COLUMNS
+
+        text_cols = {"job_dir", "generator_data", "error_message"}
+        metrics = {
+            col: (f"{col}-value" if col in text_cols else float(i + 1))
+            for i, col in enumerate(_METRIC_COLUMNS)
+        }
+        with ArchitectorWorkflow(workflow_db) as wf:
+            _write_job_update(
+                wf,
+                {
+                    "job_id": 3,
+                    "status": JobStatus.FAILED,
+                    "error_message": "from the update",
+                    "metrics": metrics,
+                },
+            )
+
+        conn = sqlite3.connect(workflow_db)
+        row = conn.execute(
+            f"SELECT {', '.join(_METRIC_COLUMNS)} FROM structures WHERE id = 3"
+        ).fetchone()
+        conn.close()
+        stored = dict(zip(_METRIC_COLUMNS, row))
+        for col in _METRIC_COLUMNS:
+            if col == "error_message":
+                # The update's own message wins over a stray metrics key.
+                assert stored[col] == "from the update"
+            else:
+                assert stored[col] == metrics[col], col
+
     def test_completed_job_partial_metrics(self, workflow_db):
         """Completed job with only some metrics populated."""
         with ArchitectorWorkflow(workflow_db) as wf:
