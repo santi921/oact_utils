@@ -3436,7 +3436,9 @@ def main():
         action="store_true",
         help=(
             "Drop NoTRAH/NOSOSCF from the simple input so ORCA falls back to the "
-            "TRAH second-order SCF solver when DIIS stalls (open-shell 4f/5f SCFs)"
+            "TRAH second-order SCF solver when DIIS stalls (open-shell 4f/5f SCFs). "
+            "No effect on TRAH with wB97M-V or other self-consistent VV10 functionals: "
+            "ORCA switches AutoTRAH off for them, so the flag then only enables SOSCF"
         ),
     )
     orca_group.add_argument(

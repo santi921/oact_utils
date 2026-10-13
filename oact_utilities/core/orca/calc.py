@@ -317,6 +317,12 @@ def get_orca_blocks(
     template carries, so ORCA falls back to its second-order TRAH solver when
     DIIS stalls. Use it for SCFs that oscillate from the PModel guess (open-shell
     4f/5f systems); it costs nothing when DIIS converges on its own.
+
+    Caveat: ORCA (verified on 6.1.1) switches AutoTRAH off for functionals with
+    self-consistent VV10 dispersion, including the default wB97M-V ("Self-consistent
+    DFT-NL dispersion not compatible with AutoTRAH"). With those functionals no TRAH
+    step ever runs and the flag only drops ``NOSOSCF``, which does switch SOSCF on
+    for UKS (``CNVSOSCF .... on`` in the output).
     """
 
     if opt:
@@ -406,6 +412,7 @@ def get_orca_blocks(
         simple[simple.index("DIIS")] = "KDIIS"
 
     # Let ORCA auto-switch to the TRAH second-order solver when DIIS stalls
+    # (ignored by ORCA for self-consistent VV10 functionals such as wB97M-V)
     if trah:
         simple = [kw for kw in simple if kw not in ("NoTRAH", "NOSOSCF")]
 
