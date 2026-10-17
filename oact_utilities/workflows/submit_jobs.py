@@ -1571,6 +1571,130 @@ def build_parsl_config_drac_local(
     return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
 
 
+def _physical_core_affinity(
+    max_workers: int,
+    cores_per_worker: int,
+    cpus: set[int] | None = None,
+    sysfs_cpu_root: Path = Path("/sys/devices/system/cpu"),
+) -> str:
+    """Build a Parsl ``list:`` affinity that gives each worker whole physical cores.
+
+    On hyperthreaded nodes (NERSC Perlmutter: 2 hardware threads per core) SLURM
+    counts each hyperthread as a CPU, and Parsl's ``"block"`` affinity slices the
+    sorted logical-CPU list. With a cpuset like ``[0-29, 128-157]`` (cpu N and
+    N+128 are siblings) a third worker lands on the siblings of the first
+    worker's cores, so two ORCA jobs share physical cores. This groups the
+    allocation's logical CPUs by (package, core) from sysfs and hands each worker
+    ``cores_per_worker`` complete cores, both hyperthreads included.
+
+    Args:
+        max_workers: Concurrent Parsl workers on the node.
+        cores_per_worker: Physical cores per worker (== ORCA ``%pal nprocs``).
+        cpus: Logical CPUs to distribute. Defaults to this process's affinity
+            mask, i.e. the SLURM allocation's cpuset.
+        sysfs_cpu_root: Root of the per-CPU topology tree (overridable for tests).
+
+    Returns:
+        Affinity string for ``HighThroughputExecutor(cpu_affinity=...)``.
+
+    Raises:
+        ValueError: when the allocation holds fewer physical cores than
+            ``max_workers * cores_per_worker``.
+    """
+    if cpus is None:
+        cpus = os.sched_getaffinity(0)  # type: ignore[attr-defined, unused-ignore]
+
+    cores: dict[tuple[int, int], list[int]] = {}
+    for cpu in sorted(cpus):
+        topo = sysfs_cpu_root / f"cpu{cpu}" / "topology"
+        key = (
+            int((topo / "physical_package_id").read_text()),
+            int((topo / "core_id").read_text()),
+        )
+        cores.setdefault(key, []).append(cpu)
+    ordered = sorted(cores.values(), key=lambda threads: threads[0])
+
+    needed = max_workers * cores_per_worker
+    if needed > len(ordered):
+        raise ValueError(
+            f"max_workers * cores_per_worker = {needed} physical cores, but the "
+            f"allocation holds {len(ordered)} ({len(cpus)} hyperthreads). SLURM "
+            "counts hyperthreads as CPUs: --cpus-per-task=N is N/2 cores."
+        )
+
+    groups = []
+    for w in range(max_workers):
+        chunk = ordered[w * cores_per_worker : (w + 1) * cores_per_worker]
+        groups.append(",".join(str(cpu) for threads in chunk for cpu in threads))
+    return "list:" + ":".join(groups)
+
+
+def build_parsl_config_perlmutter_local(
+    max_workers: int = 4,
+    cores_per_worker: int = 16,
+    orca_path: str | None = None,
+    enable_monitoring: bool = True,
+    cpu_affinity: str | None = None,
+):
+    """Build Parsl Config for NERSC Perlmutter CPU single-node execution.
+
+    Same inherited-environment contract as the DRAC LocalProvider path: the
+    coordinator runs inside the SLURM allocation after activating the conda env
+    (which supplies the OpenMPI 4.1 that ORCA's shared build links against) and
+    exporting the OMPI MCA settings; workers fork from that shell. See
+    ``launch/run_parsl_perlmutter_*.sh``.
+
+    The difference from DRAC is CPU affinity: Perlmutter exposes 2 hyperthreads
+    per core, so workers are pinned to whole physical cores via
+    ``_physical_core_affinity`` instead of Parsl's ``"block"`` slicing.
+
+    Args:
+        max_workers: Concurrent ORCA jobs on the node.
+        cores_per_worker: Physical cores per ORCA job (matches ``%pal nprocs``).
+        orca_path: Absolute ORCA path; its directory is prepended to PATH.
+        enable_monitoring: Attach Parsl MonitoringHub.
+        cpu_affinity: Explicit Parsl affinity string. Defaults to one derived
+            from the current allocation's cpuset and sysfs topology.
+
+    Returns:
+        Parsl Config object.
+    """
+    if not PARSL_AVAILABLE:
+        raise ImportError(
+            "Parsl is not installed. Please install with: pip install 'parsl>=2024.1'"
+        )
+
+    from parsl.config import Config
+    from parsl.executors import HighThroughputExecutor
+    from parsl.providers import LocalProvider
+
+    if cpu_affinity is None:
+        cpu_affinity = _physical_core_affinity(max_workers, cores_per_worker)
+
+    runtime_address = _get_parsl_runtime_address()
+    worker_init = _build_parsl_drac_worker_init(orca_path=orca_path)
+
+    provider = LocalProvider(worker_init=worker_init)
+
+    executor = HighThroughputExecutor(
+        label="perlmutter_local_htex",
+        address=runtime_address,
+        cores_per_worker=cores_per_worker,
+        max_workers_per_node=max_workers,
+        cpu_affinity=cpu_affinity,
+        provider=provider,
+    )
+
+    run_dir = _build_parsl_run_dir()
+    monitoring = (
+        _build_parsl_monitoring(run_dir=run_dir, hub_address=runtime_address)
+        if enable_monitoring
+        else None
+    )
+
+    return Config(executors=[executor], run_dir=run_dir, monitoring=monitoring)
+
+
 def build_parsl_config_sandia(
     max_workers: int = 3,
     cores_per_worker: int = 12,
@@ -2226,6 +2350,11 @@ def submit_batch_parsl(
                 "is only defined inside the module-loaded shell. Resolve it in "
                 'the launch script and pass --orca-path "$EBROOTORCA/orca".'
             )
+        if site.lower() == "perlmutter":
+            raise ValueError(
+                "site='perlmutter' requires an explicit orca_path: there is no "
+                "shared ORCA install. Pass --orca-path pointing at your build."
+            )
         config["orca_path"] = DEFAULT_ORCA_PATHS.get(
             scheduler.lower(), DEFAULT_ORCA_PATHS["flux"]
         )
@@ -2396,6 +2525,21 @@ def submit_batch_parsl(
             f"Job timeout: {timeout_seconds}s"
         )
         parsl_config = build_parsl_config_drac_local(
+            max_workers=max_workers,
+            cores_per_worker=cores_per_worker,
+            orca_path=config.get("orca_path"),
+            enable_monitoring=enable_monitoring,
+        )
+    elif site.lower() == "perlmutter":
+        print(
+            f"\nParsl Perlmutter (single-node LocalProvider): "
+            f"{max_workers} workers x {cores_per_worker} physical cores "
+            f"= {max_workers * cores_per_worker} cores, each worker pinned to "
+            f"whole cores (both hyperthreads). Coordinator must already be "
+            f"inside a SLURM allocation (see launch/run_parsl_perlmutter_*.sh). "
+            f"Job timeout: {timeout_seconds}s"
+        )
+        parsl_config = build_parsl_config_perlmutter_local(
             max_workers=max_workers,
             cores_per_worker=cores_per_worker,
             orca_path=config.get("orca_path"),
@@ -2887,6 +3031,12 @@ def submit_batch(
     Returns:
         List of job IDs that were submitted.
     """
+    if site.lower() == "perlmutter":
+        raise ValueError(
+            "site='perlmutter' is Parsl-only: use submit_batch_parsl "
+            "(CLI: --use-parsl). There is no per-job Perlmutter sbatch writer."
+        )
+
     root_dir = Path(root_dir)
     root_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3190,14 +3340,16 @@ def main():
     )
     parser.add_argument(
         "--hpc-site",
-        choices=["default", "sandia", "drac"],
+        choices=["default", "sandia", "drac", "perlmutter"],
         default="default",
         help=(
             "HPC site flavor. 'default' uses the standard SLURM/Flux script "
             "(conda + constraint=standard). 'sandia' (CTS1/TLCC2) uses "
             "module load + OMPI MCA env + --partition. 'drac' (Digital Research "
             "Alliance of Canada) uses module-system ORCA via $EBROOTORCA/orca "
-            "with no qos/partition/MCA. 'sandia'/'drac' are SLURM-only."
+            "with no qos/partition/MCA. 'perlmutter' (NERSC CPU nodes) is "
+            "Parsl single-node only and pins workers to whole physical cores "
+            "(hyperthread-aware). All non-default sites are SLURM-only."
         ),
     )
     parser.add_argument(
@@ -3522,6 +3674,21 @@ def main():
             parser.error(
                 "--hpc-site drac requires --allocation: the default 'dnn-sim' is "
                 "LLNL-only. Pass your DRAC account, e.g. --allocation def-<pi>."
+            )
+
+    if args.hpc_site == "perlmutter":
+        if args.scheduler != "slurm":
+            parser.error("--hpc-site perlmutter requires --scheduler slurm")
+        if not args.use_parsl:
+            parser.error(
+                "--hpc-site perlmutter requires --use-parsl: there is no per-job "
+                "Perlmutter sbatch writer. Use launch/run_parsl_perlmutter_*.sh."
+            )
+        if not args.orca_path:
+            parser.error(
+                "--hpc-site perlmutter requires --orca-path: there is no shared "
+                "ORCA install. Point at your build, e.g. "
+                "$PSCRATCH/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg/orca."
             )
 
     if args.hpc_site == "sandia":

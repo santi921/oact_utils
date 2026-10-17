@@ -924,6 +924,130 @@ class TestBuildParslConfigDracLocal:
         assert "/cvmfs/x/orca/6.1.0" in wi  # orca bin dir on PATH
 
 
+def _fake_sysfs(root: Path, n_cores: int, packages: int = 2) -> Path:
+    """Perlmutter-style topology: cpu N and N+n_cores are hyperthread siblings."""
+    per_pkg = n_cores // packages
+    for core in range(n_cores):
+        for cpu in (core, core + n_cores):
+            topo = root / f"cpu{cpu}" / "topology"
+            topo.mkdir(parents=True)
+            (topo / "physical_package_id").write_text(f"{core // per_pkg}\n")
+            (topo / "core_id").write_text(f"{core % per_pkg}\n")
+    return root
+
+
+class TestPhysicalCoreAffinity:
+    """Workers must get whole physical cores, never a sibling of another worker's."""
+
+    def test_shared_allocation_does_not_split_siblings(self, tmp_path):
+        from oact_utilities.workflows.submit_jobs import _physical_core_affinity
+
+        sysfs = _fake_sysfs(tmp_path, n_cores=128)
+        # A 60-hyperthread shared allocation: 30 cores, both threads each.
+        cpus = set(range(0, 30)) | set(range(128, 158))
+        aff = _physical_core_affinity(2, 15, cpus=cpus, sysfs_cpu_root=sysfs)
+
+        assert aff.startswith("list:")
+        workers = [{int(c) for c in group.split(",")} for group in aff[5:].split(":")]
+        assert len(workers) == 2
+        assert workers[0] == set(range(0, 15)) | set(range(128, 143))
+        assert workers[1] == set(range(15, 30)) | set(range(143, 158))
+
+    def test_block_affinity_would_have_collided(self, tmp_path):
+        # Parsl "block" on the same cpuset with 4 x 15 logical CPUs gives worker 2
+        # cpus 128-142 -- the siblings of worker 0. The helper refuses instead.
+        from oact_utilities.workflows.submit_jobs import _physical_core_affinity
+
+        sysfs = _fake_sysfs(tmp_path, n_cores=128)
+        cpus = set(range(0, 30)) | set(range(128, 158))
+        with pytest.raises(ValueError, match="30"):
+            _physical_core_affinity(4, 15, cpus=cpus, sysfs_cpu_root=sysfs)
+
+    def test_whole_node_packs_across_sockets(self, tmp_path):
+        from oact_utilities.workflows.submit_jobs import _physical_core_affinity
+
+        sysfs = _fake_sysfs(tmp_path, n_cores=128)
+        aff = _physical_core_affinity(16, 8, cpus=set(range(256)), sysfs_cpu_root=sysfs)
+        workers = [{int(c) for c in group.split(",")} for group in aff[5:].split(":")]
+        assert len(workers) == 16
+        assert all(len(w) == 16 for w in workers)  # 8 cores x 2 threads
+        assert set().union(*workers) == set(range(256))
+        assert sum(len(w) for w in workers) == 256  # disjoint
+
+
+@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
+class TestBuildParslConfigPerlmutterLocal:
+    """Tests for build_parsl_config_perlmutter_local."""
+
+    def test_uses_local_provider_and_explicit_affinity(self):
+        from parsl.providers import LocalProvider
+
+        from oact_utilities.workflows.submit_jobs import (
+            build_parsl_config_perlmutter_local,
+        )
+
+        config = build_parsl_config_perlmutter_local(
+            max_workers=2,
+            cores_per_worker=15,
+            orca_path="/pscratch/sd/x/u/orca_6_1_1/orca",
+            cpu_affinity="list:0-14,128-142:15-29,143-157",
+        )
+        ex = config.executors[0]
+        assert isinstance(ex.provider, LocalProvider)
+        assert ex.label == "perlmutter_local_htex"
+        assert ex.cores_per_worker == 15
+        assert ex.max_workers_per_node == 2
+        assert ex.cpu_affinity == "list:0-14,128-142:15-29,143-157"
+        wi = ex.provider.worker_init
+        assert "module load" not in wi
+        assert "/pscratch/sd/x/u/orca_6_1_1" in wi
+
+
+class TestPerlmutterSiteValidation:
+    """--hpc-site perlmutter is Parsl-only and needs an explicit ORCA path."""
+
+    def _run(self, tmp_path, monkeypatch, extra):
+        import sys
+
+        from oact_utilities.workflows import submit_jobs as mod
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "submit_jobs",
+                str(tmp_path / "w.db"),
+                str(tmp_path / "jobs"),
+                "--hpc-site",
+                "perlmutter",
+                "--scheduler",
+                "slurm",
+                *extra,
+            ],
+        )
+        with pytest.raises(SystemExit):
+            mod.main()
+
+    def test_requires_parsl(self, tmp_path, monkeypatch, capsys):
+        self._run(tmp_path, monkeypatch, ["--orca-path", "/x/orca"])
+        assert "requires --use-parsl" in capsys.readouterr().err
+
+    def test_requires_orca_path(self, tmp_path, monkeypatch, capsys):
+        self._run(tmp_path, monkeypatch, ["--use-parsl"])
+        assert "requires --orca-path" in capsys.readouterr().err
+
+    def test_traditional_submit_batch_rejects_perlmutter(self, tmp_path):
+        from oact_utilities.workflows.submit_jobs import submit_batch
+
+        with pytest.raises(ValueError, match="Parsl-only"):
+            submit_batch(
+                MagicMock(),
+                root_dir=tmp_path / "jobs",
+                scheduler="slurm",
+                site="perlmutter",
+            )
+
+
 class TestBuildParslSandiaWorkerInitMultiBlock:
     """Tests for the Sandia Parsl SlurmProvider worker_init.
 
