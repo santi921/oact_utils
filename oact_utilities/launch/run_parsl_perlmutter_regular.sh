@@ -37,7 +37,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=128      # whole node: 128 cores
 #SBATCH --cpus-per-task=2          # both hyperthreads of each core
-#SBATCH --mem=480G
 #SBATCH --job-name=parsl-pm-regular
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
@@ -124,13 +123,19 @@ if [ "${_cores_needed}" -gt "${_alloc_cores}" ]; then
     echo "ERROR: MAX_WORKERS*CORES_PER_WORKER=${_cores_needed} > ${_alloc_cores} physical cores." >&2
     exit 1
 fi
-if [ -n "${SLURM_MEM_PER_NODE:-}" ]; then
-    MEM_PER_JOB=$(( SLURM_MEM_PER_NODE / MAX_WORKERS ))
-    echo "auto --mem-per-job=${MEM_PER_JOB} MB  (alloc ${SLURM_MEM_PER_NODE} MB / ${MAX_WORKERS} workers)"
+# No --mem in the header: a node exposes ~1.9 GB per hyperthread (~484 GB, not
+# 512), so any explicit --mem near the top is rejected. Whole-node QOS get all
+# of it; a shared job gets its CPU share. Use whatever SLURM granted.
+if [ "${SLURM_MEM_PER_NODE:-0}" -gt 0 ]; then
+    _alloc_mem_mb="${SLURM_MEM_PER_NODE}"
+elif [ "${SLURM_MEM_PER_CPU:-0}" -gt 0 ]; then
+    _alloc_mem_mb=$(( SLURM_MEM_PER_CPU * ${SLURM_CPUS_ON_NODE:-256} ))
 else
-    MEM_PER_JOB=$(( CORES_PER_WORKER * 3750 ))
-    echo "WARNING: no SLURM memory in env; using fallback --mem-per-job=${MEM_PER_JOB} MB." >&2
+    _alloc_mem_mb=$(( _alloc_cores * 3700 ))
+    echo "NOTE: SLURM exported no memory size; assuming ${_alloc_mem_mb} MB (3700 MB/core)." >&2
 fi
+MEM_PER_JOB=$(( _alloc_mem_mb / MAX_WORKERS ))
+echo "auto --mem-per-job=${MEM_PER_JOB} MB  (${_alloc_mem_mb} MB / ${MAX_WORKERS} workers)"
 
 python -m oact_utilities.workflows.submit_jobs \
     "${DB_PATH}" \
