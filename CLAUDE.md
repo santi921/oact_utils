@@ -187,7 +187,7 @@ Three schedulers are wired into `submit_jobs.py` (`--scheduler {flux,slurm,pbspr
 - Node: 2x AMD EPYC 7763, 128 cores / 256 hyperthreads, 512 GB. **SLURM counts hyperthreads as CPUs**: `--cpus-per-task=60` is 30 physical cores
 - Request tasks, not one fat task (`--ntasks-per-node=128 --cpus-per-task=2`): ORCA's `mpirun` takes its slot count from the SLURM task count
 - Parsl's `"block"` affinity can hand two workers the two hyperthreads of one core; `_physical_core_affinity()` builds a `list:` affinity of whole physical cores from sysfs instead
-- ORCA 6.1.1 shared build needs OpenMPI 4.1.x; NERSC's `openmpi` module is 5.x only, so mpirun/libmpi come from the conda env (`conda install -c conda-forge 'openmpi=4.1.*'`). Single-node MCA: `pml=ob1`, `btl=vader,self`
+- ORCA 6.1.1 shared build needs OpenMPI 4.1.x; NERSC's `openmpi` module is 5.x only, so mpirun/libmpi come from the conda env (`conda install -c conda-forge 'openmpi=4.1.*'`). The Parsl job wrapper (`orca_job_wrapper`) forces `OMPI_MCA_btl=self,tcp` on every site, overriding any launch-script `OMPI_MCA_btl`. On Perlmutter's multi-NIC nodes that TCP BTL drops local-rank connections ("unexpected IP address" in `orca.err`) and ORCA hangs forever at `ORCA STARTUP CALCULATIONS`; the lanes pin `OMPI_MCA_btl_tcp_if_include` and `OMPI_MCA_oob_tcp_if_include` to `127.0.0.1/8`, plus `pml=ob1`
 - Launch scripts: `launch/run_parsl_perlmutter_{preempt,shared,regular}.sh`, one QOS per disjoint natoms band so all three run concurrently on one DB. Each preflights the mpirun version, ORCA `ldd`, and a cluster-wide `flock` mount on the DB before claiming jobs
 - `$PSCRATCH` purges files unaccessed for 8 weeks: keep long-lived installs (ORCA, conda) under `/global/common/software/<project>`
 

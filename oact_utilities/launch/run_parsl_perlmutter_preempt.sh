@@ -87,10 +87,16 @@ ORCA_PATH="${ORCA_DIR}/orca"
 export PATH="${ORCA_DIR}:${PATH}"
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${ORCA_DIR}:${LD_LIBRARY_PATH:-}"
 
-# Single node: shared memory only, skip the Slingshot/libfabric transports.
-# Parsl pins each worker to whole cores; ranks float inside that cpuset.
+# The Parsl job wrapper forces OMPI_MCA_btl=self,tcp on every ORCA run (all
+# sites). Perlmutter nodes have several NICs, so a local rank connects from an
+# IP its peer does not advertise, Open MPI drops it ("unexpected IP address" in
+# orca.err), and ORCA hangs forever at STARTUP CALCULATIONS. Every rank is on
+# this node: pin TCP (BTL + mpirun's out-of-band channel) to loopback. pml=ob1
+# keeps libfabric/UCX out. Parsl pins each worker to whole cores; ranks float
+# inside that cpuset.
 export OMPI_MCA_pml=ob1
-export OMPI_MCA_btl=vader,self
+export OMPI_MCA_btl_tcp_if_include=127.0.0.1/8
+export OMPI_MCA_oob_tcp_if_include=127.0.0.1/8
 export OMPI_MCA_hwloc_base_binding_policy=none
 export OMP_NUM_THREADS=1
 
