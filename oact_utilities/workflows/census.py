@@ -1145,12 +1145,22 @@ def scan_job(
     return row
 
 
-def iter_job_dirs(roots: list[Path], limit: int | None = None):
+def iter_job_dirs(
+    roots: list[Path],
+    limit: int | None = None,
+    shard: tuple[int, int] | None = None,
+):
     """Yield ``(root, job_dir)`` for every immediate subdirectory of each root.
 
     Args:
         roots: Root directories whose immediate subdirectories are job dirs.
         limit: Optional cap on job directories taken from each root (testing).
+        shard: ``(index, count)`` to keep only every ``count``-th sorted job
+            dir of each root, starting at ``index``. The ``count`` shards of a
+            root are disjoint and together cover it, so separate processes can
+            split one large root and ``--merge`` the results. Striding rather
+            than taking contiguous blocks spreads any already-cached prefix of
+            the listing evenly across the shards.
 
     Yields:
         ``(root, job_dir)`` pairs, roots in the order given, dirs sorted.
@@ -1169,6 +1179,8 @@ def iter_job_dirs(roots: list[Path], limit: int | None = None):
         except OSError as exc:
             print(f"  Warning: cannot list {root}: {exc}", file=sys.stderr)
             continue
+        if shard is not None:
+            entries = entries[shard[0] :: shard[1]]
         if limit is not None:
             entries = entries[:limit]
         for path in entries:
@@ -1556,6 +1568,7 @@ def run_census(
     limit: int | None = None,
     chunk_size: int = 20000,
     force_thresh_ev_ang: float = DEFAULT_FORCE_THRESH_EV_ANG,
+    shard: tuple[int, int] | None = None,
 ) -> tuple[Summary, Path]:
     """Scan every job directory under ``roots`` and stream one table to disk.
 
@@ -1577,6 +1590,9 @@ def run_census(
         recompute: Bypass the ``orca_metrics.json`` cache.
         limit: Cap job directories taken from each root (testing).
         chunk_size: Rows buffered before each flush to disk.
+        force_thresh_ev_ang: fmax cutoff for the quality filter.
+        shard: ``(index, count)`` to scan one strided slice of each root; see
+            ``iter_job_dirs``.
 
     Returns:
         ``(summary, written_path)``. The path differs from ``out_path`` only
@@ -1584,7 +1600,7 @@ def run_census(
     """
     sink, written = _make_sink(out_path, fmt, chunk_size)
     summary = Summary()
-    pairs = list(iter_job_dirs(roots, limit=limit))
+    pairs = list(iter_job_dirs(roots, limit=limit, shard=shard))
 
     def work(pair: tuple[Path, Path]) -> dict:
         root, job_dir = pair
@@ -1837,6 +1853,17 @@ def _load_roots(args: argparse.Namespace) -> list[Path]:
     return resolved
 
 
+def _parse_shard(text: str) -> tuple[int, int]:
+    """Parse ``--shard I/N`` into ``(I, N)`` with ``0 <= I < N``."""
+    try:
+        index, count = (int(p) for p in text.split("/"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected I/N, got {text!r}") from None
+    if count < 1 or not 0 <= index < count:
+        raise argparse.ArgumentTypeError(f"need 0 <= I < N, got {text!r}")
+    return index, count
+
+
 def main() -> None:
     """CLI entry point for the DB-free job-directory census."""
     parser = argparse.ArgumentParser(
@@ -1969,6 +1996,16 @@ def main() -> None:
         metavar="N",
         help="Limit to the first N job directories per root, for testing",
     )
+    parser.add_argument(
+        "--shard",
+        type=_parse_shard,
+        default=None,
+        metavar="I/N",
+        help="Scan only every N-th job directory of each root, starting at "
+        "index I (0-based), so N processes can split one large root. The N "
+        "shards are disjoint and together cover the root; combine them with "
+        "--merge.",
+    )
     args = parser.parse_args()
 
     # parse_job_metrics warns per job on a charge/spin conservation violation;
@@ -1986,6 +2023,7 @@ def main() -> None:
             (args.no_metrics, "--no-metrics"),
             (args.recompute, "--recompute"),
             (args.debug is not None, "--debug"),
+            (args.shard is not None, "--shard"),
         ):
             if unsupported:
                 parser.error(f"{flag} does not apply with --merge")
@@ -2030,6 +2068,7 @@ def main() -> None:
         limit=args.debug,
         chunk_size=args.chunk_size,
         force_thresh_ev_ang=args.force_thresh,
+        shard=args.shard,
     )
     _print_report(summary, top=args.top)
 

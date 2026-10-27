@@ -118,6 +118,11 @@ class TestMatchCleanupPatterns:
         assert _match_cleanup_patterns("core.12345", False, {"tmp"}) is True
         assert _match_cleanup_patterns("orca.core", False, {"tmp"}) is True
 
+    def test_ges_files(self):
+        assert _match_cleanup_patterns("orca.ges", False, {"tmp"}) is True
+        assert _match_cleanup_patterns("orca.ges", False, {"bas"}) is False
+        assert _match_cleanup_patterns("orca.gbw", False, {"tmp"}) is False
+
     def test_orca_tmp_dir(self):
         assert _match_cleanup_patterns("orca_tmp_7dg8v19h", True, {"tmp"}) is True
         assert _match_cleanup_patterns("orca_tmp_abc123", True, {"tmp"}) is True

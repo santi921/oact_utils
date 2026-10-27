@@ -103,6 +103,7 @@ oact_utilities/
 │   ├── run_parsl_multi_node_pbs.sh        # Generic PBS Pro multi-node (PBSProProvider)
 │   ├── run_parsl_multi_node_sandia.sh     # Sandia CTS1/TLCC2 multi-block SlurmProvider
 │   ├── run_parsl_single_node_sandia.sh    # Sandia CTS1/TLCC2 single-node LocalProvider
+│   ├── run_parsl_perlmutter_{preempt,shared,regular}.sh  # NERSC Perlmutter size-banded QOS lanes
 │   └── run_parsl_coordinator.sh           # Lightweight coordinator wrapper
 ├── scripts/                    # Campaign-specific workflow scripts
 │   ├── check_census_roots.py   # Validate census roots (nesting, guess-only dirs) before a run
@@ -179,6 +180,16 @@ Three schedulers are wired into `submit_jobs.py` (`--scheduler {flux,slurm,pbspr
 - OMPI MCA settings disable PSM2/Omni-Path: `pml=ob1`, `mtl=^psm2`, `btl=tcp,self,vader`
 - Default ORCA at `/home/${USER}/orca_6_1_0_linux_x86-64_shared_openmpi418/orca` (user-installed shared build)
 - Launch scripts: `launch/run_parsl_single_node_sandia.sh` (LocalProvider inside `salloc`), `launch/run_parsl_multi_node_sandia.sh` (multi-block SlurmProvider)
+
+### NERSC Perlmutter (CPU nodes)
+
+- Scheduler: **SLURM**, `--hpc-site perlmutter` (Parsl single-node LocalProvider only; no per-job sbatch writer)
+- Node: 2x AMD EPYC 7763, 128 cores / 256 hyperthreads, 512 GB. **SLURM counts hyperthreads as CPUs**: `--cpus-per-task=60` is 30 physical cores
+- Request tasks, not one fat task (`--ntasks-per-node=128 --cpus-per-task=2`): ORCA's `mpirun` takes its slot count from the SLURM task count
+- Parsl's `"block"` affinity can hand two workers the two hyperthreads of one core; `_physical_core_affinity()` builds a `list:` affinity of whole physical cores from sysfs instead
+- ORCA 6.1.1 shared build needs OpenMPI 4.1.x; NERSC's `openmpi` module is 5.x only, so mpirun/libmpi come from the conda env (`conda install -c conda-forge 'openmpi=4.1.*'`). The Parsl job wrapper (`orca_job_wrapper`) forces `OMPI_MCA_btl=self,tcp` on every site, overriding any launch-script `OMPI_MCA_btl`. On Perlmutter's multi-NIC nodes that TCP BTL drops local-rank connections ("unexpected IP address" in `orca.err`) and ORCA hangs forever at `ORCA STARTUP CALCULATIONS`; the lanes pin `OMPI_MCA_btl_tcp_if_include` and `OMPI_MCA_oob_tcp_if_include` to `127.0.0.1/8`, plus `pml=ob1`
+- Launch scripts: `launch/run_parsl_perlmutter_{preempt,shared,regular}.sh`, one QOS per disjoint natoms band so all three run concurrently on one DB. Each preflights the mpirun version, ORCA `ldd`, and a cluster-wide `flock` mount on the DB before claiming jobs
+- `$PSCRATCH` purges files unaccessed for 8 weeks: keep long-lived installs (ORCA, conda) under `/global/common/software/<project>`
 
 ### Planned: Digital Research Alliance of Canada (Fir, Trillium, Narval, Nibi, Rorqual)
 
@@ -396,7 +407,7 @@ python -m oact_utilities.workflows.submit_jobs <db> <root_dir> [options]
 --dry-run                         # Prepare jobs but do not submit
 
 # HPC site profile (SLURM only)
---hpc-site {default,sandia}       # Selects job-script writer + worker_init
+--hpc-site {default,sandia,drac,perlmutter}  # Selects job-script writer + worker_init
 --partition PART                  # Sandia: SLURM partition (default: attaway)
 --openmpi-module MOD              # Sandia: OpenMPI module (default: aue/openmpi/4.1.6-gcc-12.3.0)
 
@@ -502,7 +513,7 @@ Removing scratch files from completed job directories:
 python -m oact_utilities.workflows.clean <db> <root_dir> [options]
 
 # Action flags (at least one required)
---clean-tmp             # Remove .tmp, .core, orca_tmp_*/ from completed jobs
+--clean-tmp             # Remove .tmp, .core, .ges, orca_tmp_*/ from completed jobs
 --clean-bas             # Remove .bas, .bas[N] from completed jobs
 --clean-all             # Both --clean-tmp and --clean-bas
 --purge-failed          # Purge failed jobs (write .do_not_rerun.json marker, delete contents)

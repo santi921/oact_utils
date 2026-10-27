@@ -18,6 +18,8 @@ Usage:
     python run_census_all.py census_roots_fixed.json --dry-run
     python run_census_all.py census_roots_fixed.json --outdir $HOME/census_out
     python run_census_all.py census_roots_fixed.json --groups 4 --workers 4
+    python run_census_all.py census_roots_fixed.json --groups 54 --workers 4 \
+        --max-jobs-per-group 15000
 """
 
 from __future__ import annotations
@@ -65,7 +67,30 @@ def _label_at_depth(group: list[tuple[str, int]], depth: int) -> str:
     return _sanitize("_".join(parts))
 
 
-def group_labels(groups: list[list[tuple[str, int]]]) -> list[str]:
+def split_large_roots(
+    sized: list[tuple[str, int]], max_jobs: int
+) -> tuple[list[tuple[str, int]], list[tuple[str, int, tuple[int, int]]]]:
+    """Separate roots above ``max_jobs`` into ``(root, size, (index, count))`` shards.
+
+    A root of ``n`` job dirs becomes ``ceil(n / max_jobs)`` strided census
+    shards (``census --shard index/count``), each at most ``max_jobs`` dirs.
+    Roots at or below the cap are returned unchanged for bin-packing.
+    """
+    whole = [(r, n) for r, n in sized if n <= max_jobs]
+    shards = []
+    for root, n in sized:
+        if n > max_jobs:
+            count = -(-n // max_jobs)
+            shards += [
+                (root, len(range(i, n, count)), (i, count)) for i in range(count)
+            ]
+    return whole, shards
+
+
+def group_labels(
+    groups: list[list[tuple[str, int]]],
+    shards: list[tuple[int, int] | None] | None = None,
+) -> list[str]:
     """Unique, filesystem-safe label per group.
 
     Labels name the shard and log file, so a collision means two processes open
@@ -73,13 +98,18 @@ def group_labels(groups: list[list[tuple[str, int]]]) -> list[str]:
     open, one silently destroys the other's output mid-write. Two roots can
     easily share their last two components (``oact/nonact_4_06/jobs_parsl`` and
     ``BLASTNet/nonact_4_06/jobs_parsl``), so deepen the label until every one is
-    distinct, then fall back to a numeric suffix.
+    distinct, then fall back to a numeric suffix. A group scanning one census
+    shard of a split root gets a ``_shardIIofNN`` suffix.
     """
+    suffixes = [
+        f"_shard{s[0]:02d}of{s[1]:02d}" if s else ""
+        for s in (shards or [None] * len(groups))
+    ]
     for depth in (2, 3, 4, 5, 6):
-        labels = [_label_at_depth(g, depth) for g in groups]
+        labels = [_label_at_depth(g, depth) + x for g, x in zip(groups, suffixes)]
         if len(set(labels)) == len(labels):
             return labels
-    labels = [_label_at_depth(g, 3) for g in groups]
+    labels = [_label_at_depth(g, 3) + x for g, x in zip(groups, suffixes)]
     return [f"{lbl}_{i}" for i, lbl in enumerate(labels)]
 
 
@@ -115,6 +145,16 @@ def main() -> int:
         "Without this, a non-empty shard directory aborts: stale shards from an "
         "earlier or aborted run get picked up by the merge, and one written by "
         "an older census version fails it outright on a column mismatch.",
+    )
+    parser.add_argument(
+        "--max-jobs-per-group",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Split any root holding more than N job dirs into ceil(size/N) "
+        "census shards (census --shard), one process each, so the largest root "
+        "no longer sets the wall time. These processes are in addition to "
+        "--groups, which then packs only the roots at or below N.",
     )
     parser.add_argument("--no-merge", action="store_true", help="Skip the merge step")
     parser.add_argument("--dry-run", action="store_true", help="Show the plan and exit")
@@ -166,8 +206,17 @@ def main() -> int:
         return 1
     print(f"  {total:,} job directories across {len(sized)} non-empty root(s)\n")
 
-    groups = bin_pack(sized, args.groups)
-    labels = group_labels(groups)
+    # --shard applies to every root a census process is given, so each shard of
+    # a split root runs as a group of its own.
+    split: list[tuple[str, int, tuple[int, int]]] = []
+    if args.max_jobs_per_group:
+        sized, split = split_large_roots(sized, args.max_jobs_per_group)
+    groups = bin_pack(sized, args.groups) if sized else []
+    shards: list[tuple[int, int] | None] = [None] * len(groups)
+    for root, n, shard in split:
+        groups.append([(root, n)])
+        shards.append(shard)
+    labels = group_labels(groups, shards)
     assert len(set(labels)) == len(labels), "group labels must be unique"
     width = max(34, max(len(lbl) for lbl in labels) + 2)
     print(f"{'group':<{width}}{'roots':>6}{'jobs':>12}")
@@ -226,8 +275,10 @@ def main() -> int:
 
     started = time.time()
     procs = []
-    for label, g in zip(labels, groups):
+    for label, g, shard in zip(labels, groups, shards):
         cmd = CENSUS + [r for r, _ in g]
+        if shard is not None:
+            cmd += ["--shard", f"{shard[0]}/{shard[1]}"]
         cmd += [
             "-o",
             os.path.join(shard_dir, f"{label}{args.suffix}"),

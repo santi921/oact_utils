@@ -10,6 +10,7 @@ import pytest
 
 from oact_utilities.utils.status import (
     _check_sella_termination,
+    _newest_first,
     _read_last_lines,
     _tail_text_file,
     check_file_termination,
@@ -278,3 +279,43 @@ def test_read_last_lines_gzip_still_supported(tmp_path):
     with gzip.open(fp, "wt") as f:
         f.write("alpha\nbeta\ngamma\n")
     assert _read_last_lines(str(fp), maxlen=2) == ["beta", "gamma"]
+
+
+def _write_restarts(tmp_path, attempts):
+    """Write flux outputs, giving earlier job IDs the newer mtimes (as after a copy)."""
+    now = time.time()
+    for i, (name, text) in enumerate(attempts):
+        fp = tmp_path / name
+        fp.write_text(text)
+        os.utime(fp, (now - 60 * i, now - 60 * i))
+
+
+def test_newest_first_orders_flux_by_job_id(tmp_path):
+    """Flux outputs order by job ID, longer IDs last-submitted, ignoring mtimes."""
+    names = ["flux-f2j9yAAAAAAA.out", "flux-f2m63AAAAAAA.out", "flux-fZZZZZZZZZZ.out"]
+    for n in names:
+        (tmp_path / n).write_text("")
+    os.utime(tmp_path / names[1], (0, 0))
+    assert _newest_first(str(tmp_path), names) == [names[1], names[0], names[2]]
+
+
+def test_newest_first_mixed_falls_back_to_mtime(tmp_path):
+    """A mix of Flux and other outputs keeps the mtime order."""
+    (tmp_path / "flux-f2j9yAAAAAAA.out").write_text("")
+    (tmp_path / "orca.out").write_text("")
+    os.utime(tmp_path / "orca.out", (0, 0))
+    files = ["orca.out", "flux-f2j9yAAAAAAA.out"]
+    assert _newest_first(str(tmp_path), files) == ["flux-f2j9yAAAAAAA.out", "orca.out"]
+
+
+def test_check_job_termination_uses_latest_flux_attempt(tmp_path):
+    """The last-submitted restart decides status even when an older one has a newer mtime."""
+    _write_restarts(
+        tmp_path,
+        [
+            ("flux-f2j9yAAAAAAA.out", "Error: orca binary not found\n"),
+            ("flux-f2m63AAAAAAA.out", "****ORCA TERMINATED NORMALLY****\n"),
+        ],
+    )
+    assert check_job_termination(str(tmp_path), hours_cutoff=100000) == 1
+    assert pull_log_file(str(tmp_path)).endswith("flux-f2m63AAAAAAA.out")

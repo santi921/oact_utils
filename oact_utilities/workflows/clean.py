@@ -143,6 +143,8 @@ _TMP_FILE_PATTERNS = [
     re.compile(r"^core$"),
     re.compile(r"^core\.\d+$"),
     re.compile(r"\.core$"),
+    # AutoStart guess orbitals (ORCA moves an existing .gbw here); orca.gbw holds the result
+    re.compile(r"\.ges$"),
 ]
 
 _BAS_FILE_PATTERNS = [
@@ -1296,7 +1298,7 @@ def main() -> None:
     action.add_argument(
         "--clean-tmp",
         action="store_true",
-        help="Remove scratch/temp files (.tmp, .core, orca_tmp_*/)",
+        help="Remove scratch/temp files (.tmp, .core, .ges, orca_tmp_*/)",
     )
     action.add_argument(
         "--clean-bas",
