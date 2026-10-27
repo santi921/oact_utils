@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import gzip
 import json
@@ -10,14 +11,17 @@ from pathlib import Path
 
 import pytest
 
+from oact_utilities.scripts.run_census_all import group_labels, split_large_roots
 from oact_utilities.workflows.census import (
     _FIELD_NAMES,
     CONV_NORMAL,
     EH_BOHR_TO_EV_ANG,
     _parse_orig_index,
+    _parse_shard,
     extract_quality_fields,
     force_stats,
     hill_formula,
+    iter_job_dirs,
     metal_class,
     parse_engrad,
     parse_inp,
@@ -399,6 +403,54 @@ def test_run_census_chunked_writes_lose_nothing(tmp_path):
     out = tmp_path / "census.csv"
     run_census([root], out, fmt="csv", chunk_size=1, workers=2)
     assert len(list(csv.DictReader(open(out)))) == 4
+
+
+def test_iter_job_dirs_shards_partition_each_root(tmp_path):
+    """The N shards of a root are disjoint and together cover every job dir."""
+    roots = []
+    for name, n in (("a", 7), ("b", 3)):
+        root = tmp_path / name
+        for i in range(n):
+            (root / f"job_{i}").mkdir(parents=True)
+        roots.append(root)
+
+    full = list(iter_job_dirs(roots))
+    shards = [list(iter_job_dirs(roots, shard=(i, 3))) for i in range(3)]
+    flat = [pair for s in shards for pair in s]
+    assert len(flat) == len(full) == 10
+    assert set(flat) == set(full)
+    assert [len(s) for s in shards] == [4, 3, 3]
+
+
+def test_run_census_shards_merge_to_full_scan(tmp_path):
+    root = _corpus(tmp_path)
+    outs = []
+    for i in range(3):
+        out = tmp_path / f"shard{i}.csv"
+        run_census([root], out, fmt="csv", shard=(i, 3))
+        outs.append(out)
+    dirs = [r["job_dir"] for out in outs for r in csv.DictReader(open(out))]
+    assert sorted(dirs) == sorted(str(root / f"job_{i}") for i in range(1, 5))
+
+
+@pytest.mark.parametrize("text", ["3/3", "-1/2", "1/0", "2", "a/b"])
+def test_parse_shard_rejects_bad_specs(text):
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_shard(text)
+
+
+def test_split_large_roots_caps_and_labels_shards():
+    sized = [("/x/big/jobs_parsl", 45056), ("/x/small/jobs_parsl", 100)]
+    whole, shards = split_large_roots(sized, 15000)
+    assert whole == [("/x/small/jobs_parsl", 100)]
+    assert [s[2] for s in shards] == [(i, 4) for i in range(4)]
+    assert sum(s[1] for s in shards) == 45056
+    assert max(s[1] for s in shards) <= 15000
+
+    groups = [[("/x/small/jobs_parsl", 100)]] + [[(r, n)] for r, n, _ in shards]
+    labels = group_labels(groups, [None] + [s[2] for s in shards])
+    assert len(set(labels)) == len(labels)
+    assert labels[1] == "big_jobs_parsl_shard00of04"
 
 
 def test_run_census_debug_limit(tmp_path):
