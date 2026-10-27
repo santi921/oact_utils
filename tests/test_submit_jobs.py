@@ -1234,6 +1234,32 @@ class TestDefaultOrcaPaths:
 
 
 @pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
+class TestOrcaJobWrapperEnv:
+    """Environment the Parsl wrapper hands to ORCA."""
+
+    def test_strips_openmp_affinity(self, tmp_path, monkeypatch):
+        """Parsl's per-worker OpenMP affinity vars must not reach ORCA's ranks."""
+        from oact_utilities.workflows.submit_jobs import orca_job_wrapper
+
+        fake_orca = tmp_path / "orca"
+        fake_orca.write_text("#!/bin/sh\nenv\n")
+        fake_orca.chmod(0o755)
+        (tmp_path / "orca.inp").write_text("! PM3\n")
+        monkeypatch.setenv("GOMP_CPU_AFFINITY", "0,1,128,129")
+        monkeypatch.setenv("KMP_AFFINITY", "explicit,proclist=[0,1,128,129]")
+
+        result = orca_job_wrapper.func(
+            1, str(tmp_path), {"orca_path": str(fake_orca)}, timeout_seconds=30
+        )
+
+        assert result["status"] == "completed"
+        env_dump = (tmp_path / "orca.out").read_text()
+        assert "GOMP_CPU_AFFINITY" not in env_dump
+        assert "KMP_AFFINITY" not in env_dump
+        assert "OMP_NUM_THREADS=1" in env_dump
+
+
+@pytest.mark.skipif(not PARSL_INSTALLED, reason="parsl not installed")
 class TestBuildParslConfigFlux:
     """Tests for build_parsl_config_flux function."""
 

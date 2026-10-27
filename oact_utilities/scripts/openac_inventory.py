@@ -34,10 +34,11 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from oact_utilities.utils.status import _is_orca_atom_scf, _newest_first
+
 JOB_NAME_RE = re.compile(
     r"^(?P<lot>[^_]+)_(?P<formula>[A-Za-z0-9]+)_spin_(?P<spin>\d+)_(?P<functional>.+)_(?P<basis>[^_]+)$"
 )
-ORCA_ATOM_RE = re.compile(r"orca_atom\d+\.out")
 ARCHIVE_SUFFIXES = (".tar.zst", ".tzst", ".tgz", ".tar.gz", ".tar")
 GEOM_NAMES = (
     "orca.xyz",
@@ -109,10 +110,17 @@ TOL_MAXG, TOL_RMSG = 3e-4, 1e-4
 
 
 def read_tail(path: Path, nbytes: int) -> str:
-    """Last ``nbytes`` of a plain or gzipped file (gzip has no seek, so it is decompressed)."""
+    """Last ``nbytes`` of a plain or gzipped file.
+
+    gzip has no seek, so a ``.gz`` is decompressed in 1 MB chunks keeping only a rolling
+    tail, which bounds memory at ~``nbytes`` + 1 MB instead of the whole output.
+    """
     if path.suffix == ".gz":
+        tail = b""
         with gzip.open(path, "rb") as f:
-            return f.read()[-nbytes:].decode(errors="replace")
+            while chunk := f.read(1 << 20):
+                tail = (tail + chunk)[-nbytes:]
+        return tail.decode(errors="replace")
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
         f.seek(max(0, f.tell() - nbytes))
@@ -260,18 +268,18 @@ def inspect(
         f
         for f in files
         if f.endswith((".out", ".out.gz"))
-        and not ORCA_ATOM_RE.fullmatch(f.removesuffix(".gz"))
+        and not _is_orca_atom_scf(f.removesuffix(".gz"))
     ]
-    # Restarted jobs leave one flux-<jobid>.out per attempt. Job IDs (base58, ASCII-ordered)
-    # sort by submission time; mtimes do not survive a copy or tar extraction.
-    flux = sorted((f for f in outs if f.startswith("flux-")), key=lambda f: (len(f), f))
+    # Restarted jobs leave one flux-<jobid>.out per attempt; take the latest by job ID
+    # (mtimes do not survive a copy or tar extraction).
+    flux = _newest_first(str(job), [f for f in outs if f.startswith("flux-")])
     out = (
         "orca.out"
         if "orca.out" in outs
         else (
             "orca.out.gz"
             if "orca.out.gz" in outs
-            else (flux[-1] if flux else (outs[0] if outs else None))
+            else (flux[0] if flux else (outs[0] if outs else None))
         )
     )
     if out:

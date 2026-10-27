@@ -66,8 +66,10 @@ ALL_LANES="small medium large"
 BASE="${PSCRATCH}/oact_calcs"
 DB_PATH="${BASE}/dbs/solvent_round1_MTD_reactive_even3_actinides.db"
 ROOT_DIR="${BASE}/jobs/solvated_reactive_test_v0/jobs_parsl"
-ENV_PREFIX="${PSCRATCH}/envs/oact"  # = `echo $CONDA_PREFIX` inside (oact)
-ORCA_DIR="${PSCRATCH}/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg"
+# $PSCRATCH purges files unaccessed for 8 weeks; prefer installs under the
+# purge-exempt /global/common/software/<project>. Both are env-overridable.
+ENV_PREFIX="${ENV_PREFIX:-${PSCRATCH}/envs/oact}"  # = `echo $CONDA_PREFIX` inside (oact)
+ORCA_DIR="${ORCA_DIR:-${PSCRATCH}/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg}"
 MAX_FAIL_COUNT=10
 
 FUNCTIONAL="wB97M-V"
@@ -99,7 +101,9 @@ fi
 LANE="${LANE:?set LANE=small|medium|large, or run: bash $0 submit}"
 lane_config "${LANE}"
 BATCH_SIZE="${BATCH_SIZE:-${BATCH_SIZE_DEFAULT}}"
-# Parsl kills stragglers 30 min before the wall so their rows reset cleanly.
+# Per-job cap counted from each job's own start, not an allocation deadline: it
+# only stops a single runaway job. Jobs still running at the wall are reset to
+# TO_RUN by submit_jobs' SIGTERM handler when SLURM ends the allocation.
 IFS=: read -r _h _m _s <<< "${WALLTIME}"
 JOB_TIMEOUT=$(( 10#${_h} * 3600 + 10#${_m} * 60 + 10#${_s} - 1800 ))
 echo "lane=${LANE}: ${MAX_WORKERS} x ${CORES_PER_WORKER} cores, natoms [${MIN_ATOMS:-0}, ${MAX_ATOMS:-inf}], batch ${BATCH_SIZE}, job timeout ${JOB_TIMEOUT}s"
@@ -133,6 +137,15 @@ export OMPI_MCA_hwloc_base_binding_policy=none
 export OMP_NUM_THREADS=1
 
 # --- preflight: fail in seconds, not after the allocation is spent ----------
+# A scratch purge leaves partial installs, so check the pieces actually used.
+if ! python -c "import oact_utilities, parsl" 2>/dev/null; then
+    echo "ERROR: ${ENV_PREFIX}/bin/python cannot import oact_utilities + parsl (purged env?)" >&2
+    exit 1
+fi
+if [ ! -x "${ORCA_PATH}" ] || [ ! -x "${ORCA_DIR}/orca_scf_mpi" ]; then
+    echo "ERROR: ORCA binaries missing under ${ORCA_DIR} (purged?)" >&2
+    exit 1
+fi
 _ompi_ver=$(mpirun --version 2>/dev/null || true)
 if [[ "${_ompi_ver}" != *"(Open MPI) 4.1."* ]]; then
     echo "ERROR: mpirun is not Open MPI 4.1.x: $(command -v mpirun || echo none)" >&2

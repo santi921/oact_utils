@@ -1088,6 +1088,14 @@ if PARSL_AVAILABLE:
         # --- Environment isolation for concurrent ORCA instances ---
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = "1"
+        # Parsl's cpu_affinity exports the worker's whole CPU list as
+        # GOMP_CPU_AFFINITY / KMP_AFFINITY. Every ORCA rank would inherit it,
+        # and an OpenMP runtime binds each rank's initial thread to the first
+        # CPU in that list, stacking all ranks on one core. The worker's
+        # sched_setaffinity cpuset is inherited regardless and still confines
+        # the ranks.
+        env.pop("GOMP_CPU_AFFINITY", None)
+        env.pop("KMP_AFFINITY", None)
 
         # Give each worker a private TMPDIR inside the job directory so that
         # ORCA's temp files (orca_atom*.out/.gbw, MPI shared-memory segments)

@@ -50,8 +50,10 @@ set -euo pipefail
 BASE="${PSCRATCH}/oact_calcs"
 DB_PATH="${BASE}/dbs/solvent_round1_MTD_reactive_even3_actinides.db"
 ROOT_DIR="${BASE}/jobs/solvated_reactive_test_v0/jobs_parsl"
-ENV_PREFIX="${PSCRATCH}/envs/oact"  # = `echo $CONDA_PREFIX` inside (oact)
-ORCA_DIR="${PSCRATCH}/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg"
+# $PSCRATCH purges files unaccessed for 8 weeks; prefer installs under the
+# purge-exempt /global/common/software/<project>. Both are env-overridable.
+ENV_PREFIX="${ENV_PREFIX:-${PSCRATCH}/envs/oact}"  # = `echo $CONDA_PREFIX` inside (oact)
+ORCA_DIR="${ORCA_DIR:-${PSCRATCH}/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg}"
 
 MAX_WORKERS=4
 CORES_PER_WORKER=32         # physical cores == %pal nprocs; 4*32 = 128 (full node)
@@ -59,7 +61,9 @@ MIN_ATOMS=73                # band: natoms >= 73 (no cap; max in DB is 124)
 MAX_ATOMS=
 BATCH_SIZE="${BATCH_SIZE:-12}"  # ~3 waves over 24h. submit_jobs claims ALL of these
                             # RUNNING up front, so size it to fill the wall.
-JOB_TIMEOUT=84600           # 23.5h: Parsl kills stragglers before the 24h wall
+JOB_TIMEOUT=84600           # per-job cap from each job's own start, not an
+                            # allocation deadline; jobs running at the wall are
+                            # reset to TO_RUN by submit_jobs' SIGTERM handler
 MAX_FAIL_COUNT=10
 
 # ORCA settings
@@ -100,6 +104,15 @@ export OMPI_MCA_hwloc_base_binding_policy=none
 export OMP_NUM_THREADS=1
 
 # --- preflight: fail in seconds, not after the allocation is spent ----------
+# A scratch purge leaves partial installs, so check the pieces actually used.
+if ! python -c "import oact_utilities, parsl" 2>/dev/null; then
+    echo "ERROR: ${ENV_PREFIX}/bin/python cannot import oact_utilities + parsl (purged env?)" >&2
+    exit 1
+fi
+if [ ! -x "${ORCA_PATH}" ] || [ ! -x "${ORCA_DIR}/orca_scf_mpi" ]; then
+    echo "ERROR: ORCA binaries missing under ${ORCA_DIR} (purged?)" >&2
+    exit 1
+fi
 _ompi_ver=$(mpirun --version 2>/dev/null || true)
 if [[ "${_ompi_ver}" != *"(Open MPI) 4.1."* ]]; then
     echo "ERROR: mpirun is not Open MPI 4.1.x: $(command -v mpirun || echo none)" >&2
