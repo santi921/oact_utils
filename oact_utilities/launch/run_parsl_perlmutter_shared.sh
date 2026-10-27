@@ -108,7 +108,7 @@ if ! python -c "import oact_utilities, parsl" 2>/dev/null; then
     echo "ERROR: ${ENV_PREFIX}/bin/python cannot import oact_utilities + parsl (purged env?)" >&2
     exit 1
 fi
-if [ ! -x "${ORCA_PATH}" ] || [ ! -x "${ORCA_DIR}/orca_scf_mpi" ]; then
+if [ ! -x "${ORCA_PATH}" ] || [ ! -x "${ORCA_DIR}/orca_leanscf_mpi" ]; then
     echo "ERROR: ORCA binaries missing under ${ORCA_DIR} (purged?)" >&2
     exit 1
 fi
@@ -118,7 +118,7 @@ if [[ "${_ompi_ver}" != *"(Open MPI) 4.1."* ]]; then
     echo "       conda install -p ${ENV_PREFIX} -c conda-forge 'openmpi=4.1.*'" >&2
     exit 1
 fi
-_missing=$(ldd "${ORCA_DIR}/orca_scf_mpi" 2>&1 | grep "not found" || true)
+_missing=$(ldd "${ORCA_DIR}/orca_leanscf_mpi" 2>&1 | grep "not found" || true)
 if [ -n "${_missing}" ]; then
     echo "ERROR: unresolved ORCA libraries:" >&2
     echo "${_missing}" >&2
