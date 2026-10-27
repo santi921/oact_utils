@@ -15,6 +15,33 @@ def _is_orca_atom_scf(filename: str) -> bool:
     return _ORCA_ATOM_RE.match(os.path.basename(filename)) is not None
 
 
+# Flux names job stdout flux-<jobid>.out; the ID is a base58 FLUID with a leading "f".
+_FLUX_OUT_RE = re.compile(r"^flux-f[1-9A-HJ-NP-Za-km-z]+\.out$")
+
+
+def _newest_first(dir: str, files: list[str]) -> list[str]:
+    """Order output files newest first.
+
+    When every file is a Flux job output, order by job ID: FLUIDs grow with submission
+    time, and unlike mtimes they survive a copy or tar extraction, which can leave every
+    restart attempt with the same timestamp. Base58 digits are in ASCII order, so longer
+    IDs are larger and equal-length IDs compare as strings. Any other mix falls back to
+    mtime.
+
+    Args:
+        dir: Directory holding the files.
+        files: File names inside ``dir``.
+
+    Returns:
+        The file names, newest first.
+    """
+    if files and all(_FLUX_OUT_RE.match(f) for f in files):
+        return sorted(files, key=lambda f: (len(f), f), reverse=True)
+    return sorted(
+        files, key=lambda f: os.path.getmtime(os.path.join(dir, f)), reverse=True
+    )
+
+
 def _tail_text_file(file_path: str, maxlen: int, block: int = 65536) -> list[str]:
     """Return the last ``maxlen`` lines of a plain-text file via end-seeking.
 
@@ -255,9 +282,7 @@ def check_job_termination(
             files_out = [f for f in files if f.endswith("logs")]
 
     if len(files_out) > 1:
-        files_out.sort(
-            key=lambda x: os.path.getmtime(os.path.join(dir, x)), reverse=True
-        )
+        files_out = _newest_first(dir, files_out)
         if not check_many:
             files_out = files_out[:1]
 
@@ -316,9 +341,7 @@ def check_geometry_steps(
             files_out = [f for f in files if f.endswith("logs")]
 
     if len(files_out) > 1:
-        files_out.sort(
-            key=lambda x: os.path.getmtime(os.path.join(dir, x)), reverse=True
-        )
+        files_out = _newest_first(dir, files_out)
         if not check_many:
             files_out = files_out[:1]
 
@@ -410,12 +433,8 @@ def pull_log_file(root_dir: str) -> str:
             f"No log files (.logs, .out, .out.gz, or flux-*) found in {root_dir}"
         )
 
-    # If multiple files, sort by modification time (most recent first)
     if len(log_file) > 1:
-        log_file.sort(
-            key=lambda x: os.path.getmtime(os.path.join(root_dir, x)),
-            reverse=True,
-        )
+        log_file = _newest_first(root_dir, log_file)
 
     return os.path.join(root_dir, log_file[0])
 
