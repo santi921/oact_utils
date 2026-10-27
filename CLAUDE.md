@@ -513,7 +513,7 @@ Removing scratch files from completed job directories:
 python -m oact_utilities.workflows.clean <db> <root_dir> [options]
 
 # Action flags (at least one required)
---clean-tmp             # Remove .tmp, .core, orca_tmp_*/ from completed jobs
+--clean-tmp             # Remove .tmp, .core, .ges, orca_tmp_*/ from completed jobs
 --clean-bas             # Remove .bas, .bas[N] from completed jobs
 --clean-all             # Both --clean-tmp and --clean-bas
 --purge-failed          # Purge failed jobs (write .do_not_rerun.json marker, delete contents)
