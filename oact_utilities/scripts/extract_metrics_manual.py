@@ -14,12 +14,21 @@ Usage:
     # Read-only source tree -> mirror outputs elsewhere:
     python -m oact_utilities.scripts.extract_metrics_manual /lus/.../barfoot \
         --output-root /home/me/barfoot_metrics --workers 8
+    # Refresh generator_metrics.json for a census-selected list, one shard of 8:
+    python -m oact_utilities.scripts.extract_metrics_manual \
+        --job-list reparse_jobs.txt --shard 0/8 --generator-only --recompute \
+        --processes 64
+
+The qtaim parse is CPU-bound pure Python, so threads (--workers) serialize on
+the GIL; use --processes for large generator passes.
 """
 
 import argparse
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from oact_utilities.utils.analysis import (
@@ -30,6 +39,7 @@ from oact_utilities.utils.analysis import (
     parse_job_metrics,
 )
 from oact_utilities.utils.status import pull_log_file
+from oact_utilities.workflows.census import _parse_shard
 
 try:
     from qtaim_gen.source.core.parse_orca import (
@@ -60,6 +70,12 @@ def _find_job_dirs(root: Path, recursive: bool) -> list[Path]:
             results.append(d)
     results.sort()
     return results
+
+
+def _read_job_list(path: Path) -> list[Path]:
+    """Job dirs from a file of one path per line; blanks and ``#`` lines skipped."""
+    lines = (ln.strip() for ln in path.read_text().splitlines())
+    return sorted({Path(ln) for ln in lines if ln and not ln.startswith("#")})
 
 
 def _mirrored_dir(job_dir: Path, source_root: Path, output_root: Path) -> Path:
@@ -97,6 +113,7 @@ def process_job(
     do_generator: bool,
     unzip: bool,
     hours_cutoff: float,
+    generator_only: bool = False,
 ) -> dict:
     result: dict = {
         "job_dir": str(job_dir),
@@ -105,6 +122,19 @@ def process_job(
         "success": False,
         "error": None,
     }
+
+    # Trusts the caller's selection (e.g. census status == completed) instead of
+    # re-deriving success from orca_metrics, so only orca.out is read.
+    if generator_only:
+        if find_orca_output_file is None or not find_orca_output_file(str(job_dir)):
+            result["error"] = "generator: no orca.out/output.out (gzip-only?)"
+            return result
+        result["generator_ok"] = (
+            parse_generator_data(job_dir, recompute=recompute) is not None
+        )
+        if not result["generator_ok"]:
+            result["error"] = "generator: parse failed"
+        return result
 
     try:
         metrics = parse_job_metrics(
@@ -163,8 +193,40 @@ def process_job(
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("root", type=Path, help="Root directory of job subdirectories")
+    p.add_argument(
+        "root",
+        type=Path,
+        nargs="?",
+        help="Root directory of job subdirectories (or use --job-list)",
+    )
+    p.add_argument(
+        "--job-list",
+        type=Path,
+        default=None,
+        help="File of job directories, one per line, instead of walking a root",
+    )
+    p.add_argument(
+        "--shard",
+        type=_parse_shard,
+        default=None,
+        metavar="I/N",
+        help="Process only every N-th job dir (sorted), starting at index I, so N "
+        "jobs can split one list",
+    )
     p.add_argument("--workers", type=int, default=4, help="Parallel workers")
+    p.add_argument(
+        "--processes",
+        type=int,
+        default=None,
+        help="Use a process pool of this size instead of --workers threads",
+    )
+    p.add_argument(
+        "--generator-only",
+        action="store_true",
+        help="Only write generator_metrics.json; skip orca_metrics.json and the "
+        "success check, so pass only completed jobs (with --recompute this "
+        "refreshes the generator cache alone)",
+    )
     p.add_argument(
         "--output-root",
         type=Path,
@@ -197,14 +259,27 @@ def main() -> None:
         help="Timeout threshold (h) passed to parse_job_metrics",
     )
     p.add_argument(
+        "--errors-out",
+        type=Path,
+        default=None,
+        help="Write every failed job dir and its error, tab-separated, to this file",
+    )
+    p.add_argument(
         "--recursive",
         action="store_true",
         help="Recurse into nested subdirectories (default: only immediate children)",
     )
     args = p.parse_args()
 
-    root = args.root.resolve()
-    if not root.is_dir():
+    if (args.root is None) == (args.job_list is None):
+        p.error("give exactly one of root or --job-list")
+    if args.job_list is not None and args.output_root is not None:
+        p.error("--output-root mirrors paths relative to root; not with --job-list")
+    if args.generator_only and (args.no_generator or not GENERATOR_AVAILABLE):
+        p.error("--generator-only needs qtaim_gen installed and no --no-generator")
+
+    root = (args.root or args.job_list).resolve()
+    if args.job_list is None and not root.is_dir():
         raise SystemExit(f"Not a directory: {root}")
 
     output_root: Path | None = None
@@ -220,8 +295,13 @@ def main() -> None:
         if not GENERATOR_AVAILABLE:
             print("Note: qtaim_gen not installed; skipping generator_metrics.json")
 
-    job_dirs = _find_job_dirs(root, recursive=args.recursive)
-    print(f"Found {len(job_dirs)} job directories under {root}")
+    if args.job_list is not None:
+        job_dirs = _read_job_list(args.job_list)
+    else:
+        job_dirs = _find_job_dirs(root, recursive=args.recursive)
+    if args.shard is not None:
+        job_dirs = job_dirs[args.shard[0] :: args.shard[1]]
+    print(f"Found {len(job_dirs)} job directories from {root}")
     if not job_dirs:
         return
 
@@ -230,8 +310,14 @@ def main() -> None:
     n_success = 0
     n_errors = 0
     errors: list[tuple[str, str]] = []
+    started = time.time()
 
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+    pool = (
+        ProcessPoolExecutor(max_workers=args.processes)
+        if args.processes
+        else ThreadPoolExecutor(max_workers=args.workers)
+    )
+    with pool as ex:
         futures = {
             ex.submit(
                 process_job,
@@ -242,6 +328,7 @@ def main() -> None:
                 do_generator,
                 args.unzip,
                 args.hours_cutoff,
+                args.generator_only,
             ): jd
             for jd in job_dirs
         }
@@ -257,9 +344,12 @@ def main() -> None:
                 n_errors += 1
                 errors.append((r["job_dir"], r["error"]))
             if i % 50 == 0 or i == len(futures):
+                rate = i / max(time.time() - started, 1e-9)
                 print(
                     f"  [{i}/{len(futures)}] metrics={n_metrics} "
-                    f"generator={n_generator} success={n_success} errors={n_errors}"
+                    f"generator={n_generator} success={n_success} errors={n_errors} "
+                    f"({rate:.2f} jobs/s)",
+                    flush=True,
                 )
 
     print()
@@ -268,8 +358,18 @@ def main() -> None:
     print(f"generator_metrics.json   : {n_generator}")
     print(f"Successful ORCA jobs     : {n_success}")
     print(f"Errors                   : {n_errors}")
+    elapsed = time.time() - started
+    print(
+        f"Elapsed                  : {elapsed:.0f} s ({len(job_dirs) / elapsed:.2f} jobs/s)"
+    )
 
     if errors:
+        print("\nErrors by kind:")
+        for msg, count in Counter(m for _, m in errors).most_common(10):
+            print(f"  [{count:>7,}x] {msg[:120]}")
+        if args.errors_out is not None:
+            args.errors_out.write_text("".join(f"{jd}\t{m}\n" for jd, m in errors))
+            print(f"Wrote {len(errors)} errors to {args.errors_out}")
         print("\nFirst 20 errors:")
         for jd, msg in errors[:20]:
             print(f"  {jd}: {msg}")
