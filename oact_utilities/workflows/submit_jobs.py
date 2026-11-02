@@ -130,6 +130,7 @@ class OrcaConfig(TypedDict, total=False):
     diis_option: str | None
     ks_method: str | None
     mem_per_job_mb: int | None
+    trah: bool
     preopt: Literal["gxtb", "mlip"] | None
     preopt_fmax: float
     preopt_max_steps: int
@@ -155,6 +156,7 @@ DEFAULT_ORCA_CONFIG: OrcaConfig = {
     "save_all_steps": False,
     "diis_option": None,
     "ks_method": None,
+    "trah": False,
     "preopt": None,
     "preopt_fmax": 0.05,
     "preopt_max_steps": 200,
@@ -434,6 +436,7 @@ def prepare_job_directory(
             nbo=config.get("nbo", False),
             mbis=config.get("mbis", False),
             diis_option=config.get("diis_option"),
+            trah=config.get("trah", False),
             cores=n_cores,
             opt=use_orca_opt,
             opt_level=config.get("opt_level", "normal"),
@@ -3794,6 +3797,16 @@ def main():
         help="Enable KDIIS SCF convergence acceleration",
     )
     orca_group.add_argument(
+        "--trah",
+        action="store_true",
+        help=(
+            "Drop NoTRAH/NOSOSCF from the simple input so ORCA falls back to the "
+            "TRAH second-order SCF solver when DIIS stalls (open-shell 4f/5f SCFs). "
+            "No effect on TRAH with wB97M-V or other self-consistent VV10 functionals: "
+            "ORCA switches AutoTRAH off for them, so the flag then only enables SOSCF"
+        ),
+    )
+    orca_group.add_argument(
         "--optimizer",
         choices=["orca", "sella"],
         default=None,
@@ -4023,6 +4036,7 @@ def main():
         "max_opt_steps": args.max_opt_steps,
         "save_all_steps": args.save_all_steps,
         "diis_option": "KDIIS" if args.kdiis else None,
+        "trah": args.trah,
         "ks_method": args.ks_method,
         "mem_per_job_mb": args.mem_per_job,
         "preopt": args.preopt,

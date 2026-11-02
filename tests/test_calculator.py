@@ -212,6 +212,40 @@ def test_ks_method_appended_to_simple_input():
 
 
 # ---------------------------------------------------------------------------
+# TRAH fallback toggle
+# ---------------------------------------------------------------------------
+
+
+def test_templates_disable_trah_by_default():
+    """Every template carries NoTRAH and NOSOSCF unless trah=True is requested."""
+    h2 = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]])
+    for template in ("omol", "omol_base", "x2c"):
+        simple, _ = get_orca_blocks(h2, simple_input=template)
+        assert "NoTRAH" in simple.split()
+        assert "NOSOSCF" in simple.split()
+
+
+def test_trah_removes_notrah_and_nososcf():
+    """trah=True drops both keywords and leaves the rest of the line intact."""
+    h2 = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]])
+    for template in ("omol", "omol_base", "x2c"):
+        simple, _ = get_orca_blocks(h2, simple_input=template, trah=True)
+        tokens = simple.split()
+        assert "NoTRAH" not in tokens
+        assert "NOSOSCF" not in tokens
+        assert "RIJCOSX" in tokens
+
+
+def test_trah_combines_with_kdiis():
+    """trah and KDIIS are independent switches."""
+    h2 = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]])
+    simple, _ = get_orca_blocks(h2, diis_option="KDIIS", trah=True)
+    tokens = simple.split()
+    assert "KDIIS" in tokens and "DIIS" not in tokens
+    assert "NoTRAH" not in tokens
+
+
+# ---------------------------------------------------------------------------
 # PM3 template
 # ---------------------------------------------------------------------------
 
