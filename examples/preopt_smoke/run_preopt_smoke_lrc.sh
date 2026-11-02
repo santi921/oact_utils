@@ -21,15 +21,16 @@
 #   git clone -b feat/preopt-gxtb-mlip https://github.com/santi921/oact_utils.git $S/../oact_utils   # or git pull
 #   conda activate oact && pip install -e $S/../oact_utils   # mlip arm: also pip install fairchem-core
 #
-# The SLURM header is yours (account/partition/qos). Two deliberate changes: no --requeue (a requeued
+# The SLURM header is yours (account/partition/qos). Deliberate changes: 4 tasks instead of
+# --ntasks=1 --cpus-per-task=4 (see the comment on that line), no --requeue (a requeued
 # coordinator would resubmit jobs the DB already marked running) and --time 02:00 (tiny jobs).
 # =============================================================================
 
 #SBATCH --account=pc_aditik
 #SBATCH --partition=lr7
 #SBATCH --qos=lr_normal
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4   # tasks, not one fat task: ORCA's mpirun takes its slot count from SLURM tasks
 #SBATCH --mem=16G
 #SBATCH --time=02:00:00
 #SBATCH --job-name=preopt-smoke
