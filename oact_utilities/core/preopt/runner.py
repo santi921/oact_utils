@@ -18,7 +18,12 @@ import textwrap
 from pathlib import Path
 from typing import Any, Literal
 
-from oact_utilities.core.preopt._common import PREOPT_XYZ, PreoptResult, parse_xyz
+from oact_utilities.core.preopt._common import (
+    PREOPT_XYZ,
+    STATUS_FILE,
+    PreoptResult,
+    parse_xyz,
+)
 from oact_utilities.core.preopt.elements import UnsupportedElementsError
 
 CONFIG_FILE = "preopt_config.json"
@@ -75,6 +80,8 @@ def run_preopt_in_job_dir(
 ) -> int:
     """Pre-optimize ``input.xyz`` in ``job_dir``; return the process exit code (see module doc)."""
     job = Path(job_dir)
+    # A stale status from an earlier attempt must not read as this run's outcome.
+    (job / STATUS_FILE).unlink(missing_ok=True)
     xyz = (job / INPUT_XYZ).read_text()
     try:
         if method == "gxtb":
