@@ -79,13 +79,18 @@ for need in orca_ndoint orca_propint orca_leanscf_mpi; do
     [ -e "${ORCA_DIR}/${need}" ] || fail "${need} missing from ${ORCA_DIR} (incomplete ORCA install)"
 done
 [ -f "${SMOKE_DIR}/smoke.db" ] || fail "${SMOKE_DIR}/smoke.db missing (scp it first)"
-python - <<PY || fail "oact_utilities is not importable from ${REPO_DIR}"
-import oact_utilities, pathlib, sys
+python - <<PY || fail "python preflight failed (message above)"
+import importlib.util, pathlib, sys
+import oact_utilities
 here = pathlib.Path(oact_utilities.__file__).resolve()
 repo = pathlib.Path("${REPO_DIR}").resolve()
 if repo not in here.parents:
-    sys.exit(f"imports {here}, expected under {repo}")
-from oact_utilities.core.preopt.runner import PREOPT_CMD  # branch has the pre-opt code
+    sys.exit(f"oact_utilities is imported from {here}, expected under {repo}: pip install -e {repo}")
+if importlib.util.find_spec("oact_utilities.core.preopt") is None:
+    sys.exit(
+        f"the checkout at {repo} has no pre-opt code: run "
+        f"git -C {repo} fetch origin && git -C {repo} switch feat/preopt-gxtb-mlip && git -C {repo} pull"
+    )
 PY
 
 PREOPT_ARGS=()
