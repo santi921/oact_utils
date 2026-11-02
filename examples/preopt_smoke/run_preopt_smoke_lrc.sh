@@ -97,7 +97,9 @@ PREOPT_ARGS=()
 case "${ARM}" in
 gxtb)
     [ -x "${GXTB_PATH}" ] || fail "g-xTB binary missing: ${GXTB_PATH} (see setup in this script's header)"
-    "${GXTB_PATH}" --help 2>&1 | grep -q -- "--gxtb" || fail "${GXTB_PATH} is not a g-xTB build (no --gxtb)"
+    # Capture first: `xtb --help | grep -q` under pipefail reports SIGPIPE (141) on a correct match.
+    _help="$("${GXTB_PATH}" --help 2>&1 || true)"
+    grep -q -- "--gxtb" <<<"${_help}" || fail "${GXTB_PATH} is not a g-xTB build (no --gxtb); first output lines: $(head -3 <<<"${_help}")"
     PREOPT_ARGS=(--preopt gxtb --gxtb-path "${GXTB_PATH}")
     ;;
 mlip)
