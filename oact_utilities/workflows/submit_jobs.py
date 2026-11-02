@@ -23,7 +23,7 @@ from typing import Any, Callable, Literal, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
 from ..core.orca.sella_runner import write_sella_runner_shim
-from ..core.preopt._common import format_xyz
+from ..core.preopt._common import format_xyz, preopt_db_fields
 from ..core.preopt.elements import (
     UnsupportedElementsError,
     get_supported_elements,
@@ -2977,6 +2977,7 @@ def submit_batch_parsl(
                                 "wall_time": wall_time,
                                 "n_cores": n_cores_val,
                             }
+                            metrics_dict.update(preopt_db_fields(job_dir))
                             if GENERATOR_AVAILABLE:
                                 try:
                                     gen_data = parse_generator_data(job_dir)

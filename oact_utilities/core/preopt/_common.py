@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -59,6 +60,24 @@ class PreoptResult:
             return cls(**json.loads(path.read_text()))
         except (OSError, ValueError, TypeError):
             return None
+
+
+def preopt_db_fields(job_dir: str | Path) -> dict[str, Any]:
+    """Workflow-DB ``preopt_*`` columns for a job directory; ``{}`` when it had no pre-opt.
+
+    A failed pre-opt that ORCA continued past records the method and ``preopt_converged = 0``.
+    """
+    res = PreoptResult.read(job_dir)
+    if res is None:
+        return {}
+    return {
+        "preopt_method": res.method,
+        "preopt_converged": int(res.converged and res.ok),
+        "preopt_fmax": res.fmax_final,
+        "preopt_energy_ev": res.energy_ev,
+        "preopt_rmsd": res.rmsd_from_input,
+        "preopt_seconds": res.seconds,
+    }
 
 
 def parse_xyz(text: str) -> tuple[list[str], np.ndarray]:

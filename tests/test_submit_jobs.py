@@ -1988,7 +1988,7 @@ class TestWriteJobUpdate:
 
         from oact_utilities.workflows.architector_workflow import _METRIC_COLUMNS
 
-        text_cols = {"job_dir", "generator_data", "error_message"}
+        text_cols = {"job_dir", "generator_data", "error_message", "preopt_method"}
         metrics = {
             col: (f"{col}-value" if col in text_cols else float(i + 1))
             for i, col in enumerate(_METRIC_COLUMNS)

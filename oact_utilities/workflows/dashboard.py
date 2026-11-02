@@ -14,9 +14,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
+from ..core.preopt._common import preopt_db_fields
 from ..utils.basis import count_basis_functions
 from ..utils.status import check_job_termination, parse_failure_reason
 from .architector_workflow import (
+    _PREOPT_COLUMNS,
     _QUALITY_COLUMNS,
     ArchitectorWorkflow,
     JobStatus,
@@ -597,6 +599,8 @@ def _extract_metrics_from_dir(
                 except (TypeError, ValueError):
                     pass
 
+        result.update(preopt_db_fields(job_dir))
+
         if profile:
             result["_profile"] = {
                 "parse_sec": t_parse,
@@ -698,7 +702,7 @@ def _parallel_extract_metrics(
                     "wall_time": result["wall_time"],
                     "n_cores": result["n_cores"],
                 }
-                for col in _QUALITY_COLUMNS:
+                for col in (*_QUALITY_COLUMNS, *_PREOPT_COLUMNS):
                     if result.get(col) is not None:
                         metrics_entry[col] = result[col]
                 if result.get("generator_data") is not None:
