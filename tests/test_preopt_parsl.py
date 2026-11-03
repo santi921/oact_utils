@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import signal
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -69,6 +72,30 @@ def test_preopt_failure_continue_runs_orca(
     assert result["status"] == "completed", result
     assert "ran-orca" in (job / "orca.out").read_text()
     assert not (job / "preopt.xyz").exists()
+
+
+def test_preopt_timeout_kills_xtb_child(
+    fake_xtb: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pidfile = tmp_path / "xtb.pid"
+    monkeypatch.setenv("FAKE_XTB_MODE", "hang")
+    monkeypatch.setenv("FAKE_XTB_PIDFILE", str(pidfile))
+    job, cfg = _job(tmp_path, fake_xtb)
+    from oact_utilities.workflows.submit_jobs import orca_job_wrapper
+
+    result = orca_job_wrapper.func(1, str(job), cfg, timeout_seconds=5)
+    assert result["status"] == "failed" and "timed out" in result["error"]
+    assert not (job / "orca.out").exists()
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(pid, signal.SIGKILL)
+        pytest.fail("xtb kept running after the pre-opt timeout")
 
 
 def test_missing_shim_fails_cleanly(fake_xtb: str, tmp_path: Path) -> None:

@@ -82,8 +82,9 @@ def run_preopt_in_job_dir(
     job = Path(job_dir)
     # A stale status from an earlier attempt must not read as this run's outcome.
     (job / STATUS_FILE).unlink(missing_ok=True)
-    xyz = (job / INPUT_XYZ).read_text()
+    xyz = ""
     try:
+        xyz = (job / INPUT_XYZ).read_text()
         if method == "gxtb":
             from oact_utilities.core.preopt.gxtb import run_gxtb_preopt
 
@@ -126,8 +127,12 @@ def run_preopt_in_job_dir(
         out_xyz = xyz
 
     if result.ok:
-        (job / PREOPT_XYZ).write_text(out_xyz)
-        rewrite_inp_geometry(job / "orca.inp", out_xyz)
+        try:
+            # orca.inp first: preopt.xyz exists only when ORCA will start from it.
+            rewrite_inp_geometry(job / "orca.inp", out_xyz)
+            (job / PREOPT_XYZ).write_text(out_xyz)
+        except (OSError, ValueError) as exc:
+            result.error = f"orca.inp rewrite: {type(exc).__name__}: {exc}"[:500]
     if on_fail == "continue" and not result.ok:
         result.detail = (result.detail + "; continued on raw geometry").lstrip("; ")
     result.write(job)

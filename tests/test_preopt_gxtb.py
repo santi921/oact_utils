@@ -61,10 +61,14 @@ def test_mock_open_shell_passes_uhf(fake_xtb: str, tmp_path: Path) -> None:
     assert "--uhf 2" in (tmp_path / "w" / "opt" / "args.log").read_text()
 
 
-def test_mock_not_converged_flag(fake_xtb: str, tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("FAKE_XTB_MODE", "not_converged")
-    _, res = run_gxtb_preopt(WATER, 0, 1, tmp_path / "w", xtb_path=fake_xtb)
-    assert res.ok and not res.converged
+@pytest.mark.parametrize("grad, converged", [("1e-5", True), ("0.01", False)])
+def test_mock_cycles_exhausted_graded_by_measured_force(
+    fake_xtb: str, tmp_path: Path, monkeypatch, grad: str, converged: bool
+) -> None:
+    monkeypatch.setenv("FAKE_XTB_MODE", "cycles_exhausted")
+    monkeypatch.setenv("FAKE_XTB_GRAD", grad)
+    _, res = run_gxtb_preopt(WATER, 0, 1, tmp_path / "w", xtb_path=fake_xtb, fmax=0.05)
+    assert res.ok and res.converged is converged
 
 
 def test_mock_high_force_not_converged(
@@ -80,6 +84,19 @@ def test_mock_scf_failure_uses_seed(fake_xtb: str, tmp_path: Path, monkeypatch) 
     _, res = run_gxtb_preopt(WATER, 0, 1, tmp_path / "w", xtb_path=fake_xtb)
     assert res.ok and "scf_seed" in res.detail
     assert "--etemp 3000" in (tmp_path / "w" / "scf_seed" / "args.log").read_text()
+
+
+def test_mock_requeue_ignores_stale_restart(
+    fake_xtb: str, tmp_path: Path, monkeypatch
+) -> None:
+    # A stale opt/xtbrestart from an earlier attempt would hide the SCF failure.
+    stale = tmp_path / "w" / "opt"
+    stale.mkdir(parents=True)
+    (stale / "xtbrestart").write_text("old density")
+    monkeypatch.setenv("FAKE_XTB_MODE", "scf_fail_first")
+    _, res = run_gxtb_preopt(WATER, 0, 1, tmp_path / "w", xtb_path=fake_xtb)
+    assert res.ok and "scf_seed" in res.detail
+    assert (stale / "xtbrestart").read_text() == "restart"
 
 
 def test_mock_xtb_failure_recorded_not_raised(

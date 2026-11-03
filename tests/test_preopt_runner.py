@@ -14,6 +14,7 @@ from oact_utilities.core.preopt._common import PreoptResult, parse_xyz
 from oact_utilities.core.preopt.runner import (
     PREOPT_CMD,
     rewrite_inp_geometry,
+    run_preopt_in_job_dir,
     write_preopt_shim,
 )
 from oact_utilities.utils.create import read_geom_from_inp_file
@@ -115,6 +116,28 @@ def test_shim_mlip_without_checkpoint_fails_cleanly(tmp_path: Path) -> None:
     assert _run_shim(job).returncode == 1
     res = PreoptResult.read(job)
     assert res and "mlip_checkpoint" in res.error
+
+
+@pytest.mark.parametrize(("on_fail", "code"), [("fail", 1), ("continue", 0)])
+def test_inp_rewrite_failure_is_recorded(
+    fake_xtb: str, tmp_path: Path, on_fail: str, code: int
+) -> None:
+    bad_inp = INP.replace("H 0.0 -0.76 -0.48\n", "")
+    job = _job(tmp_path, inp=bad_inp)
+    (job / "input.xyz").write_text(WATER)
+    rc = run_preopt_in_job_dir(job, "gxtb", 0, 1, gxtb_path=fake_xtb, on_fail=on_fail)
+    assert rc == code
+    res = PreoptResult.read(job)
+    assert res and res.error.startswith("orca.inp rewrite: ValueError")
+    assert (job / "orca.inp").read_text() == bad_inp
+    assert not (job / "preopt.xyz").exists()
+
+
+def test_missing_input_xyz_is_recorded(tmp_path: Path) -> None:
+    job = _job(tmp_path)
+    assert run_preopt_in_job_dir(job, "gxtb", 0, 1) == 1
+    res = PreoptResult.read(job)
+    assert res and res.error.startswith("FileNotFoundError")
 
 
 @pytest.mark.gxtb

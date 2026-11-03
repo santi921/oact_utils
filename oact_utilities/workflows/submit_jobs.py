@@ -23,7 +23,12 @@ from typing import Any, Callable, Literal, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
 from ..core.orca.sella_runner import write_sella_runner_shim
-from ..core.preopt._common import format_xyz, preopt_db_fields
+from ..core.preopt._common import (
+    PREOPT_XYZ,
+    STATUS_FILE,
+    format_xyz,
+    preopt_db_fields,
+)
 from ..core.preopt.elements import (
     UnsupportedElementsError,
     get_supported_elements,
@@ -38,7 +43,12 @@ from ..utils.analysis import (
     parse_job_metrics,
 )
 from ..utils.architector import xyz_string_to_atoms
-from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
+from ..utils.status import (
+    check_job_termination,
+    parse_failure_reason,
+    preopt_failure,
+    pull_log_file,
+)
 from .architector_workflow import (
     _METRIC_COLUMNS,
     ArchitectorWorkflow,
@@ -469,6 +479,11 @@ def prepare_job_directory(
                 orca_cmd=config.get("orca_path", "orca"),
                 save_all_steps=config.get("save_all_steps", False),
             )
+
+        # A pre-opt result from an earlier attempt must not grade this one, including a
+        # resubmission without --preopt.
+        (job_dir / STATUS_FILE).unlink(missing_ok=True)
+        (job_dir / PREOPT_XYZ).unlink(missing_ok=True)
 
         # Pre-optimization shim: runs on the worker before the ORCA/Sella step
         preopt_method = config.get("preopt")
@@ -975,6 +990,10 @@ def _skip_finished_on_disk(
             completed_ids.append(job.id)
         elif status == -1:
             failed_ids.append(job.id)
+            preopt_reason = preopt_failure(job_dir)
+            if preopt_reason:
+                failed_errors[job.id] = f"Pre-optimization failed: {preopt_reason}"
+                continue
             try:
                 log_file = pull_log_file(job_dir)
                 reason = parse_failure_reason(log_file)
@@ -1234,6 +1253,7 @@ if PARSL_AVAILABLE:
             stderr_path = job_dir_path / "orca.err"
 
         # --- Optional g-xTB / MLIP pre-optimization (rewrites orca.inp coordinates) ---
+        orca_timeout: float = timeout_seconds
         if orca_config.get("preopt"):
             import json
             import sys
@@ -1248,22 +1268,29 @@ if PARSL_AVAILABLE:
             pre_env = os.environ.copy()
             pre_env.pop("GOMP_CPU_AFFINITY", None)
             pre_env.pop("KMP_AFFINITY", None)
-            try:
-                with open(job_dir_path / "preopt_driver.log", "w") as pre_log:
-                    pre_rc = subprocess.run(
-                        [sys.executable, str(preopt_script)],
-                        cwd=job_dir,
-                        env=pre_env,
-                        stdout=pre_log,
-                        stderr=subprocess.STDOUT,
-                        timeout=timeout_seconds,
-                    ).returncode
-            except subprocess.TimeoutExpired:
-                return {
-                    "job_id": job_id,
-                    "status": "failed",
-                    "error": f"Pre-optimization timed out after {timeout_seconds}s",
-                }
+            pre_start = time.time()
+            with open(job_dir_path / "preopt_driver.log", "w") as pre_log:
+                # New session so a timeout kills the shim and its xtb child together.
+                pre_proc = subprocess.Popen(
+                    [sys.executable, str(preopt_script)],
+                    cwd=job_dir,
+                    env=pre_env,
+                    stdout=pre_log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                try:
+                    pre_rc = pre_proc.wait(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(pre_proc.pid), signal.SIGKILL)
+                    pre_proc.wait()
+                    return {
+                        "job_id": job_id,
+                        "status": "failed",
+                        "error": f"Pre-optimization timed out after {timeout_seconds}s",
+                    }
+            # The pre-opt and ORCA share one --job-timeout budget.
+            orca_timeout = max(1.0, timeout_seconds - (time.time() - pre_start))
             if pre_rc != 0:
                 reason = ""
                 try:
@@ -1335,7 +1362,7 @@ if PARSL_AVAILABLE:
             )
 
             try:
-                proc.wait(timeout=timeout_seconds)
+                proc.wait(timeout=orca_timeout)
             except subprocess.TimeoutExpired:
                 # Kill the entire process group (ORCA + mpirun + orca_main workers)
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)

@@ -162,7 +162,7 @@ def run_gxtb_preopt(
         xyz: Single-frame XYZ string.
         charge: Molecular charge.
         mult: Spin multiplicity (2S+1).
-        workdir: Directory for xtb scratch; created if missing.
+        workdir: Directory for xtb scratch; any existing contents are deleted first.
         xtb_path: g-xTB build of the xtb executable.
         fmax: Target largest per-atom force (eV/Angstrom). Sets the xtb optimizer level.
         max_cycles: Maximum ANCopt cycles.
@@ -196,6 +196,10 @@ def run_gxtb_preopt(
     opt_dir = workdir / "opt"
 
     try:
+        # xtb restarts from any xtbrestart in its cwd, so a requeued job would start
+        # from the previous attempt's density.
+        if workdir.exists():
+            shutil.rmtree(workdir)
         try:
             _run_xtb(xtb_path, xyz, opt_dir, opt_flags, env, timeout)
         except SCFNotConverged:
@@ -236,9 +240,9 @@ def run_gxtb_preopt(
     result.fmax_final = max_atom_force(grad) * EH_BOHR_TO_EV_ANG
     result.energy_ev = energy_eh * HARTREE_EV
     result.n_steps = len(log_energies(opt_dir / "xtbopt.log"))
-    result.converged = (
-        result.fmax_final <= fmax and not (opt_dir / "NOT_CONVERGED").exists()
-    )
+    # xtb exits 0 with "normal termination" even when ANCopt runs out of cycles, so the
+    # measured force is the only convergence signal.
+    result.converged = result.fmax_final <= fmax
     result.rmsd_from_input = kabsch_rmsd(p0, p1)
     result.seconds = time.time() - t0
     return format_xyz(symbols, p1), result

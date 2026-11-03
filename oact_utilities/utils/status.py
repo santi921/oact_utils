@@ -276,11 +276,29 @@ def check_job_termination(
         1 if the job terminated successfully, -1 if it failed,
         -2 if timeout, 0 if still running or incomplete.
     """
+    status = _check_output_termination(
+        dir,
+        check_many=check_many,
+        flux_tf=flux_tf,
+        hours_cutoff=hours_cutoff,
+        optimizer=optimizer,
+    )
     # A job that died in the pre-optimization never wrote ORCA output and would otherwise
-    # read as to_run/running until the age heuristic fires.
-    if preopt_failure(dir) is not None:
+    # read as to_run/running until the age heuristic fires. A normally terminated output
+    # still wins over a stale pre-opt status left by an earlier attempt.
+    if status != 1 and preopt_failure(dir) is not None:
         return -1
+    return status
 
+
+def _check_output_termination(
+    dir: str,
+    check_many: bool,
+    flux_tf: bool,
+    hours_cutoff,
+    optimizer: str | None,
+) -> int:
+    """``check_job_termination`` without the pre-opt override; same return codes."""
     # Sella jobs: check sella_status.txt instead of ORCA output.
     # Auto-detect when optimizer is None by looking for run_sella.py marker.
     if optimizer == "sella" or (

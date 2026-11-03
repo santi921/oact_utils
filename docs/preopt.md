@@ -44,6 +44,9 @@ The pre-opt runs at execution time on the worker, never at prep time on the logi
 4. Exit code is 0 on success, and on failure only with `--preopt-on-fail continue`. Otherwise the job script stops
    before ORCA (`|| exit 1`) and the Parsl wrapper returns a failed result with the recorded reason.
 
+In Parsl mode the pre-opt and ORCA share one `--job-timeout` budget: ORCA gets whatever the pre-opt left. A pre-opt
+that runs out of time is killed together with its xtb process.
+
 Files left in the job directory:
 
 | File | Keep? | Content |
@@ -57,7 +60,13 @@ Files left in the job directory:
 ## Status and database
 
 - `check_job_termination()` reads `preopt_status.json`: a recorded error returns failed (-1), because a job that dies
-  in the pre-opt never writes `orca.out`. A pre-opt that failed under `continue` is not a job failure.
+  in the pre-opt never writes `orca.out`. A pre-opt that failed under `continue` is not a job failure, and a normally
+  terminated ORCA output always wins over a recorded pre-opt error.
+- The recorded error becomes the job's failure reason (`Pre-optimization failed: ...`) in the dashboard
+  `error_message`, at submit time, and in the census `failure_reason`.
+- `prepare_job_directory()` deletes `preopt_status.json` and `preopt.xyz` from an earlier attempt, so a requeued or
+  resubmitted job (with or without `--preopt`) is never graded by the previous run. The xtb scratch dir
+  `preopt_gxtb/` is also cleared before each run, because xtb restarts from any `xtbrestart` it finds.
 - Six columns are written for completed jobs in both Parsl mode and `dashboard --update --extract-metrics`
   (through `_METRIC_COLUMNS`): `preopt_method` (TEXT), `preopt_converged` (INTEGER 0/1), `preopt_fmax` (eV/Angstrom),
   `preopt_energy_ev` (eV), `preopt_rmsd` (Angstrom), `preopt_seconds` (s). Older databases gain them on open.
@@ -89,7 +98,9 @@ On the worker the check runs again before the model loads, in case the DB is sta
   converges on the norm of the full gradient, which bounds the largest per-atom force. `0.05` selects `normal`,
   `0.01` selects `vtight`.
 - The result is verified with a gradient single point restarted from the optimizer's `xtbrestart`; `preopt_fmax` is the
-  measured value, and `converged` requires it to be at or below the requested fmax. A fresh SCF on an open-shell
+  measured value, and `converged` requires it to be at or below the requested fmax. That measurement is the only
+  convergence signal: when ANCopt runs out of `--cycles`, g-xTB 6.7.1 prints `FAILED TO CONVERGE GEOMETRY
+  OPTIMIZATION` but still exits 0 with `normal termination` and writes `.xtboptok`. A fresh SCF on an open-shell
   actinide can land on a different state, which is why the check restarts from the optimizer's density.
 - If the first SCF fails, the guess is seeded from an SCF at 3000 K and the optimization reruns at the default
   temperature (noted in `preopt_status.json`).

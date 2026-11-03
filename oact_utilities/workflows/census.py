@@ -70,7 +70,12 @@ from typing import Any
 
 from ..core.orca.calc import ACTINIDE_LIST
 from ..utils.analysis import parse_job_metrics
-from ..utils.status import _read_last_lines, parse_failure_reason, pull_log_file
+from ..utils.status import (
+    _read_last_lines,
+    parse_failure_reason,
+    preopt_failure,
+    pull_log_file,
+)
 from .clean import MARKER_FILENAME
 from .inventory import (
     _STATUS_COMPLETED,
@@ -1095,6 +1100,16 @@ def scan_job(
             row["failure_reason"] = parse_failure_reason(out_path)
         except OSError:
             pass
+    # A job stopped by a failed pre-opt has no ORCA output; its reason is in
+    # preopt_status.json (check_job_termination already graded it failed).
+    if (
+        status_label == _STATUS_FAILED
+        and row["failure_reason"] is None
+        and "preopt_status.json" in names
+    ):
+        preopt_reason = preopt_failure(str(job_dir))
+        if preopt_reason:
+            row["failure_reason"] = f"Pre-optimization failed: {preopt_reason}"
 
     # A purge marker means clean.py/merge_job_roots.py gave up on this job. The
     # dashboard treats the marker as an override and flips such a row to FAILED,

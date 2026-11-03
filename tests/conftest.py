@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
-# Behaviour switches via FAKE_XTB_MODE: ok | scf_fail_first | bad_exit | not_converged
+# Behaviour switches via FAKE_XTB_MODE: ok | scf_fail_first | bad_exit | cycles_exhausted |
+# hang (records its pid in FAKE_XTB_PIDFILE, then sleeps).
+# cycles_exhausted mirrors real g-xTB 6.7.1 at --cycles: the failure is printed on stdout,
+# but the exit code is 0 and the banner still reads "normal termination".
 FAKE_XTB = textwrap.dedent(
     """\
     #!{python}
@@ -29,6 +32,10 @@ FAKE_XTB = textwrap.dedent(
         sys.exit(1)
     if mode == "bad_exit":
         sys.exit(3)
+    if mode == "hang":
+        import time
+        Path(os.environ["FAKE_XTB_PIDFILE"]).write_text(str(os.getpid()))
+        time.sleep(120)
     Path("xtbrestart").write_text("restart")
     if "--opt" in args:
         out = [xyz[0], "", *xyz[2 : 2 + n]]
@@ -37,11 +44,11 @@ FAKE_XTB = textwrap.dedent(
             "\\n".join(f"{{n}}\\n energy: -5.{{i}} gnorm: 0.01\\n" for i in range(4))
         )
         Path("xtbrestart").write_text("restart")
-        if mode == "not_converged":
-            Path("NOT_CONVERGED").write_text("")
+        Path(".xtboptok").write_text("")
+        if mode == "cycles_exhausted":
+            print("*** FAILED TO CONVERGE GEOMETRY OPTIMIZATION IN 2 ITERATIONS ***")
     if "--grad" in args:
         g = os.environ.get("FAKE_XTB_GRAD", "1e-5")
-        lines = ["#", str(n), "#", "-5.0"] + ["0.0"] * 0
         lines = ["#", str(n), "#", "-5.0", "#"]
         lines += [g, "0.0", "0.0"] * n
         Path("in.engrad").write_text("\\n".join(lines) + "\\n")

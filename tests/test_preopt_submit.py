@@ -131,6 +131,42 @@ def test_status_success_and_missing_file(tmp_path: Path) -> None:
     assert preopt_failure(str(tmp_path)) is None
 
 
+def test_status_normal_termination_beats_stale_preopt_failure(tmp_path: Path) -> None:
+    (tmp_path / "preopt_status.json").write_text(
+        '{"method": "gxtb", "error": "RuntimeError: boom", "detail": ""}'
+    )
+    (tmp_path / "orca.out").write_text("...\n****ORCA TERMINATED NORMALLY****\n")
+    assert check_job_termination(str(tmp_path)) == 1
+
+
+def test_failure_reason_comes_from_preopt_status(tmp_path: Path) -> None:
+    from oact_utilities.workflows.dashboard import _probe_unlinked_job
+    from oact_utilities.workflows.submit_jobs import _skip_finished_on_disk
+
+    job = prepare_job_directory(_record(), tmp_path, orca_config=CFG)
+    (job / "preopt_status.json").write_text(
+        '{"method": "mlip", "error": "UnsupportedElementsError: no U"}'
+    )
+    expected = "Pre-optimization failed: UnsupportedElementsError: no U"
+    assert _probe_unlinked_job(job, hours_cutoff=24) == (True, -1, expected)
+
+    rec = _record()
+    rec.job_dir = str(job)
+    wf = MagicMock()
+    assert _skip_finished_on_disk([rec], tmp_path, "job_{orig_index}", wf) == []
+    assert wf.update_status.call_args.kwargs["error_message"] == expected
+
+
+@pytest.mark.parametrize("cfg", [{"orca_path": "/f/orca"}, CFG])
+def test_reprepare_clears_stale_preopt_result(tmp_path: Path, cfg: dict) -> None:
+    job = prepare_job_directory(_record(), tmp_path, orca_config=CFG)
+    (job / "preopt_status.json").write_text('{"method": "gxtb", "error": "boom"}')
+    (job / "preopt.xyz").write_text("stale")
+    prepare_job_directory(_record(), tmp_path, orca_config=cfg)
+    assert not (job / "preopt_status.json").exists()
+    assert not (job / "preopt.xyz").exists()
+
+
 def test_cli_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for argv, msg in [
         (["--preopt", "mlip"], "requires --mlip-checkpoint"),

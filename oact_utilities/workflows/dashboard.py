@@ -16,7 +16,11 @@ from typing import Any, Callable
 
 from ..core.preopt._common import preopt_db_fields
 from ..utils.basis import count_basis_functions
-from ..utils.status import check_job_termination, parse_failure_reason
+from ..utils.status import (
+    check_job_termination,
+    parse_failure_reason,
+    preopt_failure,
+)
 from .architector_workflow import (
     _PREOPT_COLUMNS,
     _QUALITY_COLUMNS,
@@ -1368,7 +1372,10 @@ def _probe_unlinked_job(
     disk_status_code = check_job_termination(str(job_dir), hours_cutoff=hours_cutoff)
 
     error_msg = None
-    if disk_status_code == -1:
+    preopt_reason = preopt_failure(str(job_dir)) if disk_status_code == -1 else None
+    if preopt_reason:
+        error_msg = f"Pre-optimization failed: {preopt_reason}"
+    elif disk_status_code == -1:
         # Find the .out file for parse_failure_reason
         out_files = [
             f
@@ -2009,7 +2016,10 @@ def recover_orphaned_jobs(
         disk_status = check_job_termination(job_dir, hours_cutoff=hours_cutoff)
 
         error_msg = None
-        if disk_status == -1:
+        preopt_reason = preopt_failure(job_dir) if disk_status == -1 else None
+        if preopt_reason:
+            error_msg = f"Pre-optimization failed: {preopt_reason}"
+        elif disk_status == -1:
             try:
                 from ..utils.status import pull_log_file
 
