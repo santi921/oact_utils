@@ -75,6 +75,12 @@ oact_utilities/
 │   ├── _base.py                # Base job functions (run_and_summarize, prep_calculator)
 │   ├── calc.py                 # Calculator setup, ORCA block generation, templates
 │   └── recipes.py              # High-level recipes (single_point, ase_relaxation, pure_ase_relaxation)
+├── core/preopt/                # Optional g-xTB / MLIP pre-optimization before the ORCA step
+│   ├── elements.py             # Element coverage (g-xTB Z=1-103, OAct .pt refs, registry omol refs), UnsupportedElementsError
+│   ├── gxtb.py                 # run_gxtb_preopt (xtb --gxtb, restart-consistent force check)
+│   ├── mlip.py                 # run_mlip_preopt (fairchem + LBFGS, model cached per process)
+│   ├── runner.py               # run_preopt.py shim writer, orca.inp coordinate rewrite, PREOPT_CMD
+│   └── _common.py              # PreoptResult (preopt_status.json), preopt_db_fields, geometry helpers
 ├── utils/
 │   ├── analysis.py             # ORCA output parsers (forces, SCF, energy, timings, populations)
 │   ├── architector.py          # Architector CSV → SQLite DB creation
@@ -235,6 +241,17 @@ salloc -N1 -p attaway -A fy250086 -t 8:00:00 && \
 
 See `docs/parsl_integration.md` for full Parsl architecture details.
 
+### Pre-optimization (g-xTB / MLIP)
+
+`--preopt gxtb|mlip` relaxes each geometry on the worker before the unchanged ORCA or Sella step: a generated
+`run_preopt.py` writes `preopt.xyz` and `preopt_status.json` and rewrites the `*xyz` block of `orca.inp`. Job-file
+writers prepend `PREOPT_CMD`; the Parsl `orca_job_wrapper` runs the shim first. Default off.
+
+- Element coverage is checked at submit time from the DB `elements` column and again on the worker. An MLIP never raises on an untrained element, so coverage comes from its energy references (OAct `.pt`: Z=1-103 except Rn; registry omol models such as UMA: Z=1-83, no actinides; g-xTB: Z=1-103).
+- Failed pre-opt: `--preopt-on-fail fail` (default) stops before ORCA and `check_job_termination()` reads `preopt_status.json` as failed; `continue` runs ORCA on the raw geometry.
+- g-xTB is a separate xtb build (grimme-lab/g-xtb `binaries/`); macOS needs `xattr -dr com.apple.quarantine`. Pass `--gxtb-path`; never rely on a scratch location that purges.
+- Use the pinned black from `pre-commit run black --files ...`, not a bare `black .`/`ruff --fix` over directories: the local CLI versions reformat unrelated files.
+
 ### ORCA Memory Sizing
 
 ORCA interprets `%maxcore` as memory **per MPI rank**, not per job. `get_mem_estimate()` in `core/orca/calc.py` returns a per-process value with a 1500 MB floor. Pass `--mem-per-job MB` on `submit_jobs` to clamp total job memory to 85% of a budget; recommended on memory-constrained nodes:
@@ -273,6 +290,8 @@ SQLite table `structures` with WAL mode for concurrent access:
 | `homo_lumo_gap_alpha` / `homo_lumo_gap_beta` | REAL | Per-spin HOMO-LUMO gaps (Eh)                                                 |
 | `exchange_deviation` | INTEGER | 1 when the output carried the exchange-deviation warning                                         |
 | `orca_parser_version` | INTEGER | qtaim parser version that produced the quality scalars (1 = alpha channel only)                 |
+| `preopt_method` / `preopt_converged` | TEXT / INTEGER | Pre-optimizer (`gxtb`/`mlip`) and whether it reached `--preopt-fmax`; NULL without `--preopt` |
+| `preopt_fmax` / `preopt_energy_ev` / `preopt_rmsd` / `preopt_seconds` | REAL | Measured fmax (eV/Angstrom), pre-opt energy (eV, not DFT), RMSD from input (Angstrom), wall time (s) |
 | `error_message` | TEXT       | Error message if failed                                                                           |
 | `fail_count`    | INTEGER    | Retry counter (incremented on reset)                                                              |
 | `worker_id`     | TEXT       | Scheduler job ID owning this molecule (SLURM/Flux ID), used for crash recovery                    |
@@ -440,6 +459,13 @@ python -m oact_utilities.workflows.submit_jobs <db> <root_dir> [options]
 --save-all-steps                  # Sella: keep per-step ORCA outputs for replay/debug
 --nbo                             --mbis             --kdiis
 --mem-per-job MB                  # Total-job memory clamp; sizes %maxcore per MPI rank
+
+# Pre-optimization before ORCA (optional; see docs/preopt.md)
+--preopt {gxtb,mlip}              --preopt-fmax 0.05   # eV/Angstrom
+--preopt-max-steps 200            --preopt-on-fail {fail,continue}
+--gxtb-path /path/to/xtb          # g-xTB build of xtb (--preopt gxtb)
+--mlip-checkpoint PATH_OR_NAME    --mlip-device {cpu,cuda}   # --preopt mlip
+--skip-unsupported                # Skip rows whose elements the pre-optimizer cannot handle (default: abort)
 ```
 
 ### 3. Job Monitoring & Dashboards
@@ -863,6 +889,7 @@ Tests live in `tests/` with test data in `tests/files/`. When adding new functio
 - `test_check_multi_spin.py` / `test_run_multi_spin.py` - Multi-spin workflows
 - `test_chunk_architector.py` / `test_chunk_architector_lmdb.py` - CSV chunking
 - `test_quacc.py` - Quacc integration
+- `test_preopt_{elements,gxtb,mlip,runner,submit,parsl,clean,db}.py` - Pre-optimization. Mock layer runs everywhere; native tests are marked `gxtb` / `mlip` and skip when the binary or model is absent (`GXTB_PATH`, `ORCA_PATH`, `OACT_TEST_CKPT`, `OACT_TEST_REGISTRY_MODEL`). See docs/preopt.md
 
 ## Performance Patterns
 
@@ -882,6 +909,7 @@ See `docs/solutions/performance-issues/` for detailed writeups.
 - `oact_utilities/workflows/README.md` - Comprehensive workflow documentation
 - `oact_utilities/workflows/QUICKSTART.md` - 3-minute quick start guide
 - `docs/parsl_integration.md` - Parsl mode architecture and usage
+- `docs/preopt.md` - g-xTB / MLIP pre-optimization: flags, element coverage, files, DB columns, installing g-xTB, test strata
 - `docs/plans/` - Architecture decision records
 - `docs/solutions/logic-errors/` - Documented bug fixes (SCF parsing, timeout priority)
 - `docs/solutions/performance-issues/` - Performance optimization writeups

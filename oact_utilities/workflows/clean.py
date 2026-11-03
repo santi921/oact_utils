@@ -119,6 +119,12 @@ _EXCLUSION_SET = frozenset(
         "run_sella.py",
         "results.pkl",
         "sella_driver.log",
+        "preopt.xyz",
+        "preopt_status.json",
+        "preopt_config.json",
+        "preopt_driver.log",
+        "run_preopt.py",
+        "input.xyz",
         MARKER_FILENAME,
     }
 )
@@ -131,6 +137,10 @@ _TRJ_RE = re.compile(r"_trj\.xyz$")
 
 # Regex for orca_tmp_* directory names (must be direct child of job dir)
 _ORCA_TMP_DIR_RE = re.compile(r"^orca_tmp_[a-zA-Z0-9_]+$")
+
+# g-xTB pre-optimization scratch (xtbrestart, xtbopt.log, per-pass dirs); preopt.xyz and
+# preopt_status.json live in the job dir itself and are kept.
+_XTB_SCRATCH_DIR_RE = re.compile(r"^preopt_gxtb$")
 
 # ---------------------------------------------------------------------------
 # Pattern matching
@@ -179,7 +189,7 @@ def _match_cleanup_patterns(name: str, is_dir: bool, categories: set[str]) -> bo
         return False
 
     if "tmp" in categories:
-        if is_dir and _ORCA_TMP_DIR_RE.match(name):
+        if is_dir and (_ORCA_TMP_DIR_RE.match(name) or _XTB_SCRATCH_DIR_RE.match(name)):
             return True
         if not is_dir:
             for pattern in _TMP_FILE_PATTERNS:

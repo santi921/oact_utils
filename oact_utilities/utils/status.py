@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import os
 import re
 import time
@@ -233,6 +234,24 @@ def _check_sella_termination(dir: str, hours_cutoff: int = 6) -> int:
     return 0
 
 
+def preopt_failure(dir: str) -> str | None:
+    """Return the error recorded by a failed pre-optimization, else None.
+
+    Reads ``preopt_status.json`` (written by ``run_preopt.py``). A pre-opt that failed with
+    ``preopt_on_fail="continue"`` is not a job failure: ORCA ran on the raw geometry, which the
+    status file marks with ``continued on raw geometry``.
+    """
+    try:
+        with open(os.path.join(dir, "preopt_status.json"), errors="replace") as f:
+            status = json.load(f)
+    except (OSError, ValueError):
+        return None
+    error = status.get("error") or ""
+    if error and "continued on raw geometry" not in (status.get("detail") or ""):
+        return str(error)
+    return None
+
+
 def check_job_termination(
     dir: str,
     check_many: bool = False,
@@ -257,6 +276,29 @@ def check_job_termination(
         1 if the job terminated successfully, -1 if it failed,
         -2 if timeout, 0 if still running or incomplete.
     """
+    status = _check_output_termination(
+        dir,
+        check_many=check_many,
+        flux_tf=flux_tf,
+        hours_cutoff=hours_cutoff,
+        optimizer=optimizer,
+    )
+    # A job that died in the pre-optimization never wrote ORCA output and would otherwise
+    # read as to_run/running until the age heuristic fires. A normally terminated output
+    # still wins over a stale pre-opt status left by an earlier attempt.
+    if status != 1 and preopt_failure(dir) is not None:
+        return -1
+    return status
+
+
+def _check_output_termination(
+    dir: str,
+    check_many: bool,
+    flux_tf: bool,
+    hours_cutoff,
+    optimizer: str | None,
+) -> int:
+    """``check_job_termination`` without the pre-opt override; same return codes."""
     # Sella jobs: check sella_status.txt instead of ORCA output.
     # Auto-detect when optimizer is None by looking for run_sella.py marker.
     if optimizer == "sella" or (

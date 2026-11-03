@@ -14,9 +14,15 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
+from ..core.preopt._common import preopt_db_fields
 from ..utils.basis import count_basis_functions
-from ..utils.status import check_job_termination, parse_failure_reason
+from ..utils.status import (
+    check_job_termination,
+    parse_failure_reason,
+    preopt_failure,
+)
 from .architector_workflow import (
+    _PREOPT_COLUMNS,
     _QUALITY_COLUMNS,
     ArchitectorWorkflow,
     JobStatus,
@@ -597,6 +603,8 @@ def _extract_metrics_from_dir(
                 except (TypeError, ValueError):
                     pass
 
+        result.update(preopt_db_fields(job_dir))
+
         if profile:
             result["_profile"] = {
                 "parse_sec": t_parse,
@@ -698,7 +706,7 @@ def _parallel_extract_metrics(
                     "wall_time": result["wall_time"],
                     "n_cores": result["n_cores"],
                 }
-                for col in _QUALITY_COLUMNS:
+                for col in (*_QUALITY_COLUMNS, *_PREOPT_COLUMNS):
                     if result.get(col) is not None:
                         metrics_entry[col] = result[col]
                 if result.get("generator_data") is not None:
@@ -1364,7 +1372,10 @@ def _probe_unlinked_job(
     disk_status_code = check_job_termination(str(job_dir), hours_cutoff=hours_cutoff)
 
     error_msg = None
-    if disk_status_code == -1:
+    preopt_reason = preopt_failure(str(job_dir)) if disk_status_code == -1 else None
+    if preopt_reason:
+        error_msg = f"Pre-optimization failed: {preopt_reason}"
+    elif disk_status_code == -1:
         # Find the .out file for parse_failure_reason
         out_files = [
             f
@@ -2005,7 +2016,10 @@ def recover_orphaned_jobs(
         disk_status = check_job_termination(job_dir, hours_cutoff=hours_cutoff)
 
         error_msg = None
-        if disk_status == -1:
+        preopt_reason = preopt_failure(job_dir) if disk_status == -1 else None
+        if preopt_reason:
+            error_msg = f"Pre-optimization failed: {preopt_reason}"
+        elif disk_status == -1:
             try:
                 from ..utils.status import pull_log_file
 

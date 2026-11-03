@@ -721,6 +721,26 @@ def test_purge_marker_makes_job_failed_and_recovers_reason(tmp_path):
     assert summary.status["to_run"] == 0
 
 
+def test_preopt_failure_reports_failed_with_reason(tmp_path):
+    """A job stopped by a failed pre-opt has no orca.out; the reason is in its status."""
+    root = tmp_path / "jobs"
+    _write_job(
+        root,
+        "job_3",
+        inp=_INP_AMO,
+        extra={
+            "preopt_status.json": '{"method": "gxtb", "error": "RuntimeError: boom"}'
+        },
+    )
+
+    out = tmp_path / "census.csv"
+    summary, _ = run_census([root], out, fmt="csv")
+    row = next(iter(csv.DictReader(open(out))))
+    assert row["status"] == "failed"
+    assert row["failure_reason"] == "Pre-optimization failed: RuntimeError: boom"
+    assert summary.status["to_run"] == 0
+
+
 def test_purge_marker_without_reason_still_reports_failed(tmp_path):
     root = tmp_path / "jobs"
     job = _write_job(root, "job_2")

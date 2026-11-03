@@ -17,11 +17,25 @@ import subprocess
 import sys
 import time
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Literal, TypedDict
 
 from ..core.orca.calc import write_orca_inputs
 from ..core.orca.sella_runner import write_sella_runner_shim
+from ..core.preopt._common import (
+    PREOPT_XYZ,
+    STATUS_FILE,
+    format_xyz,
+    preopt_db_fields,
+)
+from ..core.preopt.elements import (
+    UnsupportedElementsError,
+    get_supported_elements,
+    gxtb_supported_elements,
+    unsupported_elements,
+)
+from ..core.preopt.runner import PREOPT_CMD, write_preopt_shim
 from ..utils.analysis import (
     GENERATOR_AVAILABLE,
     find_timings_and_cores,
@@ -29,7 +43,12 @@ from ..utils.analysis import (
     parse_job_metrics,
 )
 from ..utils.architector import xyz_string_to_atoms
-from ..utils.status import check_job_termination, parse_failure_reason, pull_log_file
+from ..utils.status import (
+    check_job_termination,
+    parse_failure_reason,
+    preopt_failure,
+    pull_log_file,
+)
 from .architector_workflow import (
     _METRIC_COLUMNS,
     ArchitectorWorkflow,
@@ -93,6 +112,15 @@ class OrcaConfig(TypedDict, total=False):
             `%maxcore` is sized so total memory stays under 85% of this value.
             Recommended on memory-constrained nodes (Sandia CTS-1: ~60000,
             TLCC2: ~30000). Default: None (no clamp; per-process floor only).
+        preopt: Pre-optimize each geometry before the ORCA step: "gxtb" (g-xTB build of
+            xtb) or "mlip" (fairchem checkpoint). Default: None (off).
+        preopt_fmax: Pre-optimizer force threshold in eV/Angstrom (default: 0.05).
+        preopt_max_steps: Maximum pre-optimizer steps/cycles (default: 200).
+        gxtb_path: g-xTB xtb executable (default: "xtb" on PATH).
+        mlip_checkpoint: OAct .pt path or fairchem registry name (required for "mlip").
+        mlip_device: "cpu" (default) or "cuda".
+        preopt_on_fail: "fail" (default) stops the job before ORCA; "continue" runs
+            ORCA on the raw geometry and records the error in preopt_status.json.
     """
 
     functional: str
@@ -113,6 +141,13 @@ class OrcaConfig(TypedDict, total=False):
     ks_method: str | None
     mem_per_job_mb: int | None
     trah: bool
+    preopt: Literal["gxtb", "mlip"] | None
+    preopt_fmax: float
+    preopt_max_steps: int
+    gxtb_path: str
+    mlip_checkpoint: str | None
+    mlip_device: str
+    preopt_on_fail: Literal["fail", "continue"]
 
 
 DEFAULT_ORCA_CONFIG: OrcaConfig = {
@@ -132,6 +167,13 @@ DEFAULT_ORCA_CONFIG: OrcaConfig = {
     "diis_option": None,
     "ks_method": None,
     "trah": False,
+    "preopt": None,
+    "preopt_fmax": 0.05,
+    "preopt_max_steps": 200,
+    "gxtb_path": "xtb",
+    "mlip_checkpoint": None,
+    "mlip_device": "cpu",
+    "preopt_on_fail": "fail",
 }
 
 DEFAULT_ORCA_PATHS = {
@@ -438,6 +480,30 @@ def prepare_job_directory(
                 save_all_steps=config.get("save_all_steps", False),
             )
 
+        # A pre-opt result from an earlier attempt must not grade this one, including a
+        # resubmission without --preopt.
+        (job_dir / STATUS_FILE).unlink(missing_ok=True)
+        (job_dir / PREOPT_XYZ).unlink(missing_ok=True)
+
+        # Pre-optimization shim: runs on the worker before the ORCA/Sella step
+        preopt_method = config.get("preopt")
+        if preopt_method:
+            write_preopt_shim(
+                outputdir=job_dir,
+                xyz=format_xyz(atoms.get_chemical_symbols(), atoms.get_positions()),
+                method=preopt_method,
+                charge=charge,
+                mult=mult,
+                fmax=config.get("preopt_fmax", 0.05),
+                max_steps=config.get("preopt_max_steps", 200),
+                gxtb_path=config.get("gxtb_path", "xtb"),
+                mlip_checkpoint=config.get("mlip_checkpoint"),
+                mlip_device=config.get("mlip_device", "cpu"),
+                on_fail=config.get("preopt_on_fail", "fail"),
+                threads=n_cores,
+                job_id=job_record.id,
+            )
+
     # Call custom setup function if provided
     if setup_func:
         setup_func(job_dir, job_record)
@@ -456,6 +522,7 @@ def write_flux_job_file(
     input_file: str = "orca.inp",
     ld_library_path: str | None = None,
     optimizer: str | None = None,
+    preopt: bool = False,
 ) -> Path:
     """Write a Flux job submission script.
 
@@ -469,6 +536,7 @@ def write_flux_job_file(
         conda_env: Conda environment to activate.
         input_file: Name of the ORCA input file.
         optimizer: Optimizer engine ("orca", "sella", or None for single-point).
+        preopt: Run ``python run_preopt.py`` (g-xTB/MLIP pre-optimization) before the job command.
 
     Returns:
         Path to the created flux job file.
@@ -482,6 +550,8 @@ def write_flux_job_file(
         run_cmd = "python run_sella.py > sella_driver.log 2>&1\n"
     else:
         run_cmd = f"{orca_path} {input_file}\n"
+    if preopt:
+        run_cmd = PREOPT_CMD + run_cmd
 
     lines = [
         "#!/bin/sh\n",
@@ -523,6 +593,7 @@ def write_slurm_job_file(
     input_file: str = "orca.inp",
     ld_library_path: str | None = None,
     optimizer: str | None = None,
+    preopt: bool = False,
 ) -> Path:
     """Write a SLURM job submission script.
 
@@ -537,6 +608,7 @@ def write_slurm_job_file(
         input_file: Name of the ORCA input file.
         ld_library_path: Override LD_LIBRARY_PATH.
         optimizer: Optimizer engine ("orca", "sella", or None for single-point).
+        preopt: Run ``python run_preopt.py`` (g-xTB/MLIP pre-optimization) before the job command.
 
     Returns:
         Path to the created SLURM job file.
@@ -550,6 +622,8 @@ def write_slurm_job_file(
         run_cmd = "python run_sella.py > sella_driver.log 2>&1\n"
     else:
         run_cmd = f"{orca_path} {input_file}\n"
+    if preopt:
+        run_cmd = PREOPT_CMD + run_cmd
 
     lines = [
         "#!/bin/sh\n",
@@ -596,6 +670,7 @@ def write_slurm_sandia_job_file(
     openmpi_module: str = SANDIA_DEFAULT_OPENMPI_MODULE,
     input_file: str = "orca.inp",
     optimizer: str | None = None,
+    preopt: bool = False,
     job_name: str = "orca",
 ) -> Path:
     """Write a SLURM job submission script for Sandia CTS1/TLCC2 systems.
@@ -621,6 +696,7 @@ def write_slurm_sandia_job_file(
         openmpi_module: ``module load`` argument matching ORCA's shared build.
         input_file: ORCA input file name.
         optimizer: Optimizer engine ("orca", "sella", or None for single-point).
+        preopt: Run ``python run_preopt.py`` (g-xTB/MLIP pre-optimization) before the job command.
         job_name: Slurm job name.
 
     Returns:
@@ -645,6 +721,8 @@ def write_slurm_sandia_job_file(
         run_cmd = "python run_sella.py > sella_driver.log 2>&1\n"
     else:
         run_cmd = f"{orca_path} {input_file}\n"
+    if preopt:
+        run_cmd = PREOPT_CMD + run_cmd
 
     lines = [
         "#!/bin/bash\n",
@@ -693,6 +771,7 @@ def write_slurm_drac_job_file(
     mem_per_cpu: str | None = None,
     input_file: str = "orca.inp",
     optimizer: str | None = None,
+    preopt: bool = False,
     job_name: str = "orca",
 ) -> Path:
     """Write a SLURM job script for Digital Research Alliance of Canada clusters.
@@ -730,6 +809,7 @@ def write_slurm_drac_job_file(
             inflation.
         input_file: ORCA input file name.
         optimizer: Optimizer engine ("orca", "sella", or None for single-point).
+        preopt: Run ``python run_preopt.py`` (g-xTB/MLIP pre-optimization) before the job command.
         job_name: SLURM job name.
 
     Returns:
@@ -745,6 +825,11 @@ def write_slurm_drac_job_file(
             "the Sella driver runs `python run_sella.py` and needs the "
             "oact_utilities virtualenv. Pass --venv-path."
         )
+    if preopt and not venv_path:
+        raise ValueError(
+            "write_slurm_drac_job_file requires venv_path when preopt is set: "
+            "run_preopt.py needs the oact_utilities virtualenv. Pass --venv-path."
+        )
 
     job_dir_abs = job_dir.resolve()
     slurm_script = job_dir_abs / "slurm_job.sh"
@@ -753,6 +838,8 @@ def write_slurm_drac_job_file(
         run_cmd = "python run_sella.py > sella_driver.log 2>&1\n"
     else:
         run_cmd = f"{orca_bin} {input_file}\n"
+    if preopt:
+        run_cmd = PREOPT_CMD + run_cmd
 
     lines = [
         "#!/bin/bash\n",
@@ -903,6 +990,10 @@ def _skip_finished_on_disk(
             completed_ids.append(job.id)
         elif status == -1:
             failed_ids.append(job.id)
+            preopt_reason = preopt_failure(job_dir)
+            if preopt_reason:
+                failed_errors[job.id] = f"Pre-optimization failed: {preopt_reason}"
+                continue
             try:
                 log_file = pull_log_file(job_dir)
                 reason = parse_failure_reason(log_file)
@@ -942,6 +1033,69 @@ def _skip_finished_on_disk(
     return clean_jobs
 
 
+def filter_unsupported_preopt_elements(
+    jobs: list,
+    config: Mapping[str, Any],
+    skip_unsupported: bool = False,
+) -> list:
+    """Drop or reject jobs whose elements the configured pre-optimizer does not cover.
+
+    Uses the DB ``elements`` column only (no geometry load). Rows are never marked failed and
+    ``fail_count`` is never touched: unsupported rows stay ``to_run`` for another lane.
+
+    Args:
+        jobs: JobRecords ready for submission.
+        config: Merged ORCA config; ``preopt`` selects the coverage rule.
+        skip_unsupported: Skip unsupported rows and continue. When False, abort instead.
+
+    Returns:
+        ``jobs`` unchanged when no pre-optimizer is set, else the supported subset.
+
+    Raises:
+        UnsupportedElementsError: when unsupported rows exist and ``skip_unsupported`` is False.
+        ValueError: when ``preopt="mlip"`` has no ``mlip_checkpoint``.
+    """
+    method = config.get("preopt")
+    if not method:
+        return jobs
+    if method == "gxtb":
+        supported, label = gxtb_supported_elements(), "g-xTB"
+    else:
+        checkpoint = config.get("mlip_checkpoint")
+        if not checkpoint:
+            raise ValueError("preopt='mlip' requires mlip_checkpoint")
+        supported = get_supported_elements(str(checkpoint))
+        label = f"MLIP {Path(str(checkpoint)).name}"
+
+    kept: list = []
+    per_element: dict[str, int] = {}
+    n_bad = n_unknown = 0
+    for j in jobs:
+        if not j.elements:
+            n_unknown += 1
+            kept.append(j)  # the worker re-checks before loading the model
+            continue
+        missing = unsupported_elements(j.elements, supported)
+        if not missing:
+            kept.append(j)
+            continue
+        n_bad += 1
+        for el in missing:
+            per_element[el] = per_element.get(el, 0) + 1
+    if n_unknown:
+        print(f"Warning: {n_unknown} jobs have no elements recorded; not pre-checked")
+    if not n_bad:
+        return kept
+
+    breakdown = ", ".join(f"{el}: {n}" for el, n in per_element.items())
+    print(f"{n_bad} jobs contain elements {label} does not support ({breakdown})")
+    if not skip_unsupported:
+        print("Nothing submitted. Pass --skip-unsupported to skip these jobs.")
+        raise UnsupportedElementsError(per_element, label)
+    print("Skipping them (--skip-unsupported); they stay to_run")
+    return kept
+
+
 def filter_jobs_for_submission(
     workflow: ArchitectorWorkflow,
     num_jobs: int,
@@ -949,6 +1103,8 @@ def filter_jobs_for_submission(
     randomize: bool = True,
     max_atoms: int | None = None,
     min_atoms: int | None = None,
+    preopt_config: Mapping[str, Any] | None = None,
+    skip_unsupported: bool = False,
 ) -> list:
     """Filter jobs that are ready to submit.
 
@@ -962,6 +1118,9 @@ def filter_jobs_for_submission(
         min_atoms: If set, skip jobs with natoms < this value. Jobs below the
             floor are left for another lane. With max_atoms this selects the
             closed band [min_atoms, max_atoms].
+        preopt_config: When it sets ``preopt``, rows with elements the pre-optimizer does
+            not cover are rejected (see ``filter_unsupported_preopt_elements``).
+        skip_unsupported: Skip such rows instead of aborting.
 
     Returns:
         List of JobRecords ready for submission
@@ -1004,6 +1163,11 @@ def filter_jobs_for_submission(
             print(f"Skipped {under_floor} jobs with natoms < {min_atoms}")
         if missing > 0:
             print(f"Skipped {missing} jobs with missing (NULL) natoms")
+
+    if preopt_config:
+        ready_jobs = filter_unsupported_preopt_elements(
+            ready_jobs, preopt_config, skip_unsupported
+        )
 
     # Limit to requested count
     if randomize:
@@ -1088,6 +1252,59 @@ if PARSL_AVAILABLE:
             stdout_path = job_dir_path / "orca.out"
             stderr_path = job_dir_path / "orca.err"
 
+        # --- Optional g-xTB / MLIP pre-optimization (rewrites orca.inp coordinates) ---
+        orca_timeout: float = timeout_seconds
+        if orca_config.get("preopt"):
+            import json
+            import sys
+
+            preopt_script = job_dir_path / "run_preopt.py"
+            if not preopt_script.exists():
+                return {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": f"Pre-opt script not found: {preopt_script}",
+                }
+            pre_env = os.environ.copy()
+            pre_env.pop("GOMP_CPU_AFFINITY", None)
+            pre_env.pop("KMP_AFFINITY", None)
+            pre_start = time.time()
+            with open(job_dir_path / "preopt_driver.log", "w") as pre_log:
+                # New session so a timeout kills the shim and its xtb child together.
+                pre_proc = subprocess.Popen(
+                    [sys.executable, str(preopt_script)],
+                    cwd=job_dir,
+                    env=pre_env,
+                    stdout=pre_log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                try:
+                    pre_rc = pre_proc.wait(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(pre_proc.pid), signal.SIGKILL)
+                    pre_proc.wait()
+                    return {
+                        "job_id": job_id,
+                        "status": "failed",
+                        "error": f"Pre-optimization timed out after {timeout_seconds}s",
+                    }
+            # The pre-opt and ORCA share one --job-timeout budget.
+            orca_timeout = max(1.0, timeout_seconds - (time.time() - pre_start))
+            if pre_rc != 0:
+                reason = ""
+                try:
+                    reason = json.loads(
+                        (job_dir_path / "preopt_status.json").read_text()
+                    ).get("error", "")
+                except (OSError, ValueError):
+                    pass
+                return {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": f"Pre-optimization failed: {reason or 'see preopt_driver.log'}",
+                }
+
         # --- Environment isolation for concurrent ORCA instances ---
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = "1"
@@ -1145,7 +1362,7 @@ if PARSL_AVAILABLE:
             )
 
             try:
-                proc.wait(timeout=timeout_seconds)
+                proc.wait(timeout=orca_timeout)
             except subprocess.TimeoutExpired:
                 # Kill the entire process group (ORCA + mpirun + orca_main workers)
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -2247,6 +2464,7 @@ def submit_batch_parsl(
     max_fail_count: int | None = None,
     max_atoms: int | None = None,
     min_atoms: int | None = None,
+    skip_unsupported: bool = False,
     timeout_seconds: int = 72000,
     randomize: bool = True,
     nodes_per_block: int = 1,
@@ -2292,6 +2510,8 @@ def submit_batch_parsl(
         max_fail_count: Skip jobs with fail_count >= this value
         max_atoms: If set, only submit molecules with natoms <= this value
         min_atoms: If set, only submit molecules with natoms >= this value
+        skip_unsupported: With a pre-optimizer, skip jobs whose elements it does not cover
+            instead of aborting.
         timeout_seconds: Job timeout in seconds (default: 72000 = 20 hours)
         randomize: Randomize job selection order (default: True)
         nodes_per_block: Nodes per scheduler block for scale-out Parsl.
@@ -2378,6 +2598,8 @@ def submit_batch_parsl(
         randomize=randomize,
         max_atoms=max_atoms,
         min_atoms=min_atoms,
+        preopt_config=config,
+        skip_unsupported=skip_unsupported,
     )
 
     if not jobs_to_submit:
@@ -2785,6 +3007,7 @@ def submit_batch_parsl(
                                 "wall_time": wall_time,
                                 "n_cores": n_cores_val,
                             }
+                            metrics_dict.update(preopt_db_fields(job_dir))
                             if GENERATOR_AVAILABLE:
                                 try:
                                     gen_data = parse_generator_data(job_dir)
@@ -2988,6 +3211,7 @@ def submit_batch(
     max_fail_count: int | None = None,
     max_atoms: int | None = None,
     min_atoms: int | None = None,
+    skip_unsupported: bool = False,
     randomize: bool = True,
     reroot: bool = False,
     site: str = "default",
@@ -3018,6 +3242,8 @@ def submit_batch(
         max_fail_count: If specified, skip jobs with fail_count >= this value.
         max_atoms: If set, only submit molecules with natoms <= this value.
         min_atoms: If set, only submit molecules with natoms >= this value.
+        skip_unsupported: With a pre-optimizer, skip jobs whose elements it does not cover
+            instead of aborting.
         randomize: Randomize job selection order (default: True).
         reroot: If True, ignore job_dir paths stored in the database and
             always construct paths from root_dir + job_dir_pattern. Useful
@@ -3071,6 +3297,8 @@ def submit_batch(
         randomize=randomize,
         max_atoms=max_atoms,
         min_atoms=min_atoms,
+        preopt_config=config,
+        skip_unsupported=skip_unsupported,
     )
 
     if not jobs_to_submit:
@@ -3159,6 +3387,7 @@ def submit_batch(
                     orca_path=orca_path,
                     conda_env=conda_env,
                     optimizer=optimizer,
+                    preopt=bool(config.get("preopt")),
                     ld_library_path=ld_library_path,
                 )
                 submit_cmd = ["flux", "batch", job_script.name]
@@ -3175,6 +3404,7 @@ def submit_batch(
                         orca_path=orca_path,
                         openmpi_module=openmpi_module,
                         optimizer=optimizer,
+                        preopt=bool(config.get("preopt")),
                     )
                 elif site.lower() == "drac":
                     job_script = write_slurm_drac_job_file(
@@ -3186,6 +3416,7 @@ def submit_batch(
                         venv_path=venv_path,
                         mem_per_cpu=mem_per_cpu,
                         optimizer=optimizer,
+                        preopt=bool(config.get("preopt")),
                     )
                 else:
                     job_script = write_slurm_job_file(
@@ -3197,6 +3428,7 @@ def submit_batch(
                         orca_path=orca_path,
                         conda_env=conda_env,
                         optimizer=optimizer,
+                        preopt=bool(config.get("preopt")),
                         ld_library_path=ld_library_path,
                     )
                 submit_cmd = ["sbatch", job_script.name]
@@ -3631,6 +3863,56 @@ def main():
         help="Save all ORCA output files per Sella step into step_NNN/ directories (only with --optimizer sella).",
     )
     orca_group.add_argument(
+        "--preopt",
+        choices=["gxtb", "mlip"],
+        default=None,
+        help="Pre-optimize each geometry before the ORCA step: g-xTB (xtb --gxtb) or an MLIP "
+        "(fairchem). Default: off.",
+    )
+    orca_group.add_argument(
+        "--preopt-fmax",
+        type=float,
+        default=0.05,
+        help="Pre-optimizer force threshold in eV/Angstrom. Default: 0.05.",
+    )
+    orca_group.add_argument(
+        "--preopt-max-steps",
+        type=int,
+        default=200,
+        help="Maximum pre-optimizer steps (xtb ANCopt cycles / LBFGS steps). Default: 200.",
+    )
+    orca_group.add_argument(
+        "--gxtb-path",
+        type=str,
+        default="xtb",
+        help="g-xTB build of the xtb executable (only with --preopt gxtb). Default: xtb on PATH.",
+    )
+    orca_group.add_argument(
+        "--mlip-checkpoint",
+        type=str,
+        default=None,
+        help="OAct .pt checkpoint path or fairchem registry name (required with --preopt mlip).",
+    )
+    orca_group.add_argument(
+        "--mlip-device",
+        choices=["cpu", "cuda"],
+        default="cpu",
+        help="Device for --preopt mlip. Default: cpu.",
+    )
+    orca_group.add_argument(
+        "--preopt-on-fail",
+        choices=["fail", "continue"],
+        default="fail",
+        help="If the pre-optimization fails: 'fail' stops the job before ORCA (default); "
+        "'continue' runs ORCA on the raw geometry and records the error.",
+    )
+    orca_group.add_argument(
+        "--skip-unsupported",
+        action="store_true",
+        help="With --preopt, skip jobs whose elements the pre-optimizer does not cover "
+        "(they stay to_run) instead of aborting before any submission.",
+    )
+    orca_group.add_argument(
         "--ks-method",
         type=str,
         choices=["rks", "uks", "roks"],
@@ -3738,6 +4020,19 @@ def main():
         parser.error("--fmax is only valid with --optimizer sella")
     if args.save_all_steps and args.optimizer != "sella":
         parser.error("--save-all-steps is only valid with --optimizer sella")
+    if args.preopt == "mlip" and not args.mlip_checkpoint:
+        parser.error("--preopt mlip requires --mlip-checkpoint")
+    if args.preopt is None and (
+        args.mlip_checkpoint
+        or args.skip_unsupported
+        or args.preopt_on_fail != "fail"
+        or args.preopt_fmax != 0.05
+        or args.preopt_max_steps != 200
+    ):
+        parser.error(
+            "--mlip-checkpoint/--skip-unsupported/--preopt-on-fail/--preopt-fmax/"
+            "--preopt-max-steps require --preopt"
+        )
     if args.optimizer == "sella" and args.opt_level != "normal":
         parser.error("--opt-level is only valid with --optimizer orca")
     if args.optimizer is None and args.opt_level != "normal":
@@ -3771,6 +4066,13 @@ def main():
         "trah": args.trah,
         "ks_method": args.ks_method,
         "mem_per_job_mb": args.mem_per_job,
+        "preopt": args.preopt,
+        "preopt_fmax": args.preopt_fmax,
+        "preopt_max_steps": args.preopt_max_steps,
+        "gxtb_path": args.gxtb_path,
+        "mlip_checkpoint": args.mlip_checkpoint,
+        "mlip_device": args.mlip_device,
+        "preopt_on_fail": args.preopt_on_fail,
     }
     if args.orca_path:
         orca_config["orca_path"] = args.orca_path
@@ -3837,6 +4139,7 @@ def main():
             max_fail_count=args.max_fail_count,
             max_atoms=args.max_atoms,
             min_atoms=args.min_atoms,
+            skip_unsupported=args.skip_unsupported,
             timeout_seconds=args.job_timeout,
             randomize=True,
             cpus_per_node=args.cpus_per_node,
@@ -3875,6 +4178,7 @@ def main():
             max_fail_count=args.max_fail_count,
             max_atoms=args.max_atoms,
             min_atoms=args.min_atoms,
+            skip_unsupported=args.skip_unsupported,
             randomize=True,
             reroot=args.reroot,
             site=args.hpc_site,

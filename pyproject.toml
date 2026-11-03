@@ -104,3 +104,7 @@ exclude = [
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
+markers = [
+    "gxtb: needs a g-xTB xtb binary (GXTB_PATH or PATH); skipped when absent",
+    "mlip: needs a fairchem checkpoint or registry model; skipped when absent",
+]

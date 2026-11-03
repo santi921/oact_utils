@@ -66,6 +66,17 @@ _QUALITY_COLUMNS = (
     "orca_parser_version",
 )
 
+# Pre-optimization (g-xTB / MLIP) outcome, read from preopt_status.json by
+# core.preopt._common.preopt_db_fields. Present only for jobs that ran with --preopt.
+_PREOPT_COLUMNS = (
+    "preopt_method",
+    "preopt_converged",
+    "preopt_fmax",
+    "preopt_energy_ev",
+    "preopt_rmsd",
+    "preopt_seconds",
+)
+
 # Every column a job-metrics writer may set. update_job_metrics_bulk and
 # submit_jobs._write_job_update both iterate this one tuple, so a column added
 # here reaches both writers; two hand-kept lists is how generator_data was once
@@ -81,6 +92,7 @@ _METRIC_COLUMNS = (
     "generator_data",
     "n_basis",
     *_QUALITY_COLUMNS,
+    *_PREOPT_COLUMNS,
 )
 
 
@@ -265,6 +277,13 @@ class ArchitectorWorkflow:
             "homo_lumo_gap_beta": "ALTER TABLE structures ADD COLUMN homo_lumo_gap_beta REAL DEFAULT NULL",
             "exchange_deviation": "ALTER TABLE structures ADD COLUMN exchange_deviation INTEGER DEFAULT NULL",
             "orca_parser_version": "ALTER TABLE structures ADD COLUMN orca_parser_version INTEGER DEFAULT NULL",
+            # Pre-optimization outcome (eV, eV/Angstrom, Angstrom, s)
+            "preopt_method": "ALTER TABLE structures ADD COLUMN preopt_method TEXT DEFAULT NULL",
+            "preopt_converged": "ALTER TABLE structures ADD COLUMN preopt_converged INTEGER DEFAULT NULL",
+            "preopt_fmax": "ALTER TABLE structures ADD COLUMN preopt_fmax REAL DEFAULT NULL",
+            "preopt_energy_ev": "ALTER TABLE structures ADD COLUMN preopt_energy_ev REAL DEFAULT NULL",
+            "preopt_rmsd": "ALTER TABLE structures ADD COLUMN preopt_rmsd REAL DEFAULT NULL",
+            "preopt_seconds": "ALTER TABLE structures ADD COLUMN preopt_seconds REAL DEFAULT NULL",
         }
         for col_name, alter_sql in migrations.items():
             if col_name not in existing_cols:

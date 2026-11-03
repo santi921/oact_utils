@@ -336,6 +336,12 @@ The SQLite database tracks each structure with:
 | `n_cores`       | INTEGER   | Number of CPU cores used                                                               |
 | `n_basis`       | INTEGER   | Basis-function count (derived from`elements`; drives memory/worker sizing)           |
 | `worker_id`     | TEXT      | Scheduler job ID (SLURM/Flux) for crash recovery                                       |
+| `preopt_method`    | TEXT    | Pre-optimizer used (`gxtb` or `mlip`); NULL when `--preopt` was not used               |
+| `preopt_converged` | INTEGER | 1 when the pre-opt reached `--preopt-fmax`, else 0                                     |
+| `preopt_fmax`      | REAL    | Measured largest per-atom force after the pre-opt (eV/Angstrom)                        |
+| `preopt_energy_ev` | REAL    | Pre-optimizer energy (eV); g-xTB or MLIP, not comparable with ORCA energies            |
+| `preopt_rmsd`      | REAL    | RMSD between input and pre-optimized geometry (Angstrom)                               |
+| `preopt_seconds`   | REAL    | Pre-optimization wall time (s)                                                         |
 | `created_at`    | TIMESTAMP | Creation time                                                                          |
 | `updated_at`    | TIMESTAMP | Last update time                                                                       |
 
@@ -633,6 +639,21 @@ with ArchitectorWorkflow("workflow.db") as workflow:
     )
 ```
 
+## Pre-optimization (g-xTB or MLIP)
+
+`--preopt gxtb` or `--preopt mlip --mlip-checkpoint <path or registry name>` relaxes each geometry on the compute
+worker before the ORCA step (single point, ORCA opt, or Sella). Off by default.
+
+```bash
+python -m oact_utilities.workflows.submit_jobs workflow.db jobs/ --use-parsl \
+    --preopt gxtb --gxtb-path /path/to/xtb --orca-path /path/to/orca
+```
+
+Rows with elements the pre-optimizer cannot handle abort the submit before any job is prepared, or are skipped with
+`--skip-unsupported`. A failed pre-opt stops the job before ORCA unless `--preopt-on-fail continue`. See
+[docs/preopt.md](../../docs/preopt.md) for element coverage, the files written per job, the `preopt_*` DB columns,
+installing g-xTB, and how the native tests are stratified.
+
 ## Custom Job Setup
 
 You can provide a custom setup function for additional files:
@@ -856,6 +877,7 @@ python -m oact_utilities.workflows.clean workflow.db jobs/ --clean-all --purge-f
 - `*.tmp`, `*.tmp.[N]` -- ORCA intermediate scratch files
 - `orca_tmp_*/` directories -- Parsl temp directories
 - `core`, `core.[N]`, `*.core` -- crash dump files
+- `preopt_gxtb/` directory -- g-xTB pre-optimization scratch (`preopt.xyz` and `preopt_status.json` are kept)
 
 **`--clean-bas` (Basis Set):**
 
