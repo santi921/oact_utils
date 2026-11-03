@@ -33,6 +33,36 @@ def test_generator_only_reports_gzip_only_dir(tmp_path):
     assert not (job / "generator_metrics.json").exists()
 
 
+def test_generator_only_records_exception_instead_of_raising(monkeypatch, tmp_path):
+    def boom(_):
+        raise OSError("EIO")
+
+    monkeypatch.setattr(emm, "find_orca_output_file", boom)
+    result = emm.process_job(tmp_path, tmp_path, None, False, True, False, 6.0, True)
+    assert result["generator_ok"] is False
+    assert result["error"] == "generator: EIO"
+
+
+def test_generator_only_honours_output_root(monkeypatch, tmp_path):
+    src, mirror = tmp_path / "src", tmp_path / "mirror"
+    job = src / "job_0"
+    job.mkdir(parents=True)
+
+    def write_dest(job_dir, dest_file, recompute):
+        dest_file.write_text("{}")
+        return True
+
+    def no_source_write(*args, **kwargs):
+        raise AssertionError("wrote into the source tree")
+
+    monkeypatch.setattr(emm, "_generator_to_path", write_dest)
+    monkeypatch.setattr(emm, "parse_generator_data", no_source_write)
+    result = emm.process_job(job, src, mirror, False, True, False, 6.0, True)
+    assert result["generator_ok"] is True and result["error"] is None
+    assert (mirror / "job_0" / "generator_metrics.json").exists()
+    assert list(job.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     "argv",
     [

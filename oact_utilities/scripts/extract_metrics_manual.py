@@ -126,12 +126,24 @@ def process_job(
     # Trusts the caller's selection (e.g. census status == completed) instead of
     # re-deriving success from orca_metrics, so only orca.out is read.
     if generator_only:
-        if find_orca_output_file is None or not find_orca_output_file(str(job_dir)):
-            result["error"] = "generator: no orca.out/output.out (gzip-only?)"
+        try:
+            if output_root is not None:
+                dest = _mirrored_dir(job_dir, source_root, output_root)
+                result["generator_ok"] = _generator_to_path(
+                    job_dir, dest / "generator_metrics.json", recompute
+                )
+            elif find_orca_output_file is None or not find_orca_output_file(
+                str(job_dir)
+            ):
+                result["error"] = "generator: no orca.out/output.out (gzip-only?)"
+                return result
+            else:
+                result["generator_ok"] = (
+                    parse_generator_data(job_dir, recompute=recompute) is not None
+                )
+        except Exception as exc:
+            result["error"] = f"generator: {exc}"
             return result
-        result["generator_ok"] = (
-            parse_generator_data(job_dir, recompute=recompute) is not None
-        )
         if not result["generator_ok"]:
             result["error"] = "generator: parse failed"
         return result
